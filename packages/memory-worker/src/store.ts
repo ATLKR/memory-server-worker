@@ -116,36 +116,85 @@ export class MemoryStore {
     return cursor.toArray().map(rowToEntry);
   }
 
-  /** Full-text search across memory content. */
+  /**
+   * Full-text search across memory content.
+   *
+   * Uses FTS5 with an OR-based query so that memories matching *any* of the
+   * query terms are returned (ranked by relevance). If FTS5 returns nothing
+   * (e.g. the query contained no indexed tokens), falls back to a LIKE
+   * search on the content column.
+   */
   search(query: string, opts: { namespace?: string; limit?: number }): MemoryEntry[] {
     const limit = opts.limit ?? 10;
     const ftsQuery = sanitizeFtsQuery(query);
-    if (!ftsQuery) return [];
 
-    let sql: string;
-    const binds: (string | number)[] = [ftsQuery];
+    if (ftsQuery) {
+      let sql: string;
+      const binds: (string | number)[] = [ftsQuery];
 
-    if (opts.namespace) {
-      sql = `
-        SELECT m.* FROM memories_fts f
-        JOIN memories m ON m.id = f.id
-        WHERE memories_fts MATCH ? AND m.namespace = ?
-        ORDER BY rank
-        LIMIT ?
-      `;
-      binds.push(opts.namespace, limit);
-    } else {
-      sql = `
-        SELECT m.* FROM memories_fts f
-        JOIN memories m ON m.id = f.id
-        WHERE memories_fts MATCH ?
-        ORDER BY rank
-        LIMIT ?
-      `;
-      binds.push(limit);
+      if (opts.namespace) {
+        sql = `
+          SELECT m.* FROM memories_fts f
+          JOIN memories m ON m.id = f.id
+          WHERE memories_fts MATCH ? AND m.namespace = ?
+          ORDER BY rank
+          LIMIT ?
+        `;
+        binds.push(opts.namespace, limit);
+      } else {
+        sql = `
+          SELECT m.* FROM memories_fts f
+          JOIN memories m ON m.id = f.id
+          WHERE memories_fts MATCH ?
+          ORDER BY rank
+          LIMIT ?
+        `;
+        binds.push(limit);
+      }
+
+      const cursor = this.sql.exec<MemoryRow>(sql, ...binds);
+      const results = cursor.toArray().map(rowToEntry);
+      if (results.length > 0) return results;
     }
 
-    const cursor = this.sql.exec<MemoryRow>(sql, ...binds);
+    // Fallback: LIKE search on content for queries that FTS5 can't handle
+    // (e.g. very long natural language with no matching tokens, or queries
+    // with only short stopwords).
+    return this.likeSearch(query, opts, limit);
+  }
+
+  /** LIKE-based fallback search on content, key, and tags. */
+  private likeSearch(
+    query: string,
+    opts: { namespace?: string; limit?: number },
+    limit: number,
+  ): MemoryEntry[] {
+    const conditions: string[] = [];
+    const binds: (string | number)[] = [];
+
+    // Extract the most significant terms (length >= 3) for LIKE search.
+    const terms = extractSignificantTerms(query);
+    if (terms.length === 0) return [];
+
+    // Build OR conditions for each term against content + key.
+    const orParts: string[] = [];
+    for (const term of terms.slice(0, 5)) {
+      orParts.push("content LIKE ?");
+      binds.push(`%${escapeLike(term)}%`);
+    }
+    conditions.push(`(${orParts.join(" OR ")})`);
+
+    if (opts.namespace) {
+      conditions.push("namespace = ?");
+      binds.push(opts.namespace);
+    }
+    binds.push(limit);
+
+    const where = `WHERE ${conditions.join(" AND ")}`;
+    const cursor = this.sql.exec<MemoryRow>(
+      `SELECT * FROM memories ${where} ORDER BY updated_at DESC LIMIT ?`,
+      ...binds,
+    );
     return cursor.toArray().map(rowToEntry);
   }
 
@@ -248,14 +297,73 @@ function escapeLike(s: string): string {
   return s.replace(/[%_\\]/g, (c) => "\\" + c);
 }
 
-/** Sanitize a user query for FTS5 MATCH. Wraps tokens in quotes. */
+/**
+ * Sanitize a user query for FTS5 MATCH.
+ *
+ * Strategy:
+ *   - Strip FTS5 special characters that would be interpreted as operators
+ *     (hyphens become NOT, colons become column filters, etc.).
+ *   - Split into tokens, filter out very short tokens (< 2 chars) and
+ *     common English stopwords.
+ *   - Wrap each token in double-quotes so FTS5 treats it as a literal
+ *     string (no operator interpretation).
+ *   - Join with OR so that memories matching *any* term are returned,
+ *     ranked by relevance. This is critical for long natural-language
+ *     queries where an AND of all terms would almost never match.
+ *   - Cap at 20 tokens to avoid overly broad queries.
+ */
 function sanitizeFtsQuery(query: string): string {
   const trimmed = query.trim();
   if (!trimmed) return "";
-  const tokens = trimmed.split(/\s+/).filter(Boolean);
+
+  // Remove FTS5 operator characters: - : * ( ) " ^ + AND OR NOT NEAR
+  // Replace them with spaces so tokens split cleanly.
+  const cleaned = trimmed.replace(/[-:*()+"^]/g, " ");
+
+  const tokens = cleaned
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((t) => t.length >= 2)
+    .filter((t) => !STOPWORDS.has(t.toLowerCase()));
+
   if (tokens.length === 0) return "";
-  return tokens.map((t) => `"${t.replace(/"/g, '""')}"`).join(" ");
+
+  // OR query: match any token, ranked by how many match.
+  const quoted = tokens
+    .slice(0, 20)
+    .map((t) => `"${t.replace(/"/g, '""')}"`);
+  return quoted.join(" OR ");
 }
+
+/**
+ * Extract the most significant terms from a query for LIKE fallback search.
+ * Returns terms of length >= 3, with stopwords removed, capped at 10.
+ */
+function extractSignificantTerms(query: string): string[] {
+  const cleaned = query.replace(/[-:*()+"^]/g, " ");
+  return cleaned
+    .split(/\s+/)
+    .filter(Boolean)
+    .filter((t) => t.length >= 3)
+    .filter((t) => !STOPWORDS.has(t.toLowerCase()))
+    .slice(0, 10);
+}
+
+/** Common English stopwords to filter out of search queries. */
+const STOPWORDS = new Set([
+  "a", "an", "the", "and", "or", "but", "is", "are", "was", "were",
+  "be", "been", "being", "have", "has", "had", "do", "does", "did",
+  "will", "would", "could", "should", "may", "might", "must", "can",
+  "this", "that", "these", "those", "i", "you", "he", "she", "it",
+  "we", "they", "what", "which", "who", "when", "where", "why", "how",
+  "all", "each", "every", "both", "few", "more", "most", "other",
+  "some", "such", "no", "nor", "not", "only", "own", "same", "so",
+  "than", "too", "very", "just", "of", "in", "on", "at", "to", "for",
+  "with", "about", "as", "by", "from", "up", "out", "if", "my", "me",
+  "let", "get", "got", "want", "need", "like", "also", "into", "via",
+  "use", "using", "used", "them", "then", "here", "there", "now",
+  "any", "one", "two", "our", "us", "your", "his", "her", "its",
+]);
 
 /** Merge metadata patches. Null values remove keys. */
 function mergeMetadata(
