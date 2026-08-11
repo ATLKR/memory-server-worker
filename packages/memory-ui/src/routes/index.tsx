@@ -76,7 +76,7 @@ function HomeComponent() {
       <div className="login-prompt">
         <h2>Memory</h2>
         <p>Personal persistent memory across AI agents.</p>
-        <a href="/auth/sso" className="btn btn-primary">
+        <a href="/auth/sso?ui=1" className="btn btn-primary">
           Sign in with Allen Labs SSO
         </a>
       </div>

@@ -452,6 +452,8 @@ function createServer(env: Env, scope: string): McpServer {
 
 const AUTH_WEB_URL_DEFAULT = "https://auth.allen.company";
 const SSO_STATE_COOKIE = "memory_sso_state";
+const SSO_UI_FLOW_COOKIE = "memory_sso_ui";
+const SSO_TOKEN_COOKIE = "memory_token";
 const SSO_STATE_MAX_AGE = 600; // 10 minutes
 
 /**
@@ -472,6 +474,11 @@ async function handleSsoStart(env: Env, requestUrl: URL): Promise<Response> {
   const authWebUrl = (env.AUTH_WEB_URL || AUTH_WEB_URL_DEFAULT).replace(/\/$/, "");
   const state = generateState();
 
+  // Detect UI flow: /auth/sso?ui=1 means the browser is logging in
+  // through the web UI (not the CLI). The callback will set a token
+  // cookie and redirect to / instead of returning raw JSON.
+  const isUiFlow = requestUrl.searchParams.get("ui") === "1";
+
   // Build the callback URL with state param. We include state in return_to
   // so auth-web can pass it back (if it preserves query params). The cookie
   // is the primary validation mechanism.
@@ -479,13 +486,19 @@ async function handleSsoStart(env: Env, requestUrl: URL): Promise<Response> {
   const signInUrl = `${authWebUrl}/sign-in?return_to=${encodeURIComponent(callbackUrl)}`;
 
   const redirect = Response.redirect(signInUrl, 302);
-  // Set state cookie on the redirect response. We need to clone the
-  // redirect and add the Set-Cookie header.
   const headers = new Headers(redirect.headers);
+  // State cookie (CSRF protection) — always set.
   headers.append(
     "Set-Cookie",
     `${SSO_STATE_COOKIE}=${state}; HttpOnly; Secure; SameSite=Lax; Max-Age=${SSO_STATE_MAX_AGE}; Path=/auth`,
   );
+  // UI flow flag — only set when ?ui=1 is present.
+  if (isUiFlow) {
+    headers.append(
+      "Set-Cookie",
+      `${SSO_UI_FLOW_COOKIE}=1; HttpOnly; Secure; SameSite=Lax; Max-Age=${SSO_STATE_MAX_AGE}; Path=/auth`,
+    );
+  }
   return new Response(redirect.body, {
     status: redirect.status,
     statusText: redirect.statusText,
@@ -498,6 +511,12 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
   const cookieHeader = request.headers.get("cookie") ?? "";
   const stateCookie = parseCookie(cookieHeader, SSO_STATE_COOKIE);
   const stateParam = requestUrl.searchParams.get("state");
+  const isUiFlow = parseCookie(cookieHeader, SSO_UI_FLOW_COOKIE) === "1";
+
+  // Cookies to clear on any exit path (state + ui flow flag).
+  const clearStateCookie = `${SSO_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`;
+  const clearUiFlowCookie = `${SSO_UI_FLOW_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`;
+  const clearAllCookies = [clearStateCookie, clearUiFlowCookie];
 
   if (!stateCookie) {
     return new Response(
@@ -506,7 +525,10 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
       }),
       {
         status: 400,
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "Set-Cookie": clearAllCookies.join(", "),
+        },
       },
     );
   }
@@ -521,7 +543,7 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
         status: 400,
         headers: {
           "content-type": "application/json",
-          "Set-Cookie": `${SSO_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`,
+          "Set-Cookie": clearAllCookies.join(", "),
         },
       },
     );
@@ -531,7 +553,10 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
   if (!code) {
     return new Response(JSON.stringify({ error: "missing code parameter" }), {
       status: 400,
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "Set-Cookie": clearAllCookies.join(", "),
+      },
     });
   }
 
@@ -539,7 +564,10 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
   if (!authApiUrl) {
     return new Response(JSON.stringify({ error: "AUTH_API_URL not configured" }), {
       status: 500,
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "Set-Cookie": clearAllCookies.join(", "),
+      },
     });
   }
 
@@ -562,9 +590,6 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
     | { error?: string }
     | null;
 
-  // Clear the state cookie regardless of exchange result.
-  const clearCookieHeader = `${SSO_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`;
-
   if (!exchangeRes.ok || !exchange || !("token" in exchange) || !exchange.token) {
     const error =
       exchange && "error" in exchange ? exchange.error : `SSO exchange failed (${exchangeRes.status})`;
@@ -572,24 +597,40 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
       status: exchangeRes.status === 400 ? 400 : 502,
       headers: {
         "content-type": "application/json",
-        "Set-Cookie": clearCookieHeader,
+        "Set-Cookie": clearAllCookies.join(", "),
       },
     });
   }
 
-  // Return the JWT + user info as JSON. The CLI captures this and stores
-  // the token locally for subsequent MCP calls.
+  const token = exchange.token;
+  const expiresIn = exchange.expires_in ?? 8 * 60 * 60;
+
+  // --- UI flow: set token cookie + redirect to / ---
+  // The token cookie is non-HttpOnly so the UI's JavaScript can read it
+  // and move it to sessionStorage. The UI deletes the cookie after reading.
+  if (isUiFlow) {
+    const tokenCookie = `${SSO_TOKEN_COOKIE}=${token}; Secure; SameSite=Lax; Max-Age=60; Path=/`;
+    const headers = new Headers();
+    headers.set("Location", "/");
+    headers.set("Set-Cookie", [tokenCookie, ...clearAllCookies].join(", "));
+    return new Response(null, {
+      status: 302,
+      headers,
+    });
+  }
+
+  // --- CLI flow: return JSON (existing behavior) ---
   return new Response(
     JSON.stringify({
-      token: exchange.token,
-      expires_in: exchange.expires_in ?? 8 * 60 * 60,
+      token,
+      expires_in: expiresIn,
       user: exchange.user,
     }),
     {
       status: 200,
       headers: {
         "content-type": "application/json",
-        "Set-Cookie": clearCookieHeader,
+        "Set-Cookie": clearAllCookies.join(", "),
       },
     },
   );

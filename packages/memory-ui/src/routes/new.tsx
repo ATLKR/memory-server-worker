@@ -19,7 +19,7 @@ function NewMemoryComponent() {
     return (
       <div className="login-prompt">
         <p>Please sign in to create memories.</p>
-        <a href="/auth/sso" className="btn btn-primary">Sign in</a>
+        <a href="/auth/sso?ui=1" className="btn btn-primary">Sign in</a>
       </div>
     );
   }

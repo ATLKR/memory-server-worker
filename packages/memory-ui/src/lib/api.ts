@@ -37,11 +37,31 @@ export interface StatsResponse {
  */
 
 function getToken(): string | null {
+  // First check sessionStorage (the normal storage location).
+  let token: string | null = null;
   try {
-    return sessionStorage.getItem("memory_token");
+    token = sessionStorage.getItem("memory_token");
   } catch {
-    return null;
+    // ignore
   }
+
+  // If not in sessionStorage, check for a transfer cookie set by /auth/callback
+  // during the UI SSO flow. Move it to sessionStorage and delete the cookie.
+  if (!token && typeof document !== "undefined") {
+    const match = document.cookie.match(/(?:^|;\s*)memory_token=([^;]+)/);
+    if (match?.[1]) {
+      token = match[1];
+      try {
+        sessionStorage.setItem("memory_token", token);
+        // Delete the transfer cookie (Max-Age=0).
+        document.cookie = "memory_token=; Max-Age=0; Path=/; SameSite=Lax";
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  return token;
 }
 
 export function setToken(token: string, expiresAt?: string): void {
@@ -72,7 +92,6 @@ export function isLoggedIn(): boolean {
   }
   return true;
 }
-
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const token = getToken();
   const headers = new Headers(init?.headers);
