@@ -516,20 +516,28 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
   // Cookies to clear on any exit path (state + ui flow flag).
   const clearStateCookie = `${SSO_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`;
   const clearUiFlowCookie = `${SSO_UI_FLOW_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`;
-  const clearAllCookies = [clearStateCookie, clearUiFlowCookie];
+
+  // Build a JSON error response with cookie-clearing headers.
+  // Each Set-Cookie MUST be a separate header (appended, not joined).
+  function errorResponse(
+    body: string,
+    status: number,
+    cookies: string[] = [clearStateCookie, clearUiFlowCookie],
+  ): Response {
+    const headers = new Headers();
+    headers.set("content-type", "application/json");
+    for (const c of cookies) {
+      headers.append("Set-Cookie", c);
+    }
+    return new Response(body, { status, headers });
+  }
 
   if (!stateCookie) {
-    return new Response(
+    return errorResponse(
       JSON.stringify({
         error: "missing state cookie — start the login flow from /auth/sso",
       }),
-      {
-        status: 400,
-        headers: {
-          "content-type": "application/json",
-          "Set-Cookie": clearAllCookies.join(", "),
-        },
-      },
+      400,
     );
   }
 
@@ -537,38 +545,20 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
   // the cookie. If state param is absent, the cookie alone proves the
   // flow started from /auth/sso.
   if (stateParam && stateParam !== stateCookie) {
-    return new Response(
+    return errorResponse(
       JSON.stringify({ error: "state mismatch — possible CSRF attempt" }),
-      {
-        status: 400,
-        headers: {
-          "content-type": "application/json",
-          "Set-Cookie": clearAllCookies.join(", "),
-        },
-      },
+      400,
     );
   }
 
   const code = requestUrl.searchParams.get("code");
   if (!code) {
-    return new Response(JSON.stringify({ error: "missing code parameter" }), {
-      status: 400,
-      headers: {
-        "content-type": "application/json",
-        "Set-Cookie": clearAllCookies.join(", "),
-      },
-    });
+    return errorResponse(JSON.stringify({ error: "missing code parameter" }), 400);
   }
 
   const authApiUrl = (env.AUTH_API_URL ?? "").replace(/\/$/, "");
   if (!authApiUrl) {
-    return new Response(JSON.stringify({ error: "AUTH_API_URL not configured" }), {
-      status: 500,
-      headers: {
-        "content-type": "application/json",
-        "Set-Cookie": clearAllCookies.join(", "),
-      },
-    });
+    return errorResponse(JSON.stringify({ error: "AUTH_API_URL not configured" }), 500);
   }
 
   // The client_id must match the origin the code was minted for.
@@ -593,13 +583,10 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
   if (!exchangeRes.ok || !exchange || !("token" in exchange) || !exchange.token) {
     const error =
       exchange && "error" in exchange ? exchange.error : `SSO exchange failed (${exchangeRes.status})`;
-    return new Response(JSON.stringify({ error }), {
-      status: exchangeRes.status === 400 ? 400 : 502,
-      headers: {
-        "content-type": "application/json",
-        "Set-Cookie": clearAllCookies.join(", "),
-      },
-    });
+    return errorResponse(
+      JSON.stringify({ error }),
+      exchangeRes.status === 400 ? 400 : 502,
+    );
   }
 
   const token = exchange.token;
@@ -612,27 +599,20 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
     const tokenCookie = `${SSO_TOKEN_COOKIE}=${token}; Secure; SameSite=Lax; Max-Age=60; Path=/`;
     const headers = new Headers();
     headers.set("Location", "/");
-    headers.set("Set-Cookie", [tokenCookie, ...clearAllCookies].join(", "));
-    return new Response(null, {
-      status: 302,
-      headers,
-    });
+    headers.append("Set-Cookie", tokenCookie);
+    headers.append("Set-Cookie", clearStateCookie);
+    headers.append("Set-Cookie", clearUiFlowCookie);
+    return new Response(null, { status: 302, headers });
   }
 
   // --- CLI flow: return JSON (existing behavior) ---
-  return new Response(
+  return errorResponse(
     JSON.stringify({
       token,
       expires_in: expiresIn,
       user: exchange.user,
     }),
-    {
-      status: 200,
-      headers: {
-        "content-type": "application/json",
-        "Set-Cookie": clearAllCookies.join(", "),
-      },
-    },
+    200,
   );
 }
 
