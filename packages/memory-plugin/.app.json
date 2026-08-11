@@ -1,0 +1,11 @@
+{
+  "type": "mcp",
+  "id": "memory",
+  "name": "Memory",
+  "description": "Personal persistent memory server with FTS5 search, backed by Cloudflare Durable Objects.",
+  "transport": "streamable_http",
+  "url": "https://memory.allenlim.net/mcp",
+  "auth": {
+    "type": "oauth"
+  }
+}

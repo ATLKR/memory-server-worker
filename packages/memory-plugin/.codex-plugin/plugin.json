@@ -9,6 +9,7 @@
   "license": "MIT",
   "keywords": ["memory", "mcp", "recall", "context", "persistence"],
   "skills": "./skills/",
+  "apps": "./.app.json",
   "interface": {
     "displayName": "Memory",
     "shortDescription": "Recall and capture personal memories",
