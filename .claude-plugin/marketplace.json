@@ -1,20 +1,22 @@
 {
-  "version": 1,
-  "marketplace": {
-    "name": "ATLKR/memory-server-worker",
-    "description": "Personal memory server and plugin for Devin CLI, Claude Code, and Codex",
-    "plugins": [
-      {
-        "name": "memory",
-        "source": {
-          "source": "github",
-          "repo": "ATLKR/memory-server-worker",
-          "path": "packages/memory-plugin"
-        },
-        "description": "Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn.",
-        "version": "0.1.0",
-        "category": "Productivity"
-      }
-    ]
-  }
+  "name": "ATLKR Memory Server",
+  "version": "0.1.0",
+  "owner": {
+    "name": "Allen Lim",
+    "email": "allenlim@allenlabs.org",
+    "url": "https://github.com/ATLKR"
+  },
+  "plugins": [
+    {
+      "name": "memory",
+      "source": {
+        "source": "github",
+        "repo": "ATLKR/memory-server-worker",
+        "path": "packages/memory-plugin"
+      },
+      "description": "Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn.",
+      "version": "0.1.0",
+      "category": "Productivity"
+    }
+  ]
 }
