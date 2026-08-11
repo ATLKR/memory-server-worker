@@ -24,7 +24,7 @@
  * re-authenticate.
  */
 
-import { createLocalJWKSet, jwtVerify, type JWTPayload } from "jose";
+import { createLocalJWKSet, jwtVerify, type JWTPayload, type JSONWebKeySet, type JWTVerifyGetKey } from "jose";
 
 export interface SessionPayload extends JWTPayload {
   sub: string; // Better Auth user id (UUID string)
@@ -37,13 +37,24 @@ export interface SessionPayload extends JWTPayload {
   site?: string | null;
 }
 
+// ---------- JWKS cache ----------
+// Fetching the JWKS on every request adds ~100-200ms latency. We cache it
+// in-process (per Worker isolate) with a 5-minute TTL. Worker isolates are
+// ephemeral but typically live for many requests, so this dramatically
+// reduces auth latency while still refreshing on key rotation.
+
+let jwksGetKey: JWTVerifyGetKey | null = null;
+let jwksExpires = 0;
+const JWKS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
+const JWKS_FETCH_TIMEOUT = 5000; // 5 seconds
+
 /**
  * Verify a JWT bearer token against the auth server's JWKS.
  * Returns the session payload (user identity) or null if invalid/expired.
  *
- * We fetch the JWKS fresh on each call (rather than using createRemoteJWKSet's
- * in-process cache) to avoid stale key issues during key rotation. The JWKS
- * is small (single key) so the overhead is negligible.
+ * The JWKS is cached in-process for 5 minutes to avoid fetching it on
+ * every request. A 5-second timeout prevents hanging if the auth server
+ * is slow or unresponsive.
  */
 export async function verifyJwt(
   authApiUrl: string,
@@ -52,13 +63,27 @@ export async function verifyJwt(
   if (!token) return null;
   try {
     const jwksUrl = `${authApiUrl.replace(/\/$/, "")}/.well-known/jwks.json`;
-    const resp = await fetch(jwksUrl);
-    if (!resp.ok) {
-      console.error(`[verifyJwt] JWKS fetch failed: ${resp.status}`);
-      return null;
+
+    // Check cache — refresh if expired.
+    const now = Date.now();
+    if (!jwksGetKey || now >= jwksExpires) {
+      const resp = await fetch(jwksUrl, {
+        signal: AbortSignal.timeout(JWKS_FETCH_TIMEOUT),
+      });
+      if (!resp.ok) {
+        console.error(`[verifyJwt] JWKS fetch failed: ${resp.status}`);
+        return null;
+      }
+      const jwksData = (await resp.json()) as JSONWebKeySet;
+      if (!jwksData?.keys || !Array.isArray(jwksData.keys)) {
+        console.error("[verifyJwt] JWKS response missing keys array");
+        return null;
+      }
+      jwksGetKey = createLocalJWKSet(jwksData);
+      jwksExpires = now + JWKS_CACHE_TTL;
     }
-    const jwks = createLocalJWKSet(await resp.json());
-    const { payload } = await jwtVerify(token, jwks, {
+
+    const { payload } = await jwtVerify(token, jwksGetKey, {
       issuer: authApiUrl,
       audience: authApiUrl,
     });

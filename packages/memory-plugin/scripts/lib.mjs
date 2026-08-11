@@ -155,61 +155,75 @@ function headers() {
  * The Cloudflare Agents MCP handler is stateless by default but still
  * requires the initialized notification before accepting tool calls.
  * Without it, tools/call returns 400 "Not Initialized".
+ *
+ * Performance: We cache the session ID in-process so subsequent calls within
+ * the same Node process (e.g. a hook that calls search then add) skip the
+ * initialize round-trip. The cache is short-lived (2 min) to avoid stale
+ * sessions. If a cached session fails, we invalidate and retry once.
  */
+
+// Session cache — shared across all callTool() invocations in this process.
+let cachedSessionId = "";
+let sessionExpiresAt = 0;
+const SESSION_TTL = 2 * 60 * 1000; // 2 minutes
+
 export async function callTool(name, args = {}) {
   if (!SERVER_URL) {
     throw new Error("MEMORY_SERVER_URL is not set");
   }
 
   const baseHeaders = headers();
+  const now = Date.now();
+  const hasValidSession = cachedSessionId && now < sessionExpiresAt;
 
-  // Step 1: Initialize the MCP session.
-  const initRes = await fetch(`${SERVER_URL}/mcp`, {
-    method: "POST",
-    headers: baseHeaders,
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-06-18",
-        capabilities: {},
-        clientInfo: { name: "memory-plugin", version: "0.1.0" },
-      },
-    }),
-  });
+  // Step 1: Initialize the MCP session (only if no valid cached session).
+  if (!hasValidSession) {
+    const initRes = await fetch(`${SERVER_URL}/mcp`, {
+      method: "POST",
+      headers: baseHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "initialize",
+        params: {
+          protocolVersion: "2025-06-18",
+          capabilities: {},
+          clientInfo: { name: "memory-plugin", version: "0.1.0" },
+        },
+      }),
+    });
 
-  if (!initRes.ok) {
-    const text = await initRes.text().catch(() => "");
-    throw new Error(`MCP initialize failed (${initRes.status}): ${text}`);
+    if (!initRes.ok) {
+      const text = await initRes.text().catch(() => "");
+      throw new Error(`MCP initialize failed (${initRes.status}): ${text}`);
+    }
+
+    // Parse the init result (may be JSON or SSE).
+    await parseMcpResponse(initRes);
+    cachedSessionId = initRes.headers.get("mcp-session-id") ?? "";
+    sessionExpiresAt = now + SESSION_TTL;
+
+    // Step 2: Send the initialized notification.
+    const notifHeaders = { ...baseHeaders };
+    if (cachedSessionId) notifHeaders["mcp-session-id"] = cachedSessionId;
+
+    await fetch(`${SERVER_URL}/mcp`, {
+      method: "POST",
+      headers: notifHeaders,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        method: "notifications/initialized",
+      }),
+    }).catch(() => {
+      // Stateless servers may return 202 with empty body or 400 — ignore.
+    });
   }
-
-  // Parse the init result (may be JSON or SSE).
-  await parseMcpResponse(initRes);
-  const sessionId = initRes.headers.get("mcp-session-id") ?? "";
-
-  // Step 2: Send the initialized notification.
-  // This is a notification (no id) — the server accepts it but may not
-  // return a body. We don't care about the response, just that it's sent.
-  const notifHeaders = { ...baseHeaders };
-  if (sessionId) notifHeaders["mcp-session-id"] = sessionId;
-
-  await fetch(`${SERVER_URL}/mcp`, {
-    method: "POST",
-    headers: notifHeaders,
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      method: "notifications/initialized",
-    }),
-  }).catch(() => {
-    // Stateless servers may return 202 with empty body or 400 — ignore.
-  });
 
   // Step 3: Send the tool call.
   const callHeaders = { ...baseHeaders };
-  if (sessionId) callHeaders["mcp-session-id"] = sessionId;
+  if (cachedSessionId) callHeaders["mcp-session-id"] = cachedSessionId;
 
-  const callRes = await fetch(`${SERVER_URL}/mcp`, {
+  let callRes = await fetch(`${SERVER_URL}/mcp`, {
     method: "POST",
     headers: callHeaders,
     body: JSON.stringify({
@@ -219,6 +233,14 @@ export async function callTool(name, args = {}) {
       params: { name, arguments: args },
     }),
   });
+
+  // If the cached session was rejected (e.g. expired on server side),
+  // invalidate the cache and retry the full handshake once.
+  if (callRes.status === 400 && hasValidSession) {
+    cachedSessionId = "";
+    sessionExpiresAt = 0;
+    return callTool(name, args);
+  }
 
   if (!callRes.ok) {
     const text = await callRes.text().catch(() => "");

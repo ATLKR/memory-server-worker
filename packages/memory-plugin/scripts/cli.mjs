@@ -259,9 +259,14 @@ async function main() {
           process.exit(1);
         }
         const tags = flags.tags ? String(flags.tags).split(",").map((t) => t.trim()) : undefined;
+        // flags.content may be true (boolean) if --content was given without
+        // a value; treat that as no content.
+        const contentFlag = typeof flags.content === "string" ? flags.content : undefined;
+        const positionalContent = positional.slice(1).join(" ");
+        const content = contentFlag || positionalContent || undefined;
         const result = await memory.update({
           key,
-          content: flags.content ?? positional.slice(1).join(" "),
+          content,
           tags,
           metadata: flags.metadata ? JSON.parse(flags.metadata) : undefined,
           appendContent: Boolean(flags.append),

@@ -54,18 +54,10 @@ export class MemoryAgent extends Agent<Env> {
     const id = crypto.randomUUID();
     const key = params.key ?? id;
 
-    // If the key already exists, treat as update (upsert semantics).
-    const existing = store.getByKey(key);
-    if (existing) {
-      return store.update(key, {
-        content: params.content,
-        tags: params.tags,
-        metadata: params.metadata,
-        appendContent: false,
-      }) ?? existing;
-    }
-
-    const entry: MemoryEntry = {
+    // Upsert: if the key already exists, update content/tags/metadata.
+    // Durable Objects are single-threaded so there's no race condition,
+    // but using upsert avoids a separate getByKey round-trip.
+    return store.upsert({
       id,
       key,
       content: params.content,
@@ -74,8 +66,7 @@ export class MemoryAgent extends Agent<Env> {
       metadata: params.metadata ?? {},
       createdAt: now,
       updatedAt: now,
-    };
-    return store.add(entry);
+    });
   }
 
   async search(params: {

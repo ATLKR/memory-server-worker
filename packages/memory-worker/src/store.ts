@@ -143,6 +143,58 @@ export class MemoryStore {
     return entry;
   }
 
+  /**
+   * Upsert a memory entry by key. If the key exists, update content/tags/
+   * metadata/updated_at (preserving id, namespace, created_at). If not,
+   * insert a new row. Returns the final entry.
+   *
+   * This uses SQLite's ON CONFLICT clause for an atomic single-statement
+   * upsert, avoiding the need for a separate getByKey check.
+   */
+  upsert(entry: MemoryEntry): MemoryEntry {
+    // First, check if the key exists so we know the existing id for FTS sync.
+    const existing = entry.key ? this.getByKey(entry.key) : null;
+    if (existing) {
+      // Update in place — preserve the original id and created_at.
+      this.sql.exec(
+        `UPDATE memories SET
+           content = ?, tags = ?, metadata = ?, updated_at = ?
+         WHERE key = ?`,
+        entry.content,
+        JSON.stringify(entry.tags),
+        JSON.stringify(entry.metadata),
+        entry.updatedAt,
+        entry.key,
+      );
+      // Sync FTS: delete old + insert new.
+      this.sql.exec(`DELETE FROM memories_fts WHERE id = ?`, existing.id);
+      const updated: MemoryEntry = {
+        ...existing,
+        content: entry.content,
+        tags: entry.tags,
+        metadata: entry.metadata,
+        updatedAt: entry.updatedAt,
+      };
+      this.syncFtsInsert(updated);
+      return updated;
+    }
+    // No existing row — insert new.
+    this.sql.exec(
+      `INSERT INTO memories (id, key, content, namespace, tags, metadata, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      entry.id,
+      entry.key,
+      entry.content,
+      entry.namespace,
+      JSON.stringify(entry.tags),
+      JSON.stringify(entry.metadata),
+      entry.createdAt,
+      entry.updatedAt,
+    );
+    this.syncFtsInsert(entry);
+    return entry;
+  }
+
   /** Get a memory by its key. Returns null if not found. */
   getByKey(key: string): MemoryEntry | null {
     const cursor = this.sql.exec<MemoryRow>(
@@ -167,12 +219,12 @@ export class MemoryStore {
       binds.push(opts.namespace);
     }
     if (opts.tag) {
-      conditions.push("tags LIKE ?");
+      conditions.push("tags LIKE ? ESCAPE '\\'");
       binds.push(`%"${escapeLike(opts.tag)}"%`);
     }
 
     const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
-    const limit = opts.limit ?? 50;
+    const limit = Math.min(opts.limit ?? 50, 500);
     binds.push(limit);
 
     const cursor = this.sql.exec<MemoryRow>(
@@ -192,7 +244,10 @@ export class MemoryStore {
    * back to a LIKE search on the content column.
    */
   search(query: string, opts: { namespace?: string; limit?: number }): MemoryEntry[] {
-    const limit = opts.limit ?? 10;
+    // Early exit for empty queries — avoids unnecessary FTS/LIKE work.
+    if (!query || query.trim().length === 0) return [];
+
+    const limit = Math.min(opts.limit ?? 10, 100);
     const ftsQuery = sanitizeFtsQuery(query);
 
     if (ftsQuery) {
@@ -274,7 +329,7 @@ export class MemoryStore {
     // Build OR conditions for each term against content + key.
     const orParts: string[] = [];
     for (const term of terms.slice(0, 5)) {
-      orParts.push("content LIKE ?");
+      orParts.push("content LIKE ? ESCAPE '\\'");
       binds.push(`%${escapeLike(term)}%`);
     }
 
@@ -286,7 +341,7 @@ export class MemoryStore {
     if (hasCJK) {
       const noSpaceQuery = query.replace(/\s+/g, "");
       if (noSpaceQuery.length >= 2) {
-        orParts.push("REPLACE(content, ' ', '') LIKE ?");
+        orParts.push("REPLACE(content, ' ', '') LIKE ? ESCAPE '\\'");
         binds.push(`%${escapeLike(noSpaceQuery)}%`);
       }
     }
@@ -321,9 +376,12 @@ export class MemoryStore {
     if (!existing) return null;
 
     const now = new Date().toISOString();
-    const newContent = patch.appendContent
-      ? existing.content + "\n" + (patch.content ?? "")
-      : patch.content ?? existing.content;
+    // Only append if there's actual new content to add — avoids trailing
+    // newlines from empty append calls.
+    const newContent =
+      patch.appendContent && patch.content
+        ? existing.content + "\n" + patch.content
+        : patch.content ?? existing.content;
     const newTags = patch.tags ?? existing.tags;
     const newMetadata = patch.metadata
       ? mergeMetadata(existing.metadata, patch.metadata)
