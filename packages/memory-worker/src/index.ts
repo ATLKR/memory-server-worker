@@ -432,6 +432,21 @@ export default {
       return Response.json({ ok: true, service: "memory-server" });
     }
 
+    // OAuth 2.1 resource server metadata (RFC 9728). Tells MCP clients
+    // (ChatGPT, Claude, Codex) where the authorization server lives.
+    // The auth server publishes its own /.well-known/oauth-authorization-server
+    // which clients fetch to discover the authorize/token/register endpoints.
+    if (url.pathname === "/.well-known/oauth-protected-resource") {
+      const authApiUrl = (env.AUTH_API_URL ?? "").replace(/\/$/, "");
+      return Response.json({
+        resource: url.origin,
+        authorization_servers: [authApiUrl],
+        scopes_supported: ["openid", "profile", "email"],
+        bearer_methods_supported: ["header"],
+        resource_documentation: `${url.origin}/healthz`,
+      });
+    }
+
     // SSO endpoints (outside MCP auth — they're the auth bootstrap).
     if (url.pathname === "/auth/sso") {
       return handleSsoStart(env, url);
@@ -441,11 +456,17 @@ export default {
     }
 
     // Auth check — verify JWT via JWKS before entering the MCP handler.
+    // On 401, return a WWW-Authenticate header pointing to the resource
+    // metadata so MCP clients can auto-discover the OAuth flow.
     const auth = await authenticate(request, env);
     if (!auth) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
         status: 401,
-        headers: { "content-type": "application/json" },
+        headers: {
+          "content-type": "application/json",
+          "www-authenticate":
+            `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"`,
+        },
       });
     }
 
