@@ -436,24 +436,97 @@ function createServer(env: Env, scope: string): McpServer {
 // server's SSO flow:
 //
 //   1. `mem login` opens a browser to {MEMORY_SERVER_URL}/auth/sso
-//   2. The worker 302-redirects to {AUTH_WEB_URL}/sign-in?return_to={MEMORY_SERVER_URL}/auth/callback
+//   2. The worker generates a random `state` value, stores it in an
+//      HttpOnly SameSite=Lax cookie, and 302-redirects to
+//      {AUTH_WEB_URL}/sign-in?return_to={MEMORY_SERVER_URL}/auth/callback?state=...
 //   3. The user signs in on auth.allen.company
-//   4. auth-web mints a code and redirects back to /auth/callback?code=...
-//   5. The worker exchanges the code at {AUTH_API_URL}/sso/exchange and
-//      returns the JWT as JSON for the CLI to capture.
+//   4. auth-web mints a code and redirects back to /auth/callback?code=...&state=...
+//   5. The worker validates the state cookie (CSRF protection), exchanges
+//      the code at {AUTH_API_URL}/sso/exchange, and returns the JWT as JSON.
+//
+// The state cookie proves the callback originated from a legitimate
+// /auth/sso flow on this worker. An attacker on a different origin cannot
+// set cookies on this worker's domain, so they cannot forge the state.
 //
 // The worker needs AUTH_WEB_URL (the auth UI origin) configured as a var.
 
 const AUTH_WEB_URL_DEFAULT = "https://auth.allen.company";
+const SSO_STATE_COOKIE = "memory_sso_state";
+const SSO_STATE_MAX_AGE = 600; // 10 minutes
+
+/**
+ * Generate a cryptographically random state value for CSRF protection.
+ * Uses the Web Crypto API available in the Workers runtime.
+ */
+function generateState(): string {
+  const bytes = new Uint8Array(32);
+  crypto.getRandomValues(bytes);
+  // Base64url encode without padding.
+  return btoa(String.fromCharCode(...bytes))
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
 
 async function handleSsoStart(env: Env, requestUrl: URL): Promise<Response> {
   const authWebUrl = (env.AUTH_WEB_URL || AUTH_WEB_URL_DEFAULT).replace(/\/$/, "");
-  const callbackUrl = `${requestUrl.origin}/auth/callback`;
+  const state = generateState();
+
+  // Build the callback URL with state param. We include state in return_to
+  // so auth-web can pass it back (if it preserves query params). The cookie
+  // is the primary validation mechanism.
+  const callbackUrl = `${requestUrl.origin}/auth/callback?state=${encodeURIComponent(state)}`;
   const signInUrl = `${authWebUrl}/sign-in?return_to=${encodeURIComponent(callbackUrl)}`;
-  return Response.redirect(signInUrl, 302);
+
+  const redirect = Response.redirect(signInUrl, 302);
+  // Set state cookie on the redirect response. We need to clone the
+  // redirect and add the Set-Cookie header.
+  const headers = new Headers(redirect.headers);
+  headers.append(
+    "Set-Cookie",
+    `${SSO_STATE_COOKIE}=${state}; HttpOnly; Secure; SameSite=Lax; Max-Age=${SSO_STATE_MAX_AGE}; Path=/auth`,
+  );
+  return new Response(redirect.body, {
+    status: redirect.status,
+    statusText: redirect.statusText,
+    headers,
+  });
 }
 
-async function handleSsoCallback(env: Env, requestUrl: URL): Promise<Response> {
+async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): Promise<Response> {
+  // --- CSRF: validate state cookie ---
+  const cookieHeader = request.headers.get("cookie") ?? "";
+  const stateCookie = parseCookie(cookieHeader, SSO_STATE_COOKIE);
+  const stateParam = requestUrl.searchParams.get("state");
+
+  if (!stateCookie) {
+    return new Response(
+      JSON.stringify({
+        error: "missing state cookie — start the login flow from /auth/sso",
+      }),
+      {
+        status: 400,
+        headers: { "content-type": "application/json" },
+      },
+    );
+  }
+
+  // If state param is present (auth-web passed it back), it must match
+  // the cookie. If state param is absent, the cookie alone proves the
+  // flow started from /auth/sso.
+  if (stateParam && stateParam !== stateCookie) {
+    return new Response(
+      JSON.stringify({ error: "state mismatch — possible CSRF attempt" }),
+      {
+        status: 400,
+        headers: {
+          "content-type": "application/json",
+          "Set-Cookie": `${SSO_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`,
+        },
+      },
+    );
+  }
+
   const code = requestUrl.searchParams.get("code");
   if (!code) {
     return new Response(JSON.stringify({ error: "missing code parameter" }), {
@@ -471,9 +544,7 @@ async function handleSsoCallback(env: Env, requestUrl: URL): Promise<Response> {
   }
 
   // The client_id must match the origin the code was minted for.
-  // The plugin's local callback server uses http://localhost:<port>, so
-  // we pass the worker's origin here. For the worker-hosted callback,
-  // the origin is the worker's own URL.
+  // For the worker-hosted callback, the origin is the worker's own URL.
   const clientId = requestUrl.origin;
 
   const exchangeRes = await fetch(`${authApiUrl}/sso/exchange`, {
@@ -491,12 +562,18 @@ async function handleSsoCallback(env: Env, requestUrl: URL): Promise<Response> {
     | { error?: string }
     | null;
 
+  // Clear the state cookie regardless of exchange result.
+  const clearCookieHeader = `${SSO_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`;
+
   if (!exchangeRes.ok || !exchange || !("token" in exchange) || !exchange.token) {
     const error =
       exchange && "error" in exchange ? exchange.error : `SSO exchange failed (${exchangeRes.status})`;
     return new Response(JSON.stringify({ error }), {
       status: exchangeRes.status === 400 ? 400 : 502,
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "Set-Cookie": clearCookieHeader,
+      },
     });
   }
 
@@ -510,9 +587,28 @@ async function handleSsoCallback(env: Env, requestUrl: URL): Promise<Response> {
     }),
     {
       status: 200,
-      headers: { "content-type": "application/json" },
+      headers: {
+        "content-type": "application/json",
+        "Set-Cookie": clearCookieHeader,
+      },
     },
   );
+}
+
+/**
+ * Parse a specific cookie value from a Cookie header.
+ * Returns null if the cookie is not present.
+ */
+function parseCookie(cookieHeader: string, name: string): string | null {
+  const cookies = cookieHeader.split(";").map((c) => c.trim());
+  for (const cookie of cookies) {
+    const eqIdx = cookie.indexOf("=");
+    if (eqIdx === -1) continue;
+    const key = cookie.slice(0, eqIdx).trim();
+    const value = cookie.slice(eqIdx + 1).trim();
+    if (key === name) return value;
+  }
+  return null;
 }
 
 // ---------- Worker entry ----------
@@ -545,12 +641,12 @@ export default {
       });
     }
 
-    // SSO endpoints (outside MCP auth ??they're the auth bootstrap).
+    // SSO endpoints (outside MCP auth — they're the auth bootstrap).
     if (url.pathname === "/auth/sso") {
       return handleSsoStart(env, url);
     }
     if (url.pathname === "/auth/callback") {
-      return handleSsoCallback(env, url);
+      return handleSsoCallback(env, url, request);
     }
 
     // Auth check ??verify JWT via JWKS before entering the MCP handler.
