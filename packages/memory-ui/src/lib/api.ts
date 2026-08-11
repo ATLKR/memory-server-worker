@@ -92,6 +92,26 @@ export function isLoggedIn(): boolean {
   }
   return true;
 }
+
+/**
+ * Get the current user's display info from the token (if decodable).
+ * Returns null if the token can't be parsed.
+ */
+export function getUserInfo(): { email?: string; name?: string } | null {
+  const token = getToken();
+  if (!token) return null;
+  try {
+    const payload = JSON.parse(atob(token.split(".")[1]!));
+    return { email: payload.email, name: payload.name ?? payload.preferredName };
+  } catch {
+    return null;
+  }
+}
+
+export function logout(): void {
+  clearToken();
+  window.location.href = "/";
+}
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   const token = getToken();
   const headers = new Headers(init?.headers);
@@ -99,9 +119,9 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   if (token) headers.set("authorization", `Bearer ${token}`);
   const resp = await fetch(path, { ...init, headers });
   if (resp.status === 401) {
-    // Token expired or missing — redirect to SSO.
+    // Token expired or missing — redirect to SSO (UI flow).
     clearToken();
-    window.location.href = "/auth/sso";
+    window.location.href = "/auth/sso?ui=1";
     throw new Error("Authentication required");
   }
   return resp;

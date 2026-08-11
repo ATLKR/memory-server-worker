@@ -16,6 +16,7 @@ function MemoryDetailComponent() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loggedIn] = useState(() => isLoggedIn());
 
   const loadMemory = useCallback(async () => {
     setLoading(true);
@@ -33,8 +34,8 @@ function MemoryDetailComponent() {
   }, [key]);
 
   useEffect(() => {
-    if (isLoggedIn()) loadMemory();
-  }, [loadMemory]);
+    if (loggedIn) loadMemory();
+  }, [loadMemory, loggedIn]);
 
   const handleSave = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -66,7 +67,7 @@ function MemoryDetailComponent() {
     }
   };
 
-  if (!isLoggedIn()) {
+  if (!loggedIn) {
     return (
       <div className="login-prompt">
         <p>Please sign in to view memories.</p>

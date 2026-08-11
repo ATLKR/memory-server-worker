@@ -2,7 +2,7 @@
  * Custom server entry point for the Memory UI Worker.
  *
  * This worker serves the TanStack Start UI for all browser routes,
- * and proxies API/MCP/auth requests to the backend `memory-api` worker
+ * and proxies API/MCP/auth requests to the backend `memory-server` worker
  * via a service binding.
  *
  * Path routing:

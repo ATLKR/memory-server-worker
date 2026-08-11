@@ -1,7 +1,6 @@
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { createServerFn } from "@tanstack/react-start";
-import { useState, useEffect, useCallback } from "react";
-import { api, isLoggedIn, type MemoryEntry } from "~/lib/api";
+import { useState, useEffect, useCallback, useMemo } from "react";
+import { api, isLoggedIn, type MemoryEntry, type StatsResponse } from "~/lib/api";
 
 export const Route = createFileRoute("/")({
   component: HomeComponent,
@@ -13,24 +12,26 @@ function HomeComponent() {
   const [query, setQuery] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [loggedIn, setLoggedIn] = useState(false);
-
-  useEffect(() => {
-    setLoggedIn(isLoggedIn());
-  }, []);
+  // Initialize synchronously to avoid flash of login prompt.
+  const [loggedIn] = useState(() => isLoggedIn());
+  const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [namespaceFilter, setNamespaceFilter] = useState<string>("");
 
   const loadMemories = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.list({ limit: 100 });
+      const data = await api.list({
+        limit: 100,
+        namespace: namespaceFilter || undefined,
+      });
       setMemories(data.results);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [namespaceFilter]);
 
   const doSearch = useCallback(async (q: string) => {
     if (!q.trim()) {
@@ -40,20 +41,30 @@ function HomeComponent() {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.search(q, { limit: 50 });
+      const data = await api.search(q, {
+        limit: 50,
+        namespace: namespaceFilter || undefined,
+      });
       setMemories(data.results);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Search failed");
     } finally {
       setLoading(false);
     }
-  }, [loadMemories]);
+  }, [loadMemories, namespaceFilter]);
 
+  // Load stats on mount.
+  useEffect(() => {
+    if (!loggedIn) return;
+    api.stats().then(setStats).catch(() => {});
+  }, [loggedIn]);
+
+  // Load memories on mount / namespace change.
   useEffect(() => {
     if (loggedIn) loadMemories();
   }, [loggedIn, loadMemories]);
 
-  // Debounced search
+  // Debounced search.
   useEffect(() => {
     const timer = setTimeout(() => {
       if (loggedIn) doSearch(query);
@@ -66,10 +77,17 @@ function HomeComponent() {
     try {
       await api.delete(key);
       setMemories((prev) => prev.filter((m) => m.key !== key));
+      // Refresh stats after delete.
+      api.stats().then(setStats).catch(() => {});
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed");
     }
   };
+
+  const namespaces = useMemo(
+    () => Object.entries(stats?.byNamespace ?? {}).sort((a, b) => b[1] - a[1]),
+    [stats],
+  );
 
   if (!loggedIn) {
     return (
@@ -85,6 +103,30 @@ function HomeComponent() {
 
   return (
     <div>
+      {/* Stats bar */}
+      {stats && (
+        <div className="stats-bar">
+          <span className="stats-total">{stats.total} memories</span>
+          <div className="namespace-chips">
+            <button
+              className={`chip ${namespaceFilter === "" ? "chip-active" : ""}`}
+              onClick={() => setNamespaceFilter("")}
+            >
+              All
+            </button>
+            {namespaces.map(([ns, count]) => (
+              <button
+                key={ns}
+                className={`chip ${namespaceFilter === ns ? "chip-active" : ""}`}
+                onClick={() => setNamespaceFilter(ns)}
+              >
+                {ns} ({count})
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
       <div className="search-bar">
         <input
           type="text"

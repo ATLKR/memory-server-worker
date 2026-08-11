@@ -14,8 +14,9 @@ function NewMemoryComponent() {
   const [tags, setTags] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [loggedIn] = useState(() => isLoggedIn());
 
-  if (!isLoggedIn()) {
+  if (!loggedIn) {
     return (
       <div className="login-prompt">
         <p>Please sign in to create memories.</p>
