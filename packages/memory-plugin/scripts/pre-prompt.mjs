@@ -25,7 +25,6 @@ async function main() {
   try {
     hookInput = JSON.parse(raw);
   } catch {
-    // Not JSON input — treat raw text as the prompt.
     hookInput = { prompt: raw.trim() };
   }
 
@@ -34,35 +33,33 @@ async function main() {
     process.exit(0);
   }
 
-  // Extract keywords from the prompt for searching. We use the full prompt
-  // as the search query — FTS5 handles multi-word queries well.
-  // Trim to avoid overly long queries.
-  const query = prompt.slice(0, 500);
+  // Agent Memory recall() accepts natural language queries. Trim to the
+  // 1 KB limit to avoid API errors on very long prompts.
+  const query = prompt.slice(0, 1000);
 
   try {
-    const resultsText = await memory.search({ query, limit: 5 });
+    const resultsText = await memory.search({ query });
     const results = JSON.parse(resultsText);
-    const memories = results.results ?? [];
+    const answer = results.answer ?? "";
+    const candidates = results.candidates ?? [];
 
-    if (memories.length === 0) {
+    if (!answer && candidates.length === 0) {
       process.exit(0);
     }
 
-    // Format memories as context for the agent.
-    const lines = memories.map((m, i) => {
-      const tags = m.tags?.length ? ` [${m.tags.join(", ")}]` : "";
-      const ns = m.namespace && m.namespace !== "default" ? ` (${m.namespace})` : "";
-      return `### Memory ${i + 1}${ns}${tags}\nKey: ${m.key ?? m.id}\n${m.content}`;
+    // Format the synthesized answer + candidate memories as context.
+    const lines = candidates.map((c, i) => {
+      return `### Memory ${i + 1}\n${c.summary}`;
     });
 
     const additionalContext =
-      `--- Retrieved from Personal Memory (${memories.length} entries) ---\n` +
+      `--- Retrieved from Personal Memory (${candidates.length} entries) ---\n` +
       `The following memories were recalled based on your current prompt. ` +
       `Use them as relevant context, but verify against the actual task:\n\n` +
+      (answer ? `**Synthesized answer:** ${answer}\n\n` : "") +
       lines.join("\n\n") +
       `\n\n--- End of Retrieved Memories ---`;
 
-    // Output in Claude Code hook format.
     const output = {
       hookSpecificOutput: {
         hookEventName: "UserPromptSubmit",
@@ -71,8 +68,6 @@ async function main() {
     };
     process.stdout.write(JSON.stringify(output));
   } catch (err) {
-    // Fail silently — never block the conversation. But log expiry
-    // prominently so the user knows to re-authenticate.
     if (isTokenExpired()) {
       console.error(
         "[memory-plugin:pre-prompt] Token expired. Run `mem login` to refresh.",

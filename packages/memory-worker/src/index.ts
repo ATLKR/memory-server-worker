@@ -1,26 +1,31 @@
 /**
- * Memory Server Worker ??entry point.
+ * Memory Server Worker — entry point.
  *
  * Exposes a stateless MCP server (via `createMcpHandler` from the Agents SDK)
- * whose tools are backed by a `MemoryAgent` Durable Object. Each MCP tool call
- * routes to the DO instance named by the request's *scope*.
+ * whose tools are backed by Cloudflare Agent Memory — a managed service that
+ * provides automatic extraction, classification, supersession, and hybrid
+ * search (keyword + semantic + topic key).
  *
  * Auth: SSO via the Allen Labs central auth server (auth-api.allen.company).
  * The client sends an RS256 JWT as `Authorization: Bearer <jwt>`. The worker
  * verifies the JWT signature against the auth server's JWKS endpoint
- * ({AUTH_API_URL}/.well-known/jwks.json) using `jose`. No static tokens or
- * secrets are stored on this worker ??auth is fully delegated.
+ * ({AUTH_API_URL}/.well-known/jwks.json) using `jose`.
  *
- * Scope resolution (each scope ??its own Durable Object ??isolated SQLite):
+ * Scope resolution (each scope → its own Agent Memory profile):
  *   1. `x-memory-scope` header if present
  *   2. `DEFAULT_SCOPE` var if non-empty
- *   3. JWT `sub` (Better Auth user id) ??the default for personal use
+ *   3. JWT `sub` (Better Auth user id) — the default for personal use
  *
- * The memory tools mirror the Cloudflare Agents SDK memory-layer concepts:
- *   - `memory_add`     ??writable short-form context (set_context equivalent)
- *   - `memory_search`  ??searchable context (search_context / AgentSearchProvider)
- *   - `memory_load`    ??loadable context / skills (load_context equivalent)
- *   - `memory_get` / `memory_list` / `memory_update` / `memory_delete` / `memory_stats`
+ * MCP tools:
+ *   - memory_add      → profile.remember()  (store a single memory)
+ *   - memory_search   → profile.recall()    (hybrid search + synthesis)
+ *   - memory_ingest   → profile.ingest()    (extract memories from conversation)
+ *   - memory_list     → profile.list()      (paginated list with filters)
+ *   - memory_get      → profile.get()       (fetch by ID)
+ *   - memory_delete   → profile.delete()    (delete by ID)
+ *   - memory_delete_session → profile.deleteSession() (delete by session)
+ *   - memory_summary  → profile.getSummary() (structured Markdown summary)
+ *   - memory_stats    → computed from list() (total + per-type counts)
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -28,20 +33,24 @@ import { ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { createMcpHandler } from "agents/mcp";
 import { verifyJwt, extractBearerToken, type SessionPayload } from "./auth";
-import type { MemoryEntry } from "./schema";
+import type { MemoryEntry, MemoryType, RecallResult, StatsResponse } from "./schema";
 import {
   addMemoryShape,
   searchMemoryShape,
-  getMemoryShape,
+  ingestMemoryShape,
   listMemoryShape,
-  updateMemoryShape,
+  getMemoryShape,
   deleteMemoryShape,
-  loadMemoryShape,
+  deleteSessionShape,
+  summaryShape,
   memoryEntryOutputShape,
   searchOutputShape,
+  ingestOutputShape,
+  listOutputShape,
   deleteOutputShape,
+  deleteSessionOutputShape,
   statsOutputShape,
-  loadOutputShape,
+  summaryOutputShape,
 } from "./schema";
 import {
   handleSkillsList,
@@ -50,59 +59,24 @@ import {
   hasSkills,
 } from "./skills";
 
-// Re-export the DO class ??wrangler.jsonc references it by name.
-export { MemoryAgent } from "./memory-do";
-
-// ---------- DO RPC interface ----------
+// ---------- Agent Memory helpers ----------
 
 /**
- * Interface describing the RPC methods exposed by MemoryAgent.
- * We cast the DO stub to this interface because the full Agent type
- * hierarchy is too complex for TypeScript to resolve the RPC method
- * signatures automatically.
+ * Get an Agent Memory profile for the given scope.
+ * Each scope gets its own isolated memory profile.
+ *
+ * Agent Memory profile names must contain only lowercase letters (a-z),
+ * digits (0-9), and hyphens (-), max 100 characters. We sanitize the
+ * scope (which may be a JWT subject like "abc123_Uvwx") to fit.
  */
-interface MemoryAgentRpc {
-  add(params: {
-    content: string;
-    key?: string;
-    namespace?: string;
-    tags?: string[];
-    metadata?: Record<string, unknown>;
-  }): Promise<MemoryEntry>;
-  search(params: {
-    query: string;
-    namespace?: string;
-    limit?: number;
-  }): Promise<MemoryEntry[]>;
-  get(params: { key: string }): Promise<MemoryEntry | null>;
-  list(params: {
-    namespace?: string;
-    tag?: string;
-    limit?: number;
-  }): Promise<MemoryEntry[]>;
-  update(params: {
-    key: string;
-    content?: string;
-    tags?: string[];
-    metadata?: Record<string, unknown>;
-    appendContent?: boolean;
-  }): Promise<MemoryEntry | null>;
-  delete(params: { key: string }): Promise<{ deleted: boolean }>;
-  load(params: { key: string }): Promise<MemoryEntry | null>;
-  stats(): Promise<{
-    total: number;
-    byNamespace: Record<string, number>;
-  }>;
-}
-
-/**
- * Return a typed RPC stub for the MemoryAgent DO addressed by `scope`.
- * Each scope gets its own DO instance ??its own SQLite database.
- */
-function memoryStub(env: Env, scope: string): MemoryAgentRpc {
-  const id = env.MEMORY_AGENT.idFromName(scope);
-  const stub = env.MEMORY_AGENT.get(id);
-  return stub as unknown as MemoryAgentRpc;
+function getProfile(env: Env, scope: string) {
+  const profileName = scope
+    .toLowerCase()
+    .replace(/[^a-z0-9-]/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 100) || "default";
+  return env.MEMORY.getProfile(profileName);
 }
 
 // ---------- Auth (JWT via Allen Labs auth server JWKS) ----------
@@ -115,7 +89,7 @@ function memoryStub(env: Env, scope: string): MemoryAgentRpc {
  * Scope resolution order:
  *   1. `x-memory-scope` header (explicit override)
  *   2. `DEFAULT_SCOPE` var if non-empty
- *   3. JWT `sub` (user id) ??default for personal use
+ *   3. JWT `sub` (user id) — default for personal use
  */
 async function authenticate(
   request: Request,
@@ -144,24 +118,23 @@ async function authenticate(
 
 function createServer(env: Env, scope: string): McpServer {
   const server = new McpServer(
-    { name: "memory-server", version: "0.1.0" },
+    { name: "memory-server", version: "0.2.0" },
     {
-      // Server-level instructions ??ChatGPT/Codex read these on initialize.
-      // Keep the most important guidance in the first 512 characters.
+      // Server-level instructions — ChatGPT/Codex read these on initialize.
       instructions:
-        "This is a personal persistent-memory server. ALWAYS call memory_search " +
-        "at the start of every user message to recall relevant context before " +
-        "responding. After responding, save any new preferences, decisions, " +
-        "facts, or project details using memory_add. Use memory_update to " +
-        "append to existing memories. Namespaces: preferences, projects, " +
-        "decisions, facts, conversations.",
+        "This is a personal persistent-memory server powered by Cloudflare " +
+        "Agent Memory. ALWAYS call memory_search at the start of every " +
+        "user message to recall relevant context before responding. " +
+        "After a conversation turn, use memory_ingest to automatically " +
+        "extract and store facts, events, instructions, and tasks. " +
+        "Use memory_add to store a specific memory explicitly. " +
+        "Use memory_summary to get a structured overview of everything " +
+        "you know about the user. Memories are automatically classified, " +
+        "deduplicated, and superseded when newer facts replace older ones.",
     },
   );
 
   // ---- Skills extension ----
-  // Register capabilities for resources (needed for resources/read) and
-  // the skills extension (io.modelcontextprotocol/skills) so ChatGPT's
-  // "Scan Tools" can discover and import skill files.
   if (hasSkills()) {
     server.server.registerCapabilities({
       resources: { listChanged: true },
@@ -170,19 +143,15 @@ function createServer(env: Env, scope: string): McpServer {
       extensions: { "io.modelcontextprotocol/skills": {} },
     } as Record<string, unknown>);
 
-    // Zod schemas for custom skills/* methods (SEP-2640).
     const SkillsListSchema = z.object({
       method: z.literal("skills/list"),
-      params: z
-        .object({ cursor: z.string().optional() })
-        .optional(),
+      params: z.object({ cursor: z.string().optional() }).optional(),
     });
     const SkillsGetSchema = z.object({
       method: z.literal("skills/get"),
       params: z.object({ uri: z.string() }),
     });
 
-    // skills/list ??paginated catalog of skills
     server.server.setRequestHandler(
       SkillsListSchema as unknown as Parameters<typeof server.server.setRequestHandler>[0],
       async (req: { params?: { cursor?: string } }) => {
@@ -190,7 +159,6 @@ function createServer(env: Env, scope: string): McpServer {
       },
     );
 
-    // skills/get ??fetch a single skill entry by URI
     server.server.setRequestHandler(
       SkillsGetSchema as unknown as Parameters<typeof server.server.setRequestHandler>[0],
       async (req: { params?: { uri?: string } }) => {
@@ -202,7 +170,6 @@ function createServer(env: Env, scope: string): McpServer {
       },
     );
 
-    // resources/read ??fetch a skill resource by URI
     server.server.setRequestHandler(
       ReadResourceRequestSchema,
       async (req: { params: { uri: string } }) => {
@@ -215,29 +182,36 @@ function createServer(env: Env, scope: string): McpServer {
     );
   }
 
-  const stub = memoryStub(env, scope);
-
   // ---- memory_add ----
   server.registerTool(
     "memory_add",
     {
       description:
-        "Store a memory entry. Use for facts, preferences, decisions, " +
-        "learned information, or any text you want to recall later. " +
-        "If a memory with the same key already exists, it is updated. " +
-        "Provide a descriptive `key` for entries you want to fetch by name " +
-        "(e.g. 'project-alpha-overview'). Omit `key` for ephemeral notes.",
+        "Store a memory explicitly. Agent Memory will automatically " +
+        "classify it (fact/event/instruction/task), generate a summary, " +
+        "and handle deduplication. If a similar fact or instruction " +
+        "already exists, the new one supersedes the old (history is " +
+        "preserved). Use this when you know exactly what to remember. " +
+        "For extracting memories from a conversation, use memory_ingest " +
+        "instead.",
       inputSchema: addMemoryShape,
       outputSchema: memoryEntryOutputShape,
     },
     async (params) => {
-      const entry = await stub.add({
+      const profile = await getProfile(env, scope);
+      const memory = await profile.remember({
         content: params.content,
-        key: params.key,
-        namespace: params.namespace,
-        tags: params.tags,
-        metadata: params.metadata,
+        sessionId: params.sessionId ?? null,
       });
+      const entry: MemoryEntry = {
+        id: memory.id,
+        type: memory.type,
+        summary: memory.summary,
+        content: memory.content,
+        sessionId: memory.sessionId,
+        createdAt: memory.createdAt.toISOString(),
+        updatedAt: memory.updatedAt.toISOString(),
+      };
       return {
         content: [{ type: "text" as const, text: JSON.stringify(entry, null, 2) }],
         structuredContent: entry as unknown as Record<string, unknown>,
@@ -250,24 +224,97 @@ function createServer(env: Env, scope: string): McpServer {
     "memory_search",
     {
       description:
-        "Full-text search across all stored memories. Returns ranked " +
-        "results matching the query. Optionally filter by namespace.",
+        "Search memories using natural language. Agent Memory runs " +
+        "hybrid search (keyword + semantic + topic key) in parallel " +
+        "and returns a synthesized answer grounded in stored content. " +
+        "Call this at the start of every user message to recall " +
+        "relevant context.",
       inputSchema: searchMemoryShape,
       outputSchema: searchOutputShape,
     },
     async (params) => {
-      const results = await stub.search({
-        query: params.query,
-        namespace: params.namespace,
-        limit: params.limit,
+      const profile = await getProfile(env, scope);
+      const result: RecallResult = await profile.recall(params.query, {
+        thinkingLevel: params.thinkingLevel,
+        responseLength: params.responseLength,
       });
-      const structured = { count: results.length, results };
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify(structured, null, 2),
+            text: JSON.stringify(result, null, 2),
           },
+        ],
+        structuredContent: result as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // ---- memory_ingest ----
+  server.registerTool(
+    "memory_ingest",
+    {
+      description:
+        "Extract memories from a conversation. Agent Memory reads the " +
+        "messages and automatically identifies facts, events, " +
+        "instructions, and tasks. Re-ingesting the same conversation " +
+        "is idempotent — no duplicates are created. Call this after " +
+        "a conversation turn or when the user goes idle, NOT after " +
+        "every single message.",
+      inputSchema: ingestMemoryShape,
+      outputSchema: ingestOutputShape,
+    },
+    async (params) => {
+      const profile = await getProfile(env, scope);
+      await profile.ingest(
+        params.messages.map((m) => ({
+          role: m.role,
+          content: m.content,
+        })),
+        { sessionId: params.sessionId ?? null },
+      );
+      const result = { ingested: true };
+      return {
+        content: [{ type: "text" as const, text: JSON.stringify(result) }],
+        structuredContent: result as unknown as Record<string, unknown>,
+      };
+    },
+  );
+
+  // ---- memory_list ----
+  server.registerTool(
+    "memory_list",
+    {
+      description:
+        "List stored memories, optionally filtered by type or session. " +
+        "Returns entries ordered by most recently updated. Use the " +
+        "cursor for pagination.",
+      inputSchema: listMemoryShape,
+      outputSchema: listOutputShape,
+    },
+    async (params) => {
+      const profile = await getProfile(env, scope);
+      const result = await profile.list({
+        type: params.type,
+        sessionId: params.sessionId,
+        limit: params.limit ?? 50,
+        cursor: params.cursor,
+      });
+      const structured = {
+        count: result.memories.length,
+        memories: result.memories.map((m) => ({
+          id: m.id,
+          type: m.type,
+          summary: m.summary,
+          sessionId: m.sessionId,
+          createdAt: m.createdAt.toISOString(),
+          updatedAt: m.updatedAt.toISOString(),
+        })),
+        cursor: result.cursor ?? null,
+      };
+      return {
+        content: [
+          { type: "text" as const, text: JSON.stringify(structured, null, 2) },
         ],
         structuredContent: structured as unknown as Record<string, unknown>,
       };
@@ -279,88 +326,36 @@ function createServer(env: Env, scope: string): McpServer {
     "memory_get",
     {
       description:
-        "Fetch a single memory by its key. Returns the full entry " +
-        "including content, tags, and metadata.",
+        "Fetch a single memory by its ID. Returns the full entry " +
+        "including content and metadata.",
       inputSchema: getMemoryShape,
       outputSchema: memoryEntryOutputShape,
     },
     async (params) => {
-      const entry = await stub.get({ key: params.key });
-      if (!entry) {
+      const profile = await getProfile(env, scope);
+      try {
+        const memory = await profile.get(params.id);
+        const entry: MemoryEntry = {
+          id: memory.id,
+          type: memory.type,
+          summary: memory.summary,
+          content: memory.content,
+          sessionId: memory.sessionId,
+          createdAt: memory.createdAt.toISOString(),
+          updatedAt: memory.updatedAt.toISOString(),
+        };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(entry, null, 2) }],
+          structuredContent: entry as unknown as Record<string, unknown>,
+        };
+      } catch {
         return {
           content: [
-            { type: "text" as const, text: `No memory found with key: ${params.key}` },
+            { type: "text" as const, text: `No memory found with id: ${params.id}` },
           ],
           isError: true as const,
         };
       }
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(entry, null, 2) }],
-        structuredContent: entry as unknown as Record<string, unknown>,
-      };
-    },
-  );
-
-  // ---- memory_list ----
-  server.registerTool(
-    "memory_list",
-    {
-      description:
-        "List stored memories, optionally filtered by namespace or tag. " +
-        "Returns entries ordered by most recently updated.",
-      inputSchema: listMemoryShape,
-      outputSchema: searchOutputShape,
-    },
-    async (params) => {
-      const results = await stub.list({
-        namespace: params.namespace,
-        tag: params.tag,
-        limit: params.limit,
-      });
-      const structured = { count: results.length, results };
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(structured, null, 2),
-          },
-        ],
-        structuredContent: structured as unknown as Record<string, unknown>,
-      };
-    },
-  );
-
-  // ---- memory_update ----
-  server.registerTool(
-    "memory_update",
-    {
-      description:
-        "Update an existing memory by key. Can replace or append content, " +
-        "replace tags, and merge metadata. Use appendContent to add to " +
-        "existing content (e.g. appending new notes to a running document).",
-      inputSchema: updateMemoryShape,
-      outputSchema: memoryEntryOutputShape,
-    },
-    async (params) => {
-      const entry = await stub.update({
-        key: params.key,
-        content: params.content,
-        tags: params.tags,
-        metadata: params.metadata,
-        appendContent: params.appendContent,
-      });
-      if (!entry) {
-        return {
-          content: [
-            { type: "text" as const, text: `No memory found with key: ${params.key}` },
-          ],
-          isError: true as const,
-        };
-      }
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(entry, null, 2) }],
-        structuredContent: entry as unknown as Record<string, unknown>,
-      };
     },
   );
 
@@ -368,12 +363,44 @@ function createServer(env: Env, scope: string): McpServer {
   server.registerTool(
     "memory_delete",
     {
-      description: "Delete a memory by key. This is irreversible.",
+      description: "Delete a memory by ID. This is irreversible.",
       inputSchema: deleteMemoryShape,
       outputSchema: deleteOutputShape,
     },
     async (params) => {
-      const result = await stub.delete({ key: params.key });
+      const profile = await getProfile(env, scope);
+      try {
+        await profile.delete(params.id);
+        const result = { deleted: true };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          structuredContent: result as unknown as Record<string, unknown>,
+        };
+      } catch {
+        return {
+          content: [
+            { type: "text" as const, text: `No memory found with id: ${params.id}` },
+          ],
+          isError: true as const,
+        };
+      }
+    },
+  );
+
+  // ---- memory_delete_session ----
+  server.registerTool(
+    "memory_delete_session",
+    {
+      description:
+        "Delete all memories associated with a session ID. " +
+        "Idempotent — deleting a session with no memories is a no-op.",
+      inputSchema: deleteSessionShape,
+      outputSchema: deleteSessionOutputShape,
+    },
+    async (params) => {
+      const profile = await getProfile(env, scope);
+      await profile.deleteSession(params.sessionId);
+      const result = { deleted: true };
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
         structuredContent: result as unknown as Record<string, unknown>,
@@ -381,31 +408,28 @@ function createServer(env: Env, scope: string): McpServer {
     },
   );
 
-  // ---- memory_load ----
+  // ---- memory_summary ----
   server.registerTool(
-    "memory_load",
+    "memory_summary",
     {
       description:
-        "Load a large document (skill-style) by key in full. Use for " +
-        "reference material, runbooks, or templates stored as memories. " +
-        "Equivalent to the loadable context / skills pattern in the " +
-        "Agents SDK memory layer.",
-      inputSchema: loadMemoryShape,
-      outputSchema: loadOutputShape,
+        "Generate a structured Markdown summary of everything stored " +
+        "in memory. Use this to inspect what Agent Memory remembers " +
+        "about the user, or to bootstrap a new session with context.",
+      inputSchema: summaryShape,
+      outputSchema: summaryOutputShape,
     },
     async (params) => {
-      const entry = await stub.load({ key: params.key });
-      if (!entry) {
-        return {
-          content: [
-            { type: "text" as const, text: `No memory found with key: ${params.key}` },
-          ],
-          isError: true as const,
-        };
-      }
+      const profile = await getProfile(env, scope);
+      const result = await profile.getSummary({
+        sessionId: params.sessionId ?? null,
+      });
+      const structured = { summary: result.summary };
       return {
-        content: [{ type: "text" as const, text: entry.content }],
-        structuredContent: { content: entry.content } as unknown as Record<string, unknown>,
+        content: [
+          { type: "text" as const, text: JSON.stringify(structured, null, 2) },
+        ],
+        structuredContent: structured as unknown as Record<string, unknown>,
       };
     },
   );
@@ -415,11 +439,24 @@ function createServer(env: Env, scope: string): McpServer {
     "memory_stats",
     {
       description:
-        "Return memory statistics: total count and per-namespace breakdown.",
+        "Return memory statistics: total count and per-type breakdown " +
+        "(fact, event, instruction, task).",
       outputSchema: statsOutputShape,
     },
     async () => {
-      const stats = await stub.stats();
+      const profile = await getProfile(env, scope);
+      // Agent Memory doesn't have a direct stats endpoint, so we
+      // compute from list() with a large limit.
+      const all = await profile.list({ limit: 500 });
+      const byType: Partial<Record<MemoryType, number>> = {};
+      for (const m of all.memories) {
+        byType[m.type] = (byType[m.type] ?? 0) + 1;
+      }
+      // If there's a cursor, there are more than 500 — note it.
+      const stats: StatsResponse = {
+        total: all.cursor ? 500 : all.memories.length,
+        byType,
+      };
       return {
         content: [{ type: "text" as const, text: JSON.stringify(stats, null, 2) }],
         structuredContent: stats as unknown as Record<string, unknown>,
@@ -463,7 +500,6 @@ const SSO_STATE_MAX_AGE = 600; // 10 minutes
 function generateState(): string {
   const bytes = new Uint8Array(32);
   crypto.getRandomValues(bytes);
-  // Base64url encode without padding.
   return btoa(String.fromCharCode(...bytes))
     .replace(/\+/g, "-")
     .replace(/\//g, "_")
@@ -474,25 +510,17 @@ async function handleSsoStart(env: Env, requestUrl: URL): Promise<Response> {
   const authWebUrl = (env.AUTH_WEB_URL || AUTH_WEB_URL_DEFAULT).replace(/\/$/, "");
   const state = generateState();
 
-  // Detect UI flow: /auth/sso?ui=1 means the browser is logging in
-  // through the web UI (not the CLI). The callback will set a token
-  // cookie and redirect to / instead of returning raw JSON.
   const isUiFlow = requestUrl.searchParams.get("ui") === "1";
 
-  // Build the callback URL with state param. We include state in return_to
-  // so auth-web can pass it back (if it preserves query params). The cookie
-  // is the primary validation mechanism.
   const callbackUrl = `${requestUrl.origin}/auth/callback?state=${encodeURIComponent(state)}`;
   const signInUrl = `${authWebUrl}/sign-in?return_to=${encodeURIComponent(callbackUrl)}`;
 
   const redirect = Response.redirect(signInUrl, 302);
   const headers = new Headers(redirect.headers);
-  // State cookie (CSRF protection) — always set.
   headers.append(
     "Set-Cookie",
     `${SSO_STATE_COOKIE}=${state}; HttpOnly; Secure; SameSite=Lax; Max-Age=${SSO_STATE_MAX_AGE}; Path=/auth`,
   );
-  // UI flow flag — only set when ?ui=1 is present.
   if (isUiFlow) {
     headers.append(
       "Set-Cookie",
@@ -507,18 +535,14 @@ async function handleSsoStart(env: Env, requestUrl: URL): Promise<Response> {
 }
 
 async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): Promise<Response> {
-  // --- CSRF: validate state cookie ---
   const cookieHeader = request.headers.get("cookie") ?? "";
   const stateCookie = parseCookie(cookieHeader, SSO_STATE_COOKIE);
   const stateParam = requestUrl.searchParams.get("state");
   const isUiFlow = parseCookie(cookieHeader, SSO_UI_FLOW_COOKIE) === "1";
 
-  // Cookies to clear on any exit path (state + ui flow flag).
   const clearStateCookie = `${SSO_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`;
   const clearUiFlowCookie = `${SSO_UI_FLOW_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`;
 
-  // Build a JSON error response with cookie-clearing headers.
-  // Each Set-Cookie MUST be a separate header (appended, not joined).
   function errorResponse(
     body: string,
     status: number,
@@ -534,16 +558,11 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
 
   if (!stateCookie) {
     return errorResponse(
-      JSON.stringify({
-        error: "missing state cookie — start the login flow from /auth/sso",
-      }),
+      JSON.stringify({ error: "missing state cookie — start the login flow from /auth/sso" }),
       400,
     );
   }
 
-  // If state param is present (auth-web passed it back), it must match
-  // the cookie. If state param is absent, the cookie alone proves the
-  // flow started from /auth/sso.
   if (stateParam && stateParam !== stateCookie) {
     return errorResponse(
       JSON.stringify({ error: "state mismatch — possible CSRF attempt" }),
@@ -561,18 +580,12 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
     return errorResponse(JSON.stringify({ error: "AUTH_API_URL not configured" }), 500);
   }
 
-  // The client_id must match the origin the code was minted for.
-  // For the worker-hosted callback, the origin is the worker's own URL.
   const clientId = requestUrl.origin;
 
   const exchangeRes = await fetch(`${authApiUrl}/sso/exchange`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      code,
-      client_id: clientId,
-      include_token: true,
-    }),
+    body: JSON.stringify({ code, client_id: clientId, include_token: true }),
   });
 
   const exchange = (await exchangeRes.json().catch(() => null)) as
@@ -583,18 +596,12 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
   if (!exchangeRes.ok || !exchange || !("token" in exchange) || !exchange.token) {
     const error =
       exchange && "error" in exchange ? exchange.error : `SSO exchange failed (${exchangeRes.status})`;
-    return errorResponse(
-      JSON.stringify({ error }),
-      exchangeRes.status === 400 ? 400 : 502,
-    );
+    return errorResponse(JSON.stringify({ error }), exchangeRes.status === 400 ? 400 : 502);
   }
 
   const token = exchange.token;
   const expiresIn = exchange.expires_in ?? 8 * 60 * 60;
 
-  // --- UI flow: set token cookie + redirect to / ---
-  // The token cookie is non-HttpOnly so the UI's JavaScript can read it
-  // and move it to sessionStorage. The UI deletes the cookie after reading.
   if (isUiFlow) {
     const tokenCookie = `${SSO_TOKEN_COOKIE}=${token}; Secure; SameSite=Lax; Max-Age=60; Path=/`;
     const headers = new Headers();
@@ -605,20 +612,14 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
     return new Response(null, { status: 302, headers });
   }
 
-  // --- CLI flow: return JSON (existing behavior) ---
   return errorResponse(
-    JSON.stringify({
-      token,
-      expires_in: expiresIn,
-      user: exchange.user,
-    }),
+    JSON.stringify({ token, expires_in: expiresIn, user: exchange.user }),
     200,
   );
 }
 
 /**
  * Parse a specific cookie value from a Cookie header.
- * Returns null if the cookie is not present.
  */
 function parseCookie(cookieHeader: string, name: string): string | null {
   const cookies = cookieHeader.split(";").map((c) => c.trim());
@@ -634,12 +635,10 @@ function parseCookie(cookieHeader: string, name: string): string | null {
 
 // ---------- REST API for the web UI ----------
 //
-// Simple REST endpoints that call the same Durable Object methods as the
-// MCP tools. The web UI (served by a separate UI worker) proxies these
-// through a service binding, so they share the same origin and auth.
+// Simple REST endpoints that call the same Agent Memory APIs as the MCP
+// tools. The web UI proxies these through a service binding.
 //
-// All endpoints require a valid JWT (verified by the `authenticate`
-// function before reaching here).
+// All endpoints require a valid JWT.
 
 async function handleRestApi(
   request: Request,
@@ -647,107 +646,153 @@ async function handleRestApi(
   url: URL,
   scope: string,
 ): Promise<Response> {
-  const stub = memoryStub(env, scope);
+  const profile = await getProfile(env, scope);
   const method = request.method;
   const path = url.pathname.replace(/^\/api\/?/, "");
 
   try {
     // GET /api/stats
     if (path === "stats" && method === "GET") {
-      const stats = await stub.stats();
-      return Response.json(stats);
+      const all = await profile.list({ limit: 500 });
+      const byType: Partial<Record<MemoryType, number>> = {};
+      for (const m of all.memories) {
+        byType[m.type] = (byType[m.type] ?? 0) + 1;
+      }
+      return Response.json({
+        total: all.cursor ? 500 : all.memories.length,
+        byType,
+      });
     }
 
-    // GET /api/memories?namespace=&tag=&limit=
+    // GET /api/memories?type=&sessionId=&limit=&cursor=
     if (path === "memories" && method === "GET") {
-      const namespace = url.searchParams.get("namespace") ?? undefined;
-      const tag = url.searchParams.get("tag") ?? undefined;
+      const type = url.searchParams.get("type") as MemoryType | null;
+      const sessionId = url.searchParams.get("sessionId") ?? undefined;
       const limit = url.searchParams.get("limit")
         ? Math.min(parseInt(url.searchParams.get("limit")!, 10), 500)
         : 50;
-      const results = await stub.list({ namespace, tag, limit });
-      return Response.json({ count: results.length, results });
+      const cursor = url.searchParams.get("cursor") ?? undefined;
+      const result = await profile.list({
+        type: type ?? undefined,
+        sessionId,
+        limit,
+        cursor,
+      });
+      return Response.json({
+        count: result.memories.length,
+        memories: result.memories.map((m) => ({
+          id: m.id,
+          type: m.type,
+          summary: m.summary,
+          sessionId: m.sessionId,
+          createdAt: m.createdAt.toISOString(),
+          updatedAt: m.updatedAt.toISOString(),
+        })),
+        cursor: result.cursor ?? null,
+      });
     }
 
-    // POST /api/memories  { content, key?, namespace?, tags?, metadata? }
+    // POST /api/memories  { content, sessionId? }
     if (path === "memories" && method === "POST") {
       const body = (await request.json().catch(() => null)) as {
         content?: string;
-        key?: string;
-        namespace?: string;
-        tags?: string[];
-        metadata?: Record<string, unknown>;
+        sessionId?: string;
       } | null;
       if (!body?.content) {
         return Response.json({ error: "content is required" }, { status: 400 });
       }
-      const entry = await stub.add({
+      const memory = await profile.remember({
         content: body.content,
-        key: body.key,
-        namespace: body.namespace,
-        tags: body.tags,
-        metadata: body.metadata,
+        sessionId: body.sessionId ?? null,
       });
-      return Response.json(entry, { status: 201 });
+      return Response.json(
+        {
+          id: memory.id,
+          type: memory.type,
+          summary: memory.summary,
+          content: memory.content,
+          sessionId: memory.sessionId,
+          createdAt: memory.createdAt.toISOString(),
+          updatedAt: memory.updatedAt.toISOString(),
+        },
+        { status: 201 },
+      );
     }
 
-    // GET /api/search?q=&namespace=&limit=
+    // POST /api/search  { query, thinkingLevel?, responseLength? }
+    if (path === "search" && method === "POST") {
+      const body = (await request.json().catch(() => null)) as {
+        query?: string;
+        thinkingLevel?: "low" | "medium" | "high";
+        responseLength?: "short" | "medium" | "long";
+      } | null;
+      if (!body?.query) {
+        return Response.json({ error: "query is required" }, { status: 400 });
+      }
+      const result = await profile.recall(body.query, {
+        thinkingLevel: body.thinkingLevel,
+        responseLength: body.responseLength,
+      });
+      return Response.json(result);
+    }
+
+    // GET /api/search?q=  (query param style for simple GET requests)
     if (path === "search" && method === "GET") {
       const q = url.searchParams.get("q") ?? "";
       if (!q.trim()) {
-        return Response.json({ count: 0, results: [] });
+        return Response.json({ count: 0, answer: "", candidates: [] });
       }
-      const namespace = url.searchParams.get("namespace") ?? undefined;
-      const limit = url.searchParams.get("limit")
-        ? Math.min(parseInt(url.searchParams.get("limit")!, 10), 100)
-        : 20;
-      const results = await stub.search({ query: q, namespace, limit });
-      return Response.json({ count: results.length, results });
+      const result = await profile.recall(q);
+      return Response.json(result);
     }
 
-    // /api/memories/:key
-    const keyMatch = path.match(/^memories\/(.+)$/);
-    if (keyMatch) {
-      const key = decodeURIComponent(keyMatch[1]!);
+    // GET /api/summary
+    if (path === "summary" && method === "GET") {
+      const sessionId = url.searchParams.get("sessionId") ?? undefined;
+      const result = await profile.getSummary({
+        sessionId: sessionId ?? null,
+      });
+      return Response.json(result);
+    }
 
-      // GET /api/memories/:key
+    // /api/memories/:id
+    const idMatch = path.match(/^memories\/(.+)$/);
+    if (idMatch) {
+      const id = decodeURIComponent(idMatch[1]!);
+
       if (method === "GET") {
-        const entry = await stub.get({ key });
-        if (!entry) {
+        try {
+          const memory = await profile.get(id);
+          return Response.json({
+            id: memory.id,
+            type: memory.type,
+            summary: memory.summary,
+            content: memory.content,
+            sessionId: memory.sessionId,
+            createdAt: memory.createdAt.toISOString(),
+            updatedAt: memory.updatedAt.toISOString(),
+          });
+        } catch {
           return Response.json({ error: "not found" }, { status: 404 });
         }
-        return Response.json(entry);
       }
 
-      // PATCH /api/memories/:key  { content?, tags?, metadata?, appendContent? }
-      if (method === "PATCH") {
-        const body = (await request.json().catch(() => null)) as {
-          content?: string;
-          tags?: string[];
-          metadata?: Record<string, unknown>;
-          appendContent?: boolean;
-        } | null;
-        if (!body) {
-          return Response.json({ error: "invalid body" }, { status: 400 });
-        }
-        const entry = await stub.update({
-          key,
-          content: body.content,
-          tags: body.tags,
-          metadata: body.metadata,
-          appendContent: body.appendContent,
-        });
-        if (!entry) {
-          return Response.json({ error: "not found" }, { status: 404 });
-        }
-        return Response.json(entry);
-      }
-
-      // DELETE /api/memories/:key
       if (method === "DELETE") {
-        const result = await stub.delete({ key });
-        return Response.json(result);
+        try {
+          await profile.delete(id);
+          return Response.json({ deleted: true });
+        } catch {
+          return Response.json({ error: "not found" }, { status: 404 });
+        }
       }
+    }
+
+    // DELETE /api/session/:sessionId
+    const sessionMatch = path.match(/^session\/(.+)$/);
+    if (sessionMatch && method === "DELETE") {
+      const sessionId = decodeURIComponent(sessionMatch[1]!);
+      await profile.deleteSession(sessionId);
+      return Response.json({ deleted: true });
     }
 
     return Response.json({ error: "not found" }, { status: 404 });
@@ -770,15 +815,10 @@ export default {
   ): Promise<Response> {
     const url = new URL(request.url);
 
-    // Health check endpoint (outside MCP + auth).
     if (url.pathname === "/healthz") {
       return Response.json({ ok: true, service: "memory-server" });
     }
 
-    // OAuth 2.1 resource server metadata (RFC 9728). Tells MCP clients
-    // (ChatGPT, Claude, Codex) where the authorization server lives.
-    // The auth server publishes its own /.well-known/oauth-authorization-server
-    // which clients fetch to discover the authorize/token/register endpoints.
     if (url.pathname === "/.well-known/oauth-protected-resource") {
       const authApiUrl = (env.AUTH_API_URL ?? "").replace(/\/$/, "");
       return Response.json({
@@ -790,7 +830,6 @@ export default {
       });
     }
 
-    // SSO endpoints (outside MCP auth — they're the auth bootstrap).
     if (url.pathname === "/auth/sso") {
       return handleSsoStart(env, url);
     }
@@ -798,9 +837,6 @@ export default {
       return handleSsoCallback(env, url, request);
     }
 
-    // Auth check — verify JWT via JWKS before entering MCP or REST API.
-    // On 401, return a WWW-Authenticate header pointing to the resource
-    // metadata so MCP clients can auto-discover the OAuth flow.
     const auth = await authenticate(request, env);
     if (!auth) {
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
@@ -813,14 +849,10 @@ export default {
       });
     }
 
-    // REST API for the web UI. Same auth + same DO as MCP tools.
     if (url.pathname.startsWith("/api/")) {
       return handleRestApi(request, env, url, auth.scope);
     }
 
-    // Build a fresh McpServer for this request (authenticated + scoped),
-    // then pass it to createMcpHandler. The handler processes the MCP
-    // Streamable HTTP protocol on the /mcp route.
     const server = createServer(env, auth.scope);
     const handler = createMcpHandler(server, {
       route: "/mcp",

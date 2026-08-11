@@ -127,6 +127,72 @@ a:hover {
   color: var(--primary);
 }
 
+.type-fact { color: #2f81f7; }
+.type-event { color: #2ea043; }
+.type-instruction { color: #d29922; }
+.type-task { color: #f85149; }
+
+.memory-type {
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  padding: 0.1rem 0.4rem;
+  border-radius: 4px;
+  background: var(--bg-secondary);
+}
+
+.search-answer {
+  padding: 0.75rem 1rem;
+  margin-bottom: 1rem;
+  background: var(--bg-secondary);
+  border-left: 3px solid var(--primary);
+  border-radius: 4px;
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.memory-detail-header {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  margin-bottom: 1rem;
+}
+
+.memory-detail-header h2 {
+  margin: 0;
+  flex: 1;
+}
+
+.memory-detail-content pre {
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  background: var(--bg-secondary);
+  padding: 1rem;
+  border-radius: 6px;
+  font-family: inherit;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+
+.memory-detail-meta {
+  margin: 1rem 0;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+}
+
+.memory-detail-actions {
+  margin-top: 1rem;
+}
+
+.form-hint {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  margin-bottom: 1rem;
+}
+
 .search-bar {
   display: flex;
   gap: 0.75rem;

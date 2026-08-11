@@ -1,21 +1,34 @@
-import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { api, isLoggedIn, type MemoryEntry, type StatsResponse } from "~/lib/api";
+import {
+  api,
+  isLoggedIn,
+  type MemoryListItem,
+  type MemoryType,
+  type StatsResponse,
+  type SearchResponse,
+} from "~/lib/api";
 
 export const Route = createFileRoute("/")({
   component: HomeComponent,
 });
 
+const TYPE_COLORS: Record<MemoryType, string> = {
+  fact: "type-fact",
+  event: "type-event",
+  instruction: "type-instruction",
+  task: "type-task",
+};
+
 function HomeComponent() {
-  const navigate = useNavigate();
-  const [memories, setMemories] = useState<MemoryEntry[]>([]);
+  const [memories, setMemories] = useState<MemoryListItem[]>([]);
   const [query, setQuery] = useState("");
+  const [searchResult, setSearchResult] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Initialize synchronously to avoid flash of login prompt.
   const [loggedIn] = useState(() => isLoggedIn());
   const [stats, setStats] = useState<StatsResponse | null>(null);
-  const [namespaceFilter, setNamespaceFilter] = useState<string>("");
+  const [typeFilter, setTypeFilter] = useState<MemoryType | "">("");
 
   const loadMemories = useCallback(async () => {
     setLoading(true);
@@ -23,69 +36,66 @@ function HomeComponent() {
     try {
       const data = await api.list({
         limit: 100,
-        namespace: namespaceFilter || undefined,
+        type: typeFilter || undefined,
       });
-      setMemories(data.results);
+      setMemories(data.memories);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
     } finally {
       setLoading(false);
     }
-  }, [namespaceFilter]);
+  }, [typeFilter]);
 
   const doSearch = useCallback(async (q: string) => {
     if (!q.trim()) {
+      setSearchResult(null);
       loadMemories();
       return;
     }
     setLoading(true);
     setError(null);
     try {
-      const data = await api.search(q, {
-        limit: 50,
-        namespace: namespaceFilter || undefined,
-      });
-      setMemories(data.results);
+      const data = await api.search(q);
+      setSearchResult(data);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Search failed");
     } finally {
       setLoading(false);
     }
-  }, [loadMemories, namespaceFilter]);
+  }, [loadMemories]);
 
-  // Load stats on mount.
   useEffect(() => {
     if (!loggedIn) return;
     api.stats().then(setStats).catch(() => {});
   }, [loggedIn]);
 
-  // Load memories on mount / namespace change.
   useEffect(() => {
     if (loggedIn) loadMemories();
   }, [loggedIn, loadMemories]);
 
-  // Debounced search.
   useEffect(() => {
     const timer = setTimeout(() => {
       if (loggedIn) doSearch(query);
-    }, 300);
+    }, 400);
     return () => clearTimeout(timer);
   }, [query, loggedIn, doSearch]);
 
-  const handleDelete = async (key: string) => {
-    if (!confirm(`Delete "${key}"?`)) return;
+  const handleDelete = async (id: string) => {
+    if (!confirm(`Delete this memory?`)) return;
     try {
-      await api.delete(key);
-      setMemories((prev) => prev.filter((m) => m.key !== key));
-      // Refresh stats after delete.
+      await api.delete(id);
+      setMemories((prev) => prev.filter((m) => m.id !== id));
       api.stats().then(setStats).catch(() => {});
     } catch (err) {
       setError(err instanceof Error ? err.message : "Delete failed");
     }
   };
 
-  const namespaces = useMemo(
-    () => Object.entries(stats?.byNamespace ?? {}).sort((a, b) => b[1] - a[1]),
+  const types = useMemo(
+    () =>
+      (Object.entries(stats?.byType ?? {}) as [MemoryType, number][]).sort(
+        (a, b) => b[1] - a[1],
+      ),
     [stats],
   );
 
@@ -101,26 +111,36 @@ function HomeComponent() {
     );
   }
 
+  const displayItems = searchResult
+    ? searchResult.candidates.map((c) => ({
+        id: c.id,
+        type: "fact" as MemoryType,
+        summary: c.summary,
+        sessionId: c.sessionId,
+        createdAt: "",
+        updatedAt: "",
+      }))
+    : memories;
+
   return (
     <div>
-      {/* Stats bar */}
       {stats && (
         <div className="stats-bar">
           <span className="stats-total">{stats.total} memories</span>
           <div className="namespace-chips">
             <button
-              className={`chip ${namespaceFilter === "" ? "chip-active" : ""}`}
-              onClick={() => setNamespaceFilter("")}
+              className={`chip ${typeFilter === "" ? "chip-active" : ""}`}
+              onClick={() => setTypeFilter("")}
             >
               All
             </button>
-            {namespaces.map(([ns, count]) => (
+            {types.map(([t, count]) => (
               <button
-                key={ns}
-                className={`chip ${namespaceFilter === ns ? "chip-active" : ""}`}
-                onClick={() => setNamespaceFilter(ns)}
+                key={t}
+                className={`chip ${typeFilter === t ? "chip-active" : ""} ${TYPE_COLORS[t]}`}
+                onClick={() => setTypeFilter(t)}
               >
-                {ns} ({count})
+                {t} ({count})
               </button>
             ))}
           </div>
@@ -141,39 +161,48 @@ function HomeComponent() {
         </Link>
       </div>
 
+      {searchResult && searchResult.answer && (
+        <div className="search-answer">
+          <strong>Answer:</strong> {searchResult.answer}
+        </div>
+      )}
+
       {error && <div className="error">{error}</div>}
       {loading && <div className="loading">Loading…</div>}
 
-      {!loading && memories.length === 0 && (
+      {!loading && displayItems.length === 0 && (
         <div className="empty">
           {query ? "No memories found." : "No memories yet. Create one!"}
         </div>
       )}
 
       <div className="memory-list">
-        {memories.map((m) => (
+        {displayItems.map((m) => (
           <div key={m.id} className="memory-card">
             <div className="memory-card-header">
               <Link
                 to="/memory/$key"
-                params={{ key: m.key ?? m.id }}
+                params={{ key: m.id }}
                 className="memory-key"
               >
-                {m.key ?? m.id}
+                {m.summary}
               </Link>
-              <span className="memory-namespace">{m.namespace}</span>
-            </div>
-            <div className="memory-content">{m.content}</div>
-            <div className="memory-card-footer">
-              {m.tags.map((t) => (
-                <span key={t} className="tag">{t}</span>
-              ))}
-              <span className="memory-date">
-                {new Date(m.updatedAt).toLocaleDateString()}
+              <span className={`memory-type ${TYPE_COLORS[m.type] ?? ""}`}>
+                {m.type}
               </span>
+            </div>
+            {m.createdAt && (
+              <div className="memory-date">
+                {new Date(m.createdAt).toLocaleDateString()}
+              </div>
+            )}
+            <div className="memory-card-footer">
+              {m.sessionId && (
+                <span className="tag">session: {m.sessionId}</span>
+              )}
               <button
                 className="btn btn-danger btn-sm"
-                onClick={() => m.key && handleDelete(m.key)}
+                onClick={() => handleDelete(m.id)}
               >
                 Delete
               </button>

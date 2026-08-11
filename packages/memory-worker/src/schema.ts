@@ -1,194 +1,231 @@
 /**
- * Shared types and Zod schemas for the memory store.
+ * Shared types and Zod schemas for the Agent Memory–backed memory server.
  *
- * The memory model mirrors the concepts in the Cloudflare Agents SDK memory
- * layer (agents/experimental/memory/session):
+ * Cloudflare Agent Memory automatically classifies every memory into one of
+ * four types:
+ *   - **fact** — Stable knowledge (preferences, identities, relationships)
+ *   - **event** — Completed actions anchored to a point in time
+ *   - **instruction** — Reusable procedures, workflows, conventions
+ *   - **task** — Short-lived, session-scoped items
  *
- *   - **Writable short-form context** → `namespace` + `content` entries that
- *     an agent reads/writes via `memory_add` / `memory_update`.
- *   - **Searchable context** → FTS5-backed `memory_search`, equivalent to the
- *     `AgentSearchProvider` pattern.
- *   - **Loadable context / Skills** → large documents stored by `key` and
- *     loaded whole via `memory_load`.
- *
- * Each entry belongs to a *scope* (→ its own Durable Object instance) so
- * memories from different projects / identities never collide.
+ * Memories also support supersession: when a newer fact/instruction replaces
+ * an older one on the same topic, the old version is preserved but the latest
+ * surfaces in recall results.
  */
 
 import { z } from "zod";
 
-/** A single memory entry as stored in SQLite. */
+/** Memory types supported by Agent Memory. */
+export type MemoryType = "fact" | "event" | "instruction" | "task";
+
+/** A single memory entry as returned by Agent Memory. */
 export interface MemoryEntry {
   id: string;
-  key: string | null;
+  type: MemoryType;
+  summary: string;
   content: string;
-  namespace: string;
-  tags: string[];
-  metadata: Record<string, unknown>;
+  sessionId: string | null;
   createdAt: string;
   updatedAt: string;
 }
 
-/** Row shape coming out of the SQLite driver (JSON columns are strings). */
-export interface MemoryRow {
-  id: string;
-  key: string | null;
-  content: string;
-  namespace: string;
-  tags: string;
-  metadata: string;
-  created_at: string;
-  updated_at: string;
+/** Result from a recall() call. */
+export interface RecallResult {
+  count: number;
+  answer: string;
+  candidates: Array<{
+    id: string;
+    summary: string;
+    sessionId: string | null;
+    score: number;
+  }>;
 }
 
-/** Convert a raw SQLite row into a MemoryEntry. */
-export function rowToEntry(row: MemoryRow): MemoryEntry {
-  return {
-    id: row.id,
-    key: row.key,
-    content: row.content,
-    namespace: row.namespace,
-    tags: safeParseJson(row.tags, []) as string[],
-    metadata: safeParseJson(row.metadata, {}) as Record<string, unknown>,
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-  };
-}
-
-function safeParseJson(raw: string, fallback: unknown): unknown {
-  try {
-    return JSON.parse(raw);
-  } catch {
-    return fallback;
-  }
+/** Stats response computed from list(). */
+export interface StatsResponse {
+  total: number;
+  byType: Partial<Record<MemoryType, number>>;
 }
 
 // ---------- Zod raw shapes (for MCP tool inputSchema) ----------
-// The MCP SDK v2 registerTool accepts a ZodRawShape (object of zod types)
-// directly as inputSchema. We export the shapes here so the tool definitions
-// in index.ts can reference them.
 
 export const addMemoryShape = {
-  content: z.string().min(1).describe("The memory content to store."),
-  key: z
+  content: z
+    .string()
+    .min(1)
+    .describe(
+      "The memory content to store. Agent Memory will automatically " +
+        "classify it as a fact, event, instruction, or task, and " +
+        "generate a summary. If a similar fact or instruction already " +
+        "exists, it will be superseded (the old version is preserved " +
+        "but the new one surfaces in recall).",
+    ),
+  sessionId: z
     .string()
     .optional()
     .describe(
-      "Human-readable unique key within this scope. " +
-        "If omitted, a UUID is generated. Use keys for loadable " +
-        "documents you want to fetch by name later.",
+      "Optional session identifier to group related memories. " +
+        "Max 64 characters.",
     ),
-  namespace: z
-    .string()
-    .optional()
-    .describe(
-      "Logical grouping — e.g. 'facts', 'preferences', 'projects'. " +
-        "Defaults to 'default'.",
-    ),
-  tags: z
-    .array(z.string())
-    .optional()
-    .describe("Free-form tags for filtering and organization."),
-  metadata: z
-    .record(z.string(), z.unknown())
-    .optional()
-    .describe("Arbitrary JSON metadata to attach to the memory."),
 };
 
 export const searchMemoryShape = {
-  query: z.string().min(1).describe("Full-text search query."),
-  namespace: z
+  query: z
     .string()
-    .optional()
-    .describe("Restrict search to a namespace."),
-  limit: z
-    .number()
-    .int()
     .min(1)
-    .max(100)
+    .describe(
+      "Natural language search query. Agent Memory runs hybrid search " +
+        "(keyword + semantic + topic key) and returns a synthesized " +
+        "answer grounded in stored content.",
+    ),
+  thinkingLevel: z
+    .enum(["low", "medium", "high"])
     .optional()
-    .describe("Maximum number of results. Defaults to 10."),
+    .describe(
+      "Controls retrieval breadth. Higher levels search more candidates " +
+        "but take longer. Defaults to 'low'.",
+    ),
+  responseLength: z
+    .enum(["short", "medium", "long"])
+    .optional()
+    .describe(
+      "Controls the verbosity of the synthesized answer. " +
+        "Defaults to 'medium'.",
+    ),
 };
 
-export const getMemoryShape = {
-  key: z.string().describe("The memory key to fetch."),
+export const ingestMemoryShape = {
+  messages: z
+    .array(
+      z.object({
+        role: z.enum(["system", "user", "assistant"]),
+        content: z.string().min(1),
+      }),
+    )
+    .min(1)
+    .max(500)
+    .describe(
+      "Conversation messages to process. Agent Memory will automatically " +
+        "extract facts, events, instructions, and tasks from the " +
+        "conversation. Re-ingesting the same messages is idempotent — " +
+        "no duplicates are created.",
+    ),
+  sessionId: z
+    .string()
+    .optional()
+    .describe(
+      "Optional session identifier. If omitted, one is derived from " +
+        "the message content.",
+    ),
 };
 
 export const listMemoryShape = {
-  namespace: z.string().optional().describe("Filter by namespace."),
-  tag: z.string().optional().describe("Filter by tag."),
+  type: z
+    .enum(["fact", "event", "instruction", "task"])
+    .optional()
+    .describe("Filter by memory type."),
+  sessionId: z
+    .string()
+    .optional()
+    .describe("Filter by session ID."),
   limit: z
     .number()
     .int()
     .min(1)
-    .max(200)
+    .max(500)
     .optional()
     .describe("Maximum number of results. Defaults to 50."),
-};
-
-export const updateMemoryShape = {
-  key: z.string().describe("The memory key to update."),
-  content: z
+  cursor: z
     .string()
     .optional()
-    .describe("New content. If omitted, the existing content is kept."),
-  tags: z
-    .array(z.string())
-    .optional()
-    .describe("Replace tags. If omitted, existing tags are kept."),
-  metadata: z
-    .record(z.string(), z.unknown())
-    .optional()
-    .describe(
-      "Merge metadata. If omitted, existing metadata is kept. " +
-        "Provide a key with null to remove it.",
-    ),
-  appendContent: z
-    .boolean()
-    .optional()
-    .describe(
-      "If true, append to existing content instead of replacing it.",
-    ),
+    .describe("Opaque cursor from a previous page for pagination."),
+};
+
+export const getMemoryShape = {
+  id: z.string().describe("The memory ID to fetch."),
 };
 
 export const deleteMemoryShape = {
-  key: z.string().describe("The memory key to delete."),
+  id: z.string().describe("The memory ID to delete."),
 };
 
-export const loadMemoryShape = {
-  key: z.string().describe("The skill/document key to load in full."),
+export const deleteSessionShape = {
+  sessionId: z.string().describe("The session ID to delete all memories for."),
+};
+
+export const summaryShape = {
+  sessionId: z
+    .string()
+    .optional()
+    .describe(
+      "Optional session ID to scope the 'Last Session' section. " +
+        "If omitted, the most recent session is used.",
+    ),
 };
 
 // ---------- Zod raw shapes (for MCP tool outputSchema) ----------
-// ChatGPT's MCP connector requires outputSchema on tools to surface them
-// as Actions. Each shape describes the JSON structure of the text content
-// returned in the tool result's content[0].text field.
 
 export const memoryEntryOutputShape = {
-  id: z.string().describe("Unique identifier (UUID)."),
-  key: z.string().nullable().describe("Human-readable key, or null if auto-generated."),
-  content: z.string().describe("The memory content text."),
-  namespace: z.string().describe("Namespace grouping this memory belongs to."),
-  tags: z.array(z.string()).describe("Tags attached to this memory."),
-  metadata: z.record(z.string(), z.unknown()).describe("Arbitrary JSON metadata."),
+  id: z.string().describe("Unique identifier."),
+  type: z.string().describe("Memory type: fact, event, instruction, or task."),
+  summary: z.string().describe("Auto-generated summary."),
+  content: z.string().describe("Full memory content."),
+  sessionId: z.string().nullable().describe("Session ID, if associated."),
   createdAt: z.string().describe("ISO timestamp of creation."),
   updatedAt: z.string().describe("ISO timestamp of last update."),
 };
 
 export const searchOutputShape = {
-  count: z.number().describe("Number of results returned."),
-  results: z.array(z.object(memoryEntryOutputShape)).describe("Matching memory entries, ranked by relevance."),
+  count: z.number().describe("Number of candidate memories found."),
+  answer: z.string().describe("Synthesized answer grounded in stored content."),
+  candidates: z
+    .array(
+      z.object({
+        id: z.string(),
+        summary: z.string(),
+        sessionId: z.string().nullable(),
+        score: z.number(),
+      }),
+    )
+    .describe("Ranked candidate memories."),
+};
+
+export const ingestOutputShape = {
+  ingested: z.boolean().describe("Whether ingestion was successful."),
+};
+
+export const listOutputShape = {
+  count: z.number().describe("Number of memories returned."),
+  memories: z
+    .array(
+      z.object({
+        id: z.string(),
+        type: z.string(),
+        summary: z.string(),
+        sessionId: z.string().nullable(),
+        createdAt: z.string(),
+        updatedAt: z.string(),
+      }),
+    )
+    .describe("Memory entries."),
+  cursor: z.string().nullable().describe("Cursor for the next page, if any."),
 };
 
 export const deleteOutputShape = {
   deleted: z.boolean().describe("Whether the memory was deleted."),
 };
 
-export const statsOutputShape = {
-  total: z.number().describe("Total number of memories across all namespaces."),
-  byNamespace: z.record(z.string(), z.number()).describe("Count per namespace."),
+export const deleteSessionOutputShape = {
+  deleted: z.boolean().describe("Whether the session memories were deleted."),
 };
 
-export const loadOutputShape = {
-  content: z.string().describe("The full text content of the loaded document."),
+export const statsOutputShape = {
+  total: z.number().describe("Total number of memories."),
+  byType: z
+    .record(z.string(), z.number())
+    .describe("Count per memory type (fact, event, instruction, task)."),
+};
+
+export const summaryOutputShape = {
+  summary: z.string().describe("Structured Markdown summary of all memories."),
 };

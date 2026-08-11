@@ -1,7 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "memory-server",
-  "compatibility_date": "2026-07-02",
+  "compatibility_date": "2026-08-10",
   // nodejs_compat is required by the Agents SDK (Durable Object durability +
   // node:async_hooks for Cloudflare AsyncLocalStorage context) and by jose
   // (WebCrypto + jose runtime).
@@ -12,21 +12,6 @@
   // Keep the workers.dev subdomain active — the UI worker proxies to this.
   "workers_dev": true,
 
-  "durable_objects": {
-    "bindings": [
-      {
-        "class_name": "MemoryAgent",
-        "name": "MEMORY_AGENT"
-      }
-    ]
-  },
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["MemoryAgent"]
-    }
-  ],
-
   "vars": {
     // Allen Labs central auth API. The worker verifies RS256 JWTs minted by
     // this server via its JWKS endpoint ({AUTH_API_URL}/.well-known/jwks.json).
@@ -35,10 +20,37 @@
     // Auth web UI origin (where the browser sign-in form lives).
     "AUTH_WEB_URL": "https://auth.allen.company",
     // Default scope when a client doesn't specify one via x-memory-scope.
-    // Each scope gets its own Durable Object instance → isolated SQLite DB.
+    // Each scope gets its own Agent Memory profile → isolated memory store.
     // When empty, the JWT's `sub` (user id) is used as the scope.
     "DEFAULT_SCOPE": ""
-  }
+  },
+
+  // Agent Memory binding — Cloudflare's managed memory service.
+  // Provides automatic extraction, classification (fact/event/instruction/task),
+  // supersession, hybrid search (keyword + semantic), and synthesis.
+  // The namespace "memory" was created via:
+  //   npx wrangler agent-memory namespace create memory
+  "agent_memory": [
+    {
+      "binding": "MEMORY",
+      "namespace": "memory"
+    }
+  ],
+
+  // Migration: delete the old MemoryAgent Durable Object class.
+  // The system has migrated from DO-backed SQLite to Cloudflare Agent Memory.
+  // This removes the DO class; existing DO data (1 entry) will be orphaned
+  // but can be re-added via memory_add.
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MemoryAgent"]
+    },
+    {
+      "tag": "v2",
+      "deleted_classes": ["MemoryAgent"]
+    }
+  ]
 
   // No custom domain — the UI worker (memory.allenlim.net) proxies API
   // requests to this worker via a service binding. This keeps MCP, auth,

@@ -293,15 +293,16 @@ async function parseMcpResponse(res) {
   }
 }
 
-/** Convenience wrappers for common memory operations. */
+/** Convenience wrappers for common memory operations (Agent Memory API). */
 export const memory = {
   add: (params) => callTool("memory_add", params),
   search: (params) => callTool("memory_search", params),
-  get: (params) => callTool("memory_get", params),
+  ingest: (params) => callTool("memory_ingest", params),
   list: (params) => callTool("memory_list", params),
-  update: (params) => callTool("memory_update", params),
+  get: (params) => callTool("memory_get", params),
   delete: (params) => callTool("memory_delete", params),
-  load: (params) => callTool("memory_load", params),
+  deleteSession: (params) => callTool("memory_delete_session", params),
+  summary: (params) => callTool("memory_summary", params ?? {}),
   stats: () => callTool("memory_stats", {}),
 };
 

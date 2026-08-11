@@ -9,9 +9,7 @@ export const Route = createFileRoute("/new")({
 function NewMemoryComponent() {
   const navigate = useNavigate();
   const [content, setContent] = useState("");
-  const [key, setKey] = useState("");
-  const [namespace, setNamespace] = useState("facts");
-  const [tags, setTags] = useState("");
+  const [sessionId, setSessionId] = useState("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loggedIn] = useState(() => isLoggedIn());
@@ -31,16 +29,13 @@ function NewMemoryComponent() {
     setLoading(true);
     setError(null);
     try {
-      const tagList = tags.split(",").map((t) => t.trim()).filter(Boolean);
-      const entry = await api.add({
-        content,
-        key: key.trim() || undefined,
-        namespace: namespace.trim() || undefined,
-        tags: tagList,
+      await api.add({
+        content: content.trim(),
+        sessionId: sessionId.trim() || undefined,
       });
-      navigate({ to: "/memory/$key", params: { key: entry.key ?? entry.id } });
+      navigate({ to: "/" });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to create");
+      setError(err instanceof Error ? err.message : "Failed to create memory");
     } finally {
       setLoading(false);
     }
@@ -49,70 +44,37 @@ function NewMemoryComponent() {
   return (
     <div className="form-page">
       <h2>New Memory</h2>
+      <p className="form-hint">
+        Agent Memory will automatically classify this as a fact, event,
+        instruction, or task, and generate a summary.
+      </p>
       <form onSubmit={handleSubmit}>
-        <div className="form-field">
-          <label htmlFor="key">Key (optional)</label>
-          <input
-            id="key"
-            type="text"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            placeholder="my-memory-key"
-          />
-        </div>
-        <div className="form-field">
-          <label htmlFor="namespace">Namespace</label>
-          <select
-            id="namespace"
-            value={namespace}
-            onChange={(e) => setNamespace(e.target.value)}
-          >
-            <option value="facts">facts</option>
-            <option value="preferences">preferences</option>
-            <option value="projects">projects</option>
-            <option value="decisions">decisions</option>
-            <option value="conversations">conversations</option>
-            <option value="default">default</option>
-          </select>
-        </div>
-        <div className="form-field">
-          <label htmlFor="tags">Tags (comma-separated)</label>
-          <input
-            id="tags"
-            type="text"
-            value={tags}
-            onChange={(e) => setTags(e.target.value)}
-            placeholder="typescript, cloudflare, important"
-          />
-        </div>
         <div className="form-field">
           <label htmlFor="content">Content</label>
           <textarea
             id="content"
             value={content}
             onChange={(e) => setContent(e.target.value)}
-            rows={10}
-            placeholder="Write your memory here…"
+            placeholder="What do you want to remember?"
+            rows={6}
             required
+            autoFocus
+          />
+        </div>
+        <div className="form-field">
+          <label htmlFor="sessionId">Session ID (optional)</label>
+          <input
+            id="sessionId"
+            type="text"
+            value={sessionId}
+            onChange={(e) => setSessionId(e.target.value)}
+            placeholder="Group related memories by session"
           />
         </div>
         {error && <div className="error">{error}</div>}
-        <div className="form-actions">
-          <button
-            type="button"
-            className="btn btn-secondary"
-            onClick={() => navigate({ to: "/" })}
-          >
-            Cancel
-          </button>
-          <button
-            type="submit"
-            className="btn btn-primary"
-            disabled={loading || !content.trim()}
-          >
-            {loading ? "Saving…" : "Save Memory"}
-          </button>
-        </div>
+        <button type="submit" className="btn btn-primary" disabled={loading}>
+          {loading ? "Saving…" : "Save Memory"}
+        </button>
       </form>
     </div>
   );

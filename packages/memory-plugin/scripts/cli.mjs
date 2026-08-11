@@ -1,18 +1,19 @@
 #!/usr/bin/env node
 /**
- * mem — CLI helper for the memory server.
+ * mem — CLI helper for the memory server (Agent Memory backed).
  *
  * Usage:
  *   node scripts/cli.mjs login                    # SSO login via Allen Labs auth server
  *   node scripts/cli.mjs logout                   # clear stored credentials
  *   node scripts/cli.mjs whoami                   # show current authenticated user
- *   node scripts/cli.mjs add "some fact" --key my-fact --namespace facts --tags a,b
+ *   node scripts/cli.mjs add "some fact" [--session sid]
  *   node scripts/cli.mjs search "query text"
- *   node scripts/cli.mjs get my-fact
- *   node scripts/cli.mjs list --namespace facts
- *   node scripts/cli.mjs update my-fact --content "updated" --append
- *   node scripts/cli.mjs delete my-fact
- *   node scripts/cli.mjs load my-doc
+ *   node scripts/cli.mjs ingest <conversation.json   # extract memories from conversation
+ *   node scripts/cli.mjs list [--type fact] [--session sid] [--limit 50]
+ *   node scripts/cli.mjs get <memory-id>
+ *   node scripts/cli.mjs delete <memory-id>
+ *   node scripts/cli.mjs delete-session <session-id>
+ *   node scripts/cli.mjs summary [--session sid]
  *   node scripts/cli.mjs stats
  *
  * Environment:
@@ -21,7 +22,7 @@
  *   MEMORY_SCOPE       — scope header (optional)
  */
 
-import { memory, saveCredentials, getCurrentUser, isLoggedIn, logout } from "./lib.mjs";
+import { memory, saveCredentials, getCurrentUser, isLoggedIn, logout, readStdin } from "./lib.mjs";
 
 function parseArgs(argv) {
   const args = argv.slice(2);
@@ -49,27 +50,8 @@ function parseArgs(argv) {
 }
 
 /**
- * SSO login flow:
- *   1. Start a local HTTP server on a random port to receive the callback.
- *   2. Open the browser to {MEMORY_SERVER_URL}/auth/sso?callback=http://localhost:<port>
- *      ... but actually the worker's /auth/sso handles the redirect to the
- *      auth web UI. We need the callback to come back to the worker's
- *      /auth/callback, which returns JSON with the JWT.
- *
- * Since the worker's /auth/callback returns JSON (not a redirect), the
- * browser will display the JSON. The user copies the token from the browser
- * and pastes it here. Alternatively, we can spin up a local server and
- * have the auth flow redirect to localhost — but that requires the
- * localhost origin to be in TRUSTED_ORIGINS on the auth server.
- *
- * Simplest approach that works without modifying auth server config:
- *   - Open browser to {MEMORY_SERVER_URL}/auth/sso
- *   - After login, the browser lands on /auth/callback which returns JSON
- *   - The user copies the JSON (or just the token) and pastes it here
- *
- * For a smoother UX, the user can also pipe the token directly:
- *   echo '{"token":"...","expires_in":28800}' | mem login --pipe
- *   echo "<jwt>" | mem login --pipe
+ * SSO login flow — same as before. Opens browser to /auth/sso, user pastes
+ * the JSON response from /auth/callback.
  */
 async function handleLogin(flags) {
   const serverUrl = (process.env.MEMORY_SERVER_URL ?? "").replace(/\/$/, "");
@@ -78,12 +60,10 @@ async function handleLogin(flags) {
     process.exit(1);
   }
 
-  // --pipe: read token from stdin (for headless/CI or paste flow).
   if (flags.pipe) {
     const input = await readStdin();
     const trimmed = input.trim();
     try {
-      // Try parsing as the JSON response from /auth/callback
       const parsed = JSON.parse(trimmed);
       if (parsed.token) {
         saveCredentials(parsed.token, parsed.expires_in, parsed.user);
@@ -102,7 +82,6 @@ async function handleLogin(flags) {
     process.exit(1);
   }
 
-  // Browser flow: open the worker's SSO start endpoint.
   const ssoUrl = `${serverUrl}/auth/sso`;
   console.log(`\nOpening browser to sign in:\n  ${ssoUrl}\n`);
   console.log(
@@ -110,7 +89,6 @@ async function handleLogin(flags) {
       "Copy the entire JSON and paste it here (or use --pipe):\n",
   );
 
-  // Try to open the browser.
   try {
     const { execSync } = await import("node:child_process");
     const platform = process.platform;
@@ -125,7 +103,6 @@ async function handleLogin(flags) {
     console.log(`(Could not auto-open browser. Open the URL manually.)\n`);
   }
 
-  // Read pasted input from stdin.
   const input = await readStdin();
   const trimmed = input.trim();
   try {
@@ -166,19 +143,6 @@ function handleWhoami() {
   }
 }
 
-function readStdin() {
-  return new Promise((resolve) => {
-    let data = "";
-    process.stdin.setEncoding("utf8");
-    process.stdin.on("data", (chunk) => {
-      data += chunk;
-    });
-    process.stdin.on("end", () => resolve(data));
-    // Handle Ctrl-D / empty stdin
-    process.stdin.on("close", () => resolve(data));
-  });
-}
-
 async function main() {
   const { cmd, positional, flags } = parseArgs(process.argv);
 
@@ -196,16 +160,12 @@ async function main() {
       case "add": {
         const content = positional.join(" ");
         if (!content) {
-          console.error("Usage: mem add <content> [--key k] [--namespace ns] [--tags a,b]");
+          console.error("Usage: mem add <content> [--session sid]");
           process.exit(1);
         }
-        const tags = flags.tags ? String(flags.tags).split(",").map((t) => t.trim()) : [];
         const result = await memory.add({
           content,
-          key: flags.key,
-          namespace: flags.namespace,
-          tags,
-          metadata: flags.metadata ? JSON.parse(flags.metadata) : {},
+          sessionId: flags.session,
         });
         console.log(result);
         break;
@@ -218,90 +178,99 @@ async function main() {
         }
         const result = await memory.search({
           query,
-          namespace: flags.namespace,
-          limit: flags.limit ? parseInt(flags.limit, 10) : 10,
+          thinkingLevel: flags.thinking,
+          responseLength: flags.length,
         });
         const parsed = JSON.parse(result);
-        for (const m of parsed.results ?? []) {
-          console.log(`\n[${m.key ?? m.id}] (${m.namespace})${m.tags?.length ? " " + m.tags.join(",") : ""}`);
-          console.log(m.content);
+        console.log(`\nAnswer: ${parsed.answer ?? "(none)"}\n`);
+        for (const c of parsed.candidates ?? []) {
+          console.log(`  [${c.id}] (score: ${c.score?.toFixed?.(3) ?? c.score}) ${c.summary}`);
         }
-        console.log(`\n${parsed.count ?? 0} result(s)`);
+        console.log(`\n${parsed.count ?? 0} candidate(s)`);
+        break;
+      }
+      case "ingest": {
+        // Read conversation JSON from stdin: [{role, content}, ...]
+        const input = await readStdin();
+        let messages;
+        try {
+          messages = JSON.parse(input);
+        } catch {
+          console.error("Usage: mem ingest < conversation.json\n  (JSON array of {role, content})");
+          process.exit(1);
+        }
+        if (!Array.isArray(messages)) {
+          console.error("Input must be a JSON array of {role, content} messages.");
+          process.exit(1);
+        }
+        const result = await memory.ingest({
+          messages,
+          sessionId: flags.session,
+        });
+        console.log(result);
         break;
       }
       case "get": {
-        const key = positional[0];
-        if (!key) {
-          console.error("Usage: mem get <key>");
+        const id = positional[0];
+        if (!id) {
+          console.error("Usage: mem get <memory-id>");
           process.exit(1);
         }
-        const result = await memory.get({ key });
+        const result = await memory.get({ id });
         console.log(result);
         break;
       }
       case "list": {
         const result = await memory.list({
-          namespace: flags.namespace,
-          tag: flags.tag,
+          type: flags.type,
+          sessionId: flags.session,
           limit: flags.limit ? parseInt(flags.limit, 10) : 50,
+          cursor: flags.cursor,
         });
         const parsed = JSON.parse(result);
-        for (const m of parsed.results ?? []) {
-          console.log(`${m.key ?? m.id}\t${m.namespace}\t${m.updatedAt}\t${truncate(m.content, 60)}`);
+        for (const m of parsed.memories ?? []) {
+          console.log(`${m.id}\t${m.type}\t${m.updatedAt}\t${truncate(m.summary, 60)}`);
         }
         console.log(`\n${parsed.count ?? 0} entr${(parsed.count ?? 0) === 1 ? "y" : "ies"}`);
-        break;
-      }
-      case "update": {
-        const key = positional[0];
-        if (!key) {
-          console.error("Usage: mem update <key> [--content c] [--tags a,b] [--append]");
-          process.exit(1);
-        }
-        const tags = flags.tags ? String(flags.tags).split(",").map((t) => t.trim()) : undefined;
-        // flags.content may be true (boolean) if --content was given without
-        // a value; treat that as no content.
-        const contentFlag = typeof flags.content === "string" ? flags.content : undefined;
-        const positionalContent = positional.slice(1).join(" ");
-        const content = contentFlag || positionalContent || undefined;
-        const result = await memory.update({
-          key,
-          content,
-          tags,
-          metadata: flags.metadata ? JSON.parse(flags.metadata) : undefined,
-          appendContent: Boolean(flags.append),
-        });
-        console.log(result);
+        if (parsed.cursor) console.log(`(cursor: ${parsed.cursor})`);
         break;
       }
       case "delete": {
-        const key = positional[0];
-        if (!key) {
-          console.error("Usage: mem delete <key>");
+        const id = positional[0];
+        if (!id) {
+          console.error("Usage: mem delete <memory-id>");
           process.exit(1);
         }
-        const result = await memory.delete({ key });
+        const result = await memory.delete({ id });
         console.log(result);
         break;
       }
-      case "load": {
-        const key = positional[0];
-        if (!key) {
-          console.error("Usage: mem load <key>");
+      case "delete-session": {
+        const sessionId = positional[0];
+        if (!sessionId) {
+          console.error("Usage: mem delete-session <session-id>");
           process.exit(1);
         }
-        const result = await memory.load({ key });
+        const result = await memory.deleteSession({ sessionId });
         console.log(result);
+        break;
+      }
+      case "summary": {
+        const result = await memory.summary({ sessionId: flags.session });
+        const parsed = JSON.parse(result);
+        console.log(parsed.summary ?? result);
         break;
       }
       case "stats": {
         const result = await memory.stats();
-        console.log(result);
+        const parsed = JSON.parse(result);
+        console.log(`Total: ${parsed.total}`);
+        for (const [t, count] of Object.entries(parsed.byType ?? {})) {
+          console.log(`  ${t}: ${count}`);
+        }
         break;
       }
       case "hook": {
-        // Subcommand for lifecycle hooks — reads stdin JSON and outputs
-        // the hook-specific JSON response. Used by hooks.json in plugins.
         const hookName = positional[0];
         const { runHook } = await import("./hook-runner.mjs");
         await runHook(hookName);
@@ -309,7 +278,7 @@ async function main() {
       }
       default:
         console.error(
-          "Usage: mem <login|logout|whoami|add|search|get|list|update|delete|load|stats|hook> [args] [flags]",
+          "Usage: mem <login|logout|whoami|add|search|ingest|get|list|delete|delete-session|summary|stats|hook> [args] [flags]",
         );
         process.exit(1);
     }
