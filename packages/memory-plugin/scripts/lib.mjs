@@ -131,21 +131,27 @@ function headers() {
 /**
  * Call an MCP tool on the memory server. Returns the text content from the
  * response, or throws on error.
+ *
+ * The MCP Streamable HTTP transport requires a full handshake:
+ *   1. POST initialize → get session ID (if stateful) or just ack (stateless)
+ *   2. POST notifications/initialized (no response expected)
+ *   3. POST tools/call with the same session ID
+ *
+ * The Cloudflare Agents MCP handler is stateless by default but still
+ * requires the initialized notification before accepting tool calls.
+ * Without it, tools/call returns 400 "Not Initialized".
  */
 export async function callTool(name, args = {}) {
   if (!SERVER_URL) {
     throw new Error("MEMORY_SERVER_URL is not set");
   }
 
-  // The MCP Streamable HTTP transport uses JSON-RPC over HTTP POST.
-  // Each request is a single JSON-RPC call; we initialize + call in one
-  // round-trip by sending an initialize followed by the tool call.
-  // The stateless handler accepts tool/call requests directly after init.
+  const baseHeaders = headers();
 
   // Step 1: Initialize the MCP session.
   const initRes = await fetch(`${SERVER_URL}/mcp`, {
     method: "POST",
-    headers: headers(),
+    headers: baseHeaders,
     body: JSON.stringify({
       jsonrpc: "2.0",
       id: 1,
@@ -163,13 +169,29 @@ export async function callTool(name, args = {}) {
     throw new Error(`MCP initialize failed (${initRes.status}): ${text}`);
   }
 
-  // The stateless handler may return the init result directly as JSON or
-  // as SSE. Parse the JSON-RPC result from either format.
-  const initResult = await parseMcpResponse(initRes);
+  // Parse the init result (may be JSON or SSE).
+  await parseMcpResponse(initRes);
   const sessionId = initRes.headers.get("mcp-session-id") ?? "";
 
-  // Step 2: Send initialized notification + tool call.
-  const callHeaders = headers();
+  // Step 2: Send the initialized notification.
+  // This is a notification (no id) — the server accepts it but may not
+  // return a body. We don't care about the response, just that it's sent.
+  const notifHeaders = { ...baseHeaders };
+  if (sessionId) notifHeaders["mcp-session-id"] = sessionId;
+
+  await fetch(`${SERVER_URL}/mcp`, {
+    method: "POST",
+    headers: notifHeaders,
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      method: "notifications/initialized",
+    }),
+  }).catch(() => {
+    // Stateless servers may return 202 with empty body or 400 — ignore.
+  });
+
+  // Step 3: Send the tool call.
+  const callHeaders = { ...baseHeaders };
   if (sessionId) callHeaders["mcp-session-id"] = sessionId;
 
   const callRes = await fetch(`${SERVER_URL}/mcp`, {

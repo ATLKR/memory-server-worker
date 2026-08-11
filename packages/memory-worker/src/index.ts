@@ -1,5 +1,5 @@
 /**
- * Memory Server Worker — entry point.
+ * Memory Server Worker ??entry point.
  *
  * Exposes a stateless MCP server (via `createMcpHandler` from the Agents SDK)
  * whose tools are backed by a `MemoryAgent` Durable Object. Each MCP tool call
@@ -9,17 +9,17 @@
  * The client sends an RS256 JWT as `Authorization: Bearer <jwt>`. The worker
  * verifies the JWT signature against the auth server's JWKS endpoint
  * ({AUTH_API_URL}/.well-known/jwks.json) using `jose`. No static tokens or
- * secrets are stored on this worker — auth is fully delegated.
+ * secrets are stored on this worker ??auth is fully delegated.
  *
- * Scope resolution (each scope → its own Durable Object → isolated SQLite):
+ * Scope resolution (each scope ??its own Durable Object ??isolated SQLite):
  *   1. `x-memory-scope` header if present
  *   2. `DEFAULT_SCOPE` var if non-empty
- *   3. JWT `sub` (Better Auth user id) — the default for personal use
+ *   3. JWT `sub` (Better Auth user id) ??the default for personal use
  *
  * The memory tools mirror the Cloudflare Agents SDK memory-layer concepts:
- *   - `memory_add`     → writable short-form context (set_context equivalent)
- *   - `memory_search`  → searchable context (search_context / AgentSearchProvider)
- *   - `memory_load`    → loadable context / skills (load_context equivalent)
+ *   - `memory_add`     ??writable short-form context (set_context equivalent)
+ *   - `memory_search`  ??searchable context (search_context / AgentSearchProvider)
+ *   - `memory_load`    ??loadable context / skills (load_context equivalent)
  *   - `memory_get` / `memory_list` / `memory_update` / `memory_delete` / `memory_stats`
  */
 
@@ -50,7 +50,7 @@ import {
   hasSkills,
 } from "./skills";
 
-// Re-export the DO class — wrangler.jsonc references it by name.
+// Re-export the DO class ??wrangler.jsonc references it by name.
 export { MemoryAgent } from "./memory-do";
 
 // ---------- DO RPC interface ----------
@@ -97,7 +97,7 @@ interface MemoryAgentRpc {
 
 /**
  * Return a typed RPC stub for the MemoryAgent DO addressed by `scope`.
- * Each scope gets its own DO instance → its own SQLite database.
+ * Each scope gets its own DO instance ??its own SQLite database.
  */
 function memoryStub(env: Env, scope: string): MemoryAgentRpc {
   const id = env.MEMORY_AGENT.idFromName(scope);
@@ -115,7 +115,7 @@ function memoryStub(env: Env, scope: string): MemoryAgentRpc {
  * Scope resolution order:
  *   1. `x-memory-scope` header (explicit override)
  *   2. `DEFAULT_SCOPE` var if non-empty
- *   3. JWT `sub` (user id) — default for personal use
+ *   3. JWT `sub` (user id) ??default for personal use
  */
 async function authenticate(
   request: Request,
@@ -146,7 +146,7 @@ function createServer(env: Env, scope: string): McpServer {
   const server = new McpServer(
     { name: "memory-server", version: "0.1.0" },
     {
-      // Server-level instructions — ChatGPT/Codex read these on initialize.
+      // Server-level instructions ??ChatGPT/Codex read these on initialize.
       // Keep the most important guidance in the first 512 characters.
       instructions:
         "This is a personal persistent-memory server. ALWAYS call memory_search " +
@@ -182,7 +182,7 @@ function createServer(env: Env, scope: string): McpServer {
       params: z.object({ uri: z.string() }),
     });
 
-    // skills/list — paginated catalog of skills
+    // skills/list ??paginated catalog of skills
     server.server.setRequestHandler(
       SkillsListSchema as unknown as Parameters<typeof server.server.setRequestHandler>[0],
       async (req: { params?: { cursor?: string } }) => {
@@ -190,7 +190,7 @@ function createServer(env: Env, scope: string): McpServer {
       },
     );
 
-    // skills/get — fetch a single skill entry by URI
+    // skills/get ??fetch a single skill entry by URI
     server.server.setRequestHandler(
       SkillsGetSchema as unknown as Parameters<typeof server.server.setRequestHandler>[0],
       async (req: { params?: { uri?: string } }) => {
@@ -202,7 +202,7 @@ function createServer(env: Env, scope: string): McpServer {
       },
     );
 
-    // resources/read — fetch a skill resource by URI
+    // resources/read ??fetch a skill resource by URI
     server.server.setRequestHandler(
       ReadResourceRequestSchema,
       async (req: { params: { uri: string } }) => {
@@ -240,6 +240,7 @@ function createServer(env: Env, scope: string): McpServer {
       });
       return {
         content: [{ type: "text" as const, text: JSON.stringify(entry, null, 2) }],
+        structuredContent: entry as unknown as Record<string, unknown>,
       };
     },
   );
@@ -260,13 +261,15 @@ function createServer(env: Env, scope: string): McpServer {
         namespace: params.namespace,
         limit: params.limit,
       });
+      const structured = { count: results.length, results };
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify({ count: results.length, results }, null, 2),
+            text: JSON.stringify(structured, null, 2),
           },
         ],
+        structuredContent: structured as unknown as Record<string, unknown>,
       };
     },
   );
@@ -293,6 +296,7 @@ function createServer(env: Env, scope: string): McpServer {
       }
       return {
         content: [{ type: "text" as const, text: JSON.stringify(entry, null, 2) }],
+        structuredContent: entry as unknown as Record<string, unknown>,
       };
     },
   );
@@ -313,13 +317,15 @@ function createServer(env: Env, scope: string): McpServer {
         tag: params.tag,
         limit: params.limit,
       });
+      const structured = { count: results.length, results };
       return {
         content: [
           {
             type: "text" as const,
-            text: JSON.stringify({ count: results.length, results }, null, 2),
+            text: JSON.stringify(structured, null, 2),
           },
         ],
+        structuredContent: structured as unknown as Record<string, unknown>,
       };
     },
   );
@@ -353,6 +359,7 @@ function createServer(env: Env, scope: string): McpServer {
       }
       return {
         content: [{ type: "text" as const, text: JSON.stringify(entry, null, 2) }],
+        structuredContent: entry as unknown as Record<string, unknown>,
       };
     },
   );
@@ -369,6 +376,7 @@ function createServer(env: Env, scope: string): McpServer {
       const result = await stub.delete({ key: params.key });
       return {
         content: [{ type: "text" as const, text: JSON.stringify(result) }],
+        structuredContent: result as unknown as Record<string, unknown>,
       };
     },
   );
@@ -397,6 +405,7 @@ function createServer(env: Env, scope: string): McpServer {
       }
       return {
         content: [{ type: "text" as const, text: entry.content }],
+        structuredContent: { content: entry.content } as unknown as Record<string, unknown>,
       };
     },
   );
@@ -413,6 +422,7 @@ function createServer(env: Env, scope: string): McpServer {
       const stats = await stub.stats();
       return {
         content: [{ type: "text" as const, text: JSON.stringify(stats, null, 2) }],
+        structuredContent: stats as unknown as Record<string, unknown>,
       };
     },
   );
@@ -535,7 +545,7 @@ export default {
       });
     }
 
-    // SSO endpoints (outside MCP auth — they're the auth bootstrap).
+    // SSO endpoints (outside MCP auth ??they're the auth bootstrap).
     if (url.pathname === "/auth/sso") {
       return handleSsoStart(env, url);
     }
@@ -543,7 +553,7 @@ export default {
       return handleSsoCallback(env, url);
     }
 
-    // Auth check — verify JWT via JWKS before entering the MCP handler.
+    // Auth check ??verify JWT via JWKS before entering the MCP handler.
     // On 401, return a WWW-Authenticate header pointing to the resource
     // metadata so MCP clients can auto-discover the OAuth flow.
     const auth = await authenticate(request, env);
