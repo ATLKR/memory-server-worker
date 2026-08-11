@@ -17,7 +17,7 @@
  * additional context) so it never blocks the conversation.
  */
 
-import { memory, readStdin } from "./lib.mjs";
+import { memory, readStdin, isTokenExpired } from "./lib.mjs";
 
 async function main() {
   const raw = await readStdin();
@@ -71,8 +71,15 @@ async function main() {
     };
     process.stdout.write(JSON.stringify(output));
   } catch (err) {
-    // Fail silently — never block the conversation.
-    console.error(`[memory-plugin:pre-prompt] ${err.message}`);
+    // Fail silently — never block the conversation. But log expiry
+    // prominently so the user knows to re-authenticate.
+    if (isTokenExpired()) {
+      console.error(
+        "[memory-plugin:pre-prompt] Token expired. Run `mem login` to refresh.",
+      );
+    } else {
+      console.error(`[memory-plugin:pre-prompt] ${err.message}`);
+    }
     process.exit(0);
   }
 }

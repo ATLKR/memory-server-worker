@@ -38,9 +38,13 @@ if (!SERVER_URL) {
 
 /**
  * Load the stored JWT from the credential file. Returns null if the file
- * doesn't exist or the token is expired.
+ * doesn't exist or the token is expired. Sets `TOKEN_EXPIRED` flag when
+ * the token exists but is expired, so callers can give a helpful message.
  */
+let TOKEN_EXPIRED = false;
+
 function loadStoredToken() {
+  TOKEN_EXPIRED = false;
   // Env var takes precedence (for CI/headless use).
   if (process.env.MEMORY_TOKEN) return process.env.MEMORY_TOKEN;
   try {
@@ -52,6 +56,7 @@ function loadStoredToken() {
       const expiresAt = new Date(data.expiresAt).getTime();
       const now = Date.now();
       if (now >= expiresAt - 5 * 60 * 1000) {
+        TOKEN_EXPIRED = true;
         return null;
       }
     }
@@ -59,6 +64,11 @@ function loadStoredToken() {
   } catch {
     return null;
   }
+}
+
+/** Check if the last loadStoredToken() failed due to expiry. */
+export function isTokenExpired() {
+  return TOKEN_EXPIRED;
 }
 
 /**
@@ -111,6 +121,11 @@ export function logout() {
 function getToken() {
   const token = loadStoredToken();
   if (!token) {
+    if (TOKEN_EXPIRED) {
+      throw new Error(
+        "Memory token has expired. Run `mem login` to refresh your session.",
+      );
+    }
     throw new Error(
       "Not authenticated. Run `mem login` to sign in via the Allen Labs auth server.",
     );

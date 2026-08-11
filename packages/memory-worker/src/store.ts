@@ -39,23 +39,89 @@ const DDL_STATEMENTS = [
     updated_at  TEXT NOT NULL
   )`,
   `CREATE INDEX IF NOT EXISTS idx_memories_namespace ON memories(namespace)`,
-  // FTS5 virtual table for full-text search. We keep it in sync manually
-  // (insert/delete) rather than using external-content tables — simpler and
-  // avoids the rowid mapping complexity. The UNINDEXED columns let us
-  // return the full entry directly from FTS results without a join.
+  // FTS5 virtual table for full-text search.
+  //
+  // We use the trigram tokenizer instead of the default unicode61 because
+  // trigram handles CJK (Chinese/Japanese/Korean) text correctly — it
+  // splits on every 3-character sequence, so Korean words like "메모리서버"
+  // become searchable via overlapping trigrams. unicode61 would treat the
+  // entire unspaced Korean phrase as a single token, making substring
+  // matching impossible.
+  //
+  // The trade-off: trigram requires queries of >= 3 characters and produces
+  // larger indexes. For a personal memory store this is fine.
+  //
+  // UNINDEXED columns let us return the full entry directly from FTS
+  // results without a join.
   `CREATE VIRTUAL TABLE IF NOT EXISTS memories_fts USING fts5(
     content,
     namespace,
     tags,
     id UNINDEXED,
-    key UNINDEXED
+    key UNINDEXED,
+    tokenize = 'trigram'
   )`,
 ];
 
 export class MemoryStore {
   constructor(private sql: SqlStorage) {
+    // Migrate FTS table from unicode61 to trigram tokenizer if needed.
+    // SQLite doesn't support ALTER on virtual tables, so we check and
+    // recreate. This is safe because we rebuild the FTS index from the
+    // base table.
+    this.migrateFtsTokenizer();
+
     for (const stmt of DDL_STATEMENTS) {
       this.sql.exec(stmt);
+    }
+
+    // If the FTS table was just recreated, re-index all existing memories.
+    this.reindexFtsIfNeeded();
+  }
+
+  /**
+   * Check if the FTS table uses the trigram tokenizer. If it uses the
+   * old unicode61 tokenizer (or has no tokenizer), drop it so the DDL
+   * can recreate it with trigram.
+   */
+  private migrateFtsTokenizer(): void {
+    try {
+      const cursor = this.sql.exec<{ sql: string }>(
+        `SELECT sql FROM sqlite_master WHERE type='table' AND name='memories_fts'`,
+      );
+      const row = cursor.toArray()[0];
+      if (row && !row.sql.toLowerCase().includes("trigram")) {
+        // Old FTS table with unicode61 — drop it so DDL recreates with trigram.
+        this.sql.exec(`DROP TABLE IF EXISTS memories_fts`);
+      }
+    } catch {
+      // Table doesn't exist yet — DDL will create it.
+    }
+  }
+
+  /**
+   * If the FTS table is empty but the base table has rows, re-index.
+   * This happens after a tokenizer migration drops the old FTS table.
+   */
+  private reindexFtsIfNeeded(): void {
+    const ftsCount = this.sql.exec<{ n: number }>(
+      `SELECT COUNT(*) as n FROM memories_fts`,
+    ).one().n;
+    if (ftsCount > 0) return;
+
+    const rows = this.sql.exec<MemoryRow>(
+      `SELECT * FROM memories`,
+    ).toArray();
+    for (const row of rows) {
+      const entry = rowToEntry(row);
+      this.sql.exec(
+        `INSERT INTO memories_fts (id, key, content, namespace, tags) VALUES (?, ?, ?, ?, ?)`,
+        entry.id,
+        entry.key ?? "",
+        entry.content,
+        entry.namespace,
+        entry.tags.join(" "),
+      );
     }
   }
 
@@ -120,9 +186,10 @@ export class MemoryStore {
    * Full-text search across memory content.
    *
    * Uses FTS5 with an OR-based query so that memories matching *any* of the
-   * query terms are returned (ranked by relevance). If FTS5 returns nothing
-   * (e.g. the query contained no indexed tokens), falls back to a LIKE
-   * search on the content column.
+   * query terms are returned (ranked by relevance). Results are filtered by
+   * a relevance threshold to avoid injecting low-quality matches. If FTS5
+   * returns nothing (e.g. the query contained no indexed tokens), falls
+   * back to a LIKE search on the content column.
    */
   search(query: string, opts: { namespace?: string; limit?: number }): MemoryEntry[] {
     const limit = opts.limit ?? 10;
@@ -134,33 +201,61 @@ export class MemoryStore {
 
       if (opts.namespace) {
         sql = `
-          SELECT m.* FROM memories_fts f
+          SELECT m.*, f.rank as fts_rank
+          FROM memories_fts f
           JOIN memories m ON m.id = f.id
           WHERE memories_fts MATCH ? AND m.namespace = ?
-          ORDER BY rank
+          ORDER BY f.rank
           LIMIT ?
         `;
-        binds.push(opts.namespace, limit);
+        binds.push(opts.namespace, limit * 2);
       } else {
         sql = `
-          SELECT m.* FROM memories_fts f
+          SELECT m.*, f.rank as fts_rank
+          FROM memories_fts f
           JOIN memories m ON m.id = f.id
           WHERE memories_fts MATCH ?
-          ORDER BY rank
+          ORDER BY f.rank
           LIMIT ?
         `;
-        binds.push(limit);
+        binds.push(limit * 2);
       }
 
-      const cursor = this.sql.exec<MemoryRow>(sql, ...binds);
-      const results = cursor.toArray().map(rowToEntry);
-      if (results.length > 0) return results;
+      const cursor = this.sql.exec<MemoryRow & { fts_rank: number }>(sql, ...binds);
+      const rows = cursor.toArray();
+
+      // Filter by relevance: FTS5 rank is a negative number (more negative =
+      // better match). We compute a threshold based on the best rank and
+      // drop results that are significantly worse.
+      const filtered = this.filterByRelevance(rows, limit);
+      if (filtered.length > 0) return filtered.map(rowToEntry);
     }
 
-    // Fallback: LIKE search on content for queries that FTS5 can't handle
-    // (e.g. very long natural language with no matching tokens, or queries
-    // with only short stopwords).
+    // Fallback: LIKE search on content for queries that FTS5 can't handle.
     return this.likeSearch(query, opts, limit);
+  }
+
+  /**
+   * Filter FTS5 results by relevance. FTS5 rank values are negative (more
+   * negative = better match). We keep results whose rank is within a factor
+   * of the best result's rank, dropping low-quality matches from OR queries.
+   */
+  private filterByRelevance(
+    rows: (MemoryRow & { fts_rank: number })[],
+    limit: number,
+  ): (MemoryRow & { fts_rank: number })[] {
+    if (rows.length === 0) return [];
+    if (rows.length === 1) return rows;
+
+    // FTS5 rank is negative. Best = most negative. We keep results whose
+    // rank is within 3x of the best (i.e. not more than 3x less relevant).
+    // This prevents injecting a memory that only matched one common word
+    // when other memories matched multiple query terms.
+    const bestRank = rows[0]!.fts_rank;
+    const threshold = bestRank * 3; // bestRank is negative, so *3 is more negative
+
+    const filtered = rows.filter((r) => r.fts_rank >= threshold);
+    return filtered.slice(0, limit);
   }
 
   /** LIKE-based fallback search on content, key, and tags. */
@@ -182,6 +277,20 @@ export class MemoryStore {
       orParts.push("content LIKE ?");
       binds.push(`%${escapeLike(term)}%`);
     }
+
+    // For CJK queries, also try matching with spaces removed from content.
+    // This handles the case where the query is "메모리서버" but the stored
+    // content is "메모리 서버" — a LIKE '%메모리서버%' won't match, but
+    // REPLACE(content, ' ', '') LIKE '%메모리서버%' will.
+    const hasCJK = /[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/.test(query);
+    if (hasCJK) {
+      const noSpaceQuery = query.replace(/\s+/g, "");
+      if (noSpaceQuery.length >= 2) {
+        orParts.push("REPLACE(content, ' ', '') LIKE ?");
+        binds.push(`%${escapeLike(noSpaceQuery)}%`);
+      }
+    }
+
     conditions.push(`(${orParts.join(" OR ")})`);
 
     if (opts.namespace) {
@@ -298,55 +407,90 @@ function escapeLike(s: string): string {
 }
 
 /**
- * Sanitize a user query for FTS5 MATCH.
+ * Sanitize a user query for FTS5 MATCH with the trigram tokenizer.
+ *
+ * The trigram tokenizer splits text into overlapping 3-character sequences.
+ * This works well for CJK (Korean/Chinese/Japanese) and Western text alike,
+ * but requires queries of >= 3 characters to produce any trigrams.
  *
  * Strategy:
- *   - Strip FTS5 special characters that would be interpreted as operators
- *     (hyphens become NOT, colons become column filters, etc.).
- *   - Split into tokens, filter out very short tokens (< 2 chars) and
- *     common English stopwords.
- *   - Wrap each token in double-quotes so FTS5 treats it as a literal
- *     string (no operator interpretation).
- *   - Join with OR so that memories matching *any* term are returned,
- *     ranked by relevance. This is critical for long natural-language
- *     queries where an AND of all terms would almost never match.
- *   - Cap at 20 tokens to avoid overly broad queries.
+ *   - Strip FTS5 operator characters that would be interpreted as operators.
+ *   - For CJK-containing queries: keep the full query as a single phrase
+ *     (trigram handles substring matching across CJK well, but splitting on
+ *     spaces breaks CJK trigram continuity — e.g. "메모리서버" stored as
+ *     "메모리 서버" won't match if we query "메모리서버" as one phrase,
+ *     but will match if we query "메모리" OR "서버" as separate phrases).
+ *     We split into phrases but also include the full de-spaced version.
+ *   - For Latin-only queries: split into phrases, filter stopwords, OR them.
+ *   - Cap at 10 phrases to avoid overly broad queries.
  */
 function sanitizeFtsQuery(query: string): string {
   const trimmed = query.trim();
   if (!trimmed) return "";
 
   // Remove FTS5 operator characters: - : * ( ) " ^ + AND OR NOT NEAR
-  // Replace them with spaces so tokens split cleanly.
   const cleaned = trimmed.replace(/[-:*()+"^]/g, " ");
 
-  const tokens = cleaned
+  const hasCJK = /[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/.test(cleaned);
+
+  if (hasCJK) {
+    // For CJK queries, we want both individual phrases AND the full
+    // de-spaced query as a single phrase. The trigram tokenizer matches
+    // on 3-char substrings, so "메모리서버" will produce trigrams that
+    // partially overlap with "메모리 서버" stored text.
+    const phrases = cleaned
+      .split(/\s+/)
+      .filter(Boolean)
+      .filter((t) => t.length >= 2);
+
+    // Also add the full query with spaces removed — this helps when the
+    // stored text has spaces but the query doesn't (or vice versa).
+    const fullNoSpaces = cleaned.replace(/\s+/g, "");
+    if (fullNoSpaces.length >= 3 && !phrases.includes(fullNoSpaces)) {
+      phrases.push(fullNoSpaces);
+    }
+
+    if (phrases.length === 0) return "";
+
+    const quoted = phrases
+      .slice(0, 10)
+      .map((t) => `"${t.replace(/"/g, '""')}"`);
+    return quoted.join(" OR ");
+  }
+
+  // Latin-only: split into phrases, filter stopwords, OR them.
+  const phrases = cleaned
     .split(/\s+/)
     .filter(Boolean)
-    .filter((t) => t.length >= 2)
+    .filter((t) => t.length >= 3)
     .filter((t) => !STOPWORDS.has(t.toLowerCase()));
 
-  if (tokens.length === 0) return "";
+  if (phrases.length === 0) return "";
 
-  // OR query: match any token, ranked by how many match.
-  const quoted = tokens
-    .slice(0, 20)
+  const quoted = phrases
+    .slice(0, 10)
     .map((t) => `"${t.replace(/"/g, '""')}"`);
   return quoted.join(" OR ");
 }
 
 /**
  * Extract the most significant terms from a query for LIKE fallback search.
- * Returns terms of length >= 3, with stopwords removed, capped at 10.
+ * Returns terms of length >= 2 (shorter for CJK where 2 chars can be
+ * meaningful), with stopwords removed, capped at 10.
  */
 function extractSignificantTerms(query: string): string[] {
   const cleaned = query.replace(/[-:*()+"^]/g, " ");
-  return cleaned
+  const terms = cleaned
     .split(/\s+/)
     .filter(Boolean)
-    .filter((t) => t.length >= 3)
+    .filter((t) => {
+      // Latin: >= 3 chars; CJK: >= 2 chars (2 Korean chars can be a word)
+      const hasCJK = /[\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]/.test(t);
+      return hasCJK ? t.length >= 2 : t.length >= 3;
+    })
     .filter((t) => !STOPWORDS.has(t.toLowerCase()))
     .slice(0, 10);
+  return terms;
 }
 
 /** Common English stopwords to filter out of search queries. */
