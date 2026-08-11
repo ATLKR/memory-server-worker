@@ -611,6 +611,134 @@ function parseCookie(cookieHeader: string, name: string): string | null {
   return null;
 }
 
+// ---------- REST API for the web UI ----------
+//
+// Simple REST endpoints that call the same Durable Object methods as the
+// MCP tools. The web UI (served by a separate UI worker) proxies these
+// through a service binding, so they share the same origin and auth.
+//
+// All endpoints require a valid JWT (verified by the `authenticate`
+// function before reaching here).
+
+async function handleRestApi(
+  request: Request,
+  env: Env,
+  url: URL,
+  scope: string,
+): Promise<Response> {
+  const stub = memoryStub(env, scope);
+  const method = request.method;
+  const path = url.pathname.replace(/^\/api\/?/, "");
+
+  try {
+    // GET /api/stats
+    if (path === "stats" && method === "GET") {
+      const stats = await stub.stats();
+      return Response.json(stats);
+    }
+
+    // GET /api/memories?namespace=&tag=&limit=
+    if (path === "memories" && method === "GET") {
+      const namespace = url.searchParams.get("namespace") ?? undefined;
+      const tag = url.searchParams.get("tag") ?? undefined;
+      const limit = url.searchParams.get("limit")
+        ? Math.min(parseInt(url.searchParams.get("limit")!, 10), 500)
+        : 50;
+      const results = await stub.list({ namespace, tag, limit });
+      return Response.json({ count: results.length, results });
+    }
+
+    // POST /api/memories  { content, key?, namespace?, tags?, metadata? }
+    if (path === "memories" && method === "POST") {
+      const body = (await request.json().catch(() => null)) as {
+        content?: string;
+        key?: string;
+        namespace?: string;
+        tags?: string[];
+        metadata?: Record<string, unknown>;
+      } | null;
+      if (!body?.content) {
+        return Response.json({ error: "content is required" }, { status: 400 });
+      }
+      const entry = await stub.add({
+        content: body.content,
+        key: body.key,
+        namespace: body.namespace,
+        tags: body.tags,
+        metadata: body.metadata,
+      });
+      return Response.json(entry, { status: 201 });
+    }
+
+    // GET /api/search?q=&namespace=&limit=
+    if (path === "search" && method === "GET") {
+      const q = url.searchParams.get("q") ?? "";
+      if (!q.trim()) {
+        return Response.json({ count: 0, results: [] });
+      }
+      const namespace = url.searchParams.get("namespace") ?? undefined;
+      const limit = url.searchParams.get("limit")
+        ? Math.min(parseInt(url.searchParams.get("limit")!, 10), 100)
+        : 20;
+      const results = await stub.search({ query: q, namespace, limit });
+      return Response.json({ count: results.length, results });
+    }
+
+    // /api/memories/:key
+    const keyMatch = path.match(/^memories\/(.+)$/);
+    if (keyMatch) {
+      const key = decodeURIComponent(keyMatch[1]!);
+
+      // GET /api/memories/:key
+      if (method === "GET") {
+        const entry = await stub.get({ key });
+        if (!entry) {
+          return Response.json({ error: "not found" }, { status: 404 });
+        }
+        return Response.json(entry);
+      }
+
+      // PATCH /api/memories/:key  { content?, tags?, metadata?, appendContent? }
+      if (method === "PATCH") {
+        const body = (await request.json().catch(() => null)) as {
+          content?: string;
+          tags?: string[];
+          metadata?: Record<string, unknown>;
+          appendContent?: boolean;
+        } | null;
+        if (!body) {
+          return Response.json({ error: "invalid body" }, { status: 400 });
+        }
+        const entry = await stub.update({
+          key,
+          content: body.content,
+          tags: body.tags,
+          metadata: body.metadata,
+          appendContent: body.appendContent,
+        });
+        if (!entry) {
+          return Response.json({ error: "not found" }, { status: 404 });
+        }
+        return Response.json(entry);
+      }
+
+      // DELETE /api/memories/:key
+      if (method === "DELETE") {
+        const result = await stub.delete({ key });
+        return Response.json(result);
+      }
+    }
+
+    return Response.json({ error: "not found" }, { status: 404 });
+  } catch (err) {
+    console.error("[rest-api] error:", err);
+    return Response.json(
+      { error: err instanceof Error ? err.message : "internal error" },
+      { status: 500 },
+    );
+  }
+}
+
 // ---------- Worker entry ----------
 
 export default {
@@ -649,7 +777,7 @@ export default {
       return handleSsoCallback(env, url, request);
     }
 
-    // Auth check ??verify JWT via JWKS before entering the MCP handler.
+    // Auth check — verify JWT via JWKS before entering MCP or REST API.
     // On 401, return a WWW-Authenticate header pointing to the resource
     // metadata so MCP clients can auto-discover the OAuth flow.
     const auth = await authenticate(request, env);
@@ -662,6 +790,11 @@ export default {
             `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"`,
         },
       });
+    }
+
+    // REST API for the web UI. Same auth + same DO as MCP tools.
+    if (url.pathname.startsWith("/api/")) {
+      return handleRestApi(request, env, url, auth.scope);
     }
 
     // Build a fresh McpServer for this request (authenticated + scoped),
