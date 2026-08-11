@@ -158,3 +158,37 @@ export const deleteMemoryShape = {
 export const loadMemoryShape = {
   key: z.string().describe("The skill/document key to load in full."),
 };
+
+// ---------- Zod raw shapes (for MCP tool outputSchema) ----------
+// ChatGPT's MCP connector requires outputSchema on tools to surface them
+// as Actions. Each shape describes the JSON structure of the text content
+// returned in the tool result's content[0].text field.
+
+export const memoryEntryOutputShape = {
+  id: z.string().describe("Unique identifier (UUID)."),
+  key: z.string().nullable().describe("Human-readable key, or null if auto-generated."),
+  content: z.string().describe("The memory content text."),
+  namespace: z.string().describe("Namespace grouping this memory belongs to."),
+  tags: z.array(z.string()).describe("Tags attached to this memory."),
+  metadata: z.record(z.string(), z.unknown()).describe("Arbitrary JSON metadata."),
+  createdAt: z.string().describe("ISO timestamp of creation."),
+  updatedAt: z.string().describe("ISO timestamp of last update."),
+};
+
+export const searchOutputShape = {
+  count: z.number().describe("Number of results returned."),
+  results: z.array(z.object(memoryEntryOutputShape)).describe("Matching memory entries, ranked by relevance."),
+};
+
+export const deleteOutputShape = {
+  deleted: z.boolean().describe("Whether the memory was deleted."),
+};
+
+export const statsOutputShape = {
+  total: z.number().describe("Total number of memories across all namespaces."),
+  byNamespace: z.record(z.string(), z.number()).describe("Count per namespace."),
+};
+
+export const loadOutputShape = {
+  content: z.string().describe("The full text content of the loaded document."),
+};

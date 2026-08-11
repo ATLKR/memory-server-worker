@@ -24,6 +24,8 @@
  */
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import { z } from "zod";
 import { createMcpHandler } from "agents/mcp";
 import { verifyJwt, extractBearerToken, type SessionPayload } from "./auth";
 import type { MemoryEntry } from "./schema";
@@ -35,7 +37,18 @@ import {
   updateMemoryShape,
   deleteMemoryShape,
   loadMemoryShape,
+  memoryEntryOutputShape,
+  searchOutputShape,
+  deleteOutputShape,
+  statsOutputShape,
+  loadOutputShape,
 } from "./schema";
+import {
+  handleSkillsList,
+  handleSkillsGet,
+  handleResourceRead,
+  hasSkills,
+} from "./skills";
 
 // Re-export the DO class — wrangler.jsonc references it by name.
 export { MemoryAgent } from "./memory-do";
@@ -130,10 +143,77 @@ async function authenticate(
 // ---------- MCP server factory ----------
 
 function createServer(env: Env, scope: string): McpServer {
-  const server = new McpServer({
-    name: "memory-server",
-    version: "0.1.0",
-  });
+  const server = new McpServer(
+    { name: "memory-server", version: "0.1.0" },
+    {
+      // Server-level instructions — ChatGPT/Codex read these on initialize.
+      // Keep the most important guidance in the first 512 characters.
+      instructions:
+        "This is a personal persistent-memory server. ALWAYS call memory_search " +
+        "at the start of every user message to recall relevant context before " +
+        "responding. After responding, save any new preferences, decisions, " +
+        "facts, or project details using memory_add. Use memory_update to " +
+        "append to existing memories. Namespaces: preferences, projects, " +
+        "decisions, facts, conversations.",
+    },
+  );
+
+  // ---- Skills extension ----
+  // Register capabilities for resources (needed for resources/read) and
+  // the skills extension (io.modelcontextprotocol/skills) so ChatGPT's
+  // "Scan Tools" can discover and import skill files.
+  if (hasSkills()) {
+    server.server.registerCapabilities({
+      resources: { listChanged: true },
+    });
+    server.server.registerCapabilities({
+      extensions: { "io.modelcontextprotocol/skills": {} },
+    } as Record<string, unknown>);
+
+    // Zod schemas for custom skills/* methods (SEP-2640).
+    const SkillsListSchema = z.object({
+      method: z.literal("skills/list"),
+      params: z
+        .object({ cursor: z.string().optional() })
+        .optional(),
+    });
+    const SkillsGetSchema = z.object({
+      method: z.literal("skills/get"),
+      params: z.object({ uri: z.string() }),
+    });
+
+    // skills/list — paginated catalog of skills
+    server.server.setRequestHandler(
+      SkillsListSchema as unknown as Parameters<typeof server.server.setRequestHandler>[0],
+      async (req: { params?: { cursor?: string } }) => {
+        return await handleSkillsList({ cursor: req.params?.cursor });
+      },
+    );
+
+    // skills/get — fetch a single skill entry by URI
+    server.server.setRequestHandler(
+      SkillsGetSchema as unknown as Parameters<typeof server.server.setRequestHandler>[0],
+      async (req: { params?: { uri?: string } }) => {
+        const result = await handleSkillsGet({ uri: req.params?.uri ?? "" });
+        if (!result) {
+          return { error: { code: -32602, message: "skill not found" } };
+        }
+        return result;
+      },
+    );
+
+    // resources/read — fetch a skill resource by URI
+    server.server.setRequestHandler(
+      ReadResourceRequestSchema,
+      async (req: { params: { uri: string } }) => {
+        const result = await handleResourceRead({ uri: req.params.uri });
+        if (!result) {
+          return { contents: [] };
+        }
+        return result;
+      },
+    );
+  }
 
   const stub = memoryStub(env, scope);
 
@@ -148,6 +228,7 @@ function createServer(env: Env, scope: string): McpServer {
         "Provide a descriptive `key` for entries you want to fetch by name " +
         "(e.g. 'project-alpha-overview'). Omit `key` for ephemeral notes.",
       inputSchema: addMemoryShape,
+      outputSchema: memoryEntryOutputShape,
     },
     async (params) => {
       const entry = await stub.add({
@@ -171,6 +252,7 @@ function createServer(env: Env, scope: string): McpServer {
         "Full-text search across all stored memories. Returns ranked " +
         "results matching the query. Optionally filter by namespace.",
       inputSchema: searchMemoryShape,
+      outputSchema: searchOutputShape,
     },
     async (params) => {
       const results = await stub.search({
@@ -197,6 +279,7 @@ function createServer(env: Env, scope: string): McpServer {
         "Fetch a single memory by its key. Returns the full entry " +
         "including content, tags, and metadata.",
       inputSchema: getMemoryShape,
+      outputSchema: memoryEntryOutputShape,
     },
     async (params) => {
       const entry = await stub.get({ key: params.key });
@@ -222,6 +305,7 @@ function createServer(env: Env, scope: string): McpServer {
         "List stored memories, optionally filtered by namespace or tag. " +
         "Returns entries ordered by most recently updated.",
       inputSchema: listMemoryShape,
+      outputSchema: searchOutputShape,
     },
     async (params) => {
       const results = await stub.list({
@@ -249,6 +333,7 @@ function createServer(env: Env, scope: string): McpServer {
         "replace tags, and merge metadata. Use appendContent to add to " +
         "existing content (e.g. appending new notes to a running document).",
       inputSchema: updateMemoryShape,
+      outputSchema: memoryEntryOutputShape,
     },
     async (params) => {
       const entry = await stub.update({
@@ -278,6 +363,7 @@ function createServer(env: Env, scope: string): McpServer {
     {
       description: "Delete a memory by key. This is irreversible.",
       inputSchema: deleteMemoryShape,
+      outputSchema: deleteOutputShape,
     },
     async (params) => {
       const result = await stub.delete({ key: params.key });
@@ -297,6 +383,7 @@ function createServer(env: Env, scope: string): McpServer {
         "Equivalent to the loadable context / skills pattern in the " +
         "Agents SDK memory layer.",
       inputSchema: loadMemoryShape,
+      outputSchema: loadOutputShape,
     },
     async (params) => {
       const entry = await stub.load({ key: params.key });
@@ -320,6 +407,7 @@ function createServer(env: Env, scope: string): McpServer {
     {
       description:
         "Return memory statistics: total count and per-namespace breakdown.",
+      outputSchema: statsOutputShape,
     },
     async () => {
       const stats = await stub.stats();
