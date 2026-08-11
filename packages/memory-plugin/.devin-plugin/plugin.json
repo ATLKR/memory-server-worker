@@ -1,0 +1,12 @@
+{
+  "name": "memory",
+  "version": "0.1.0",
+  "description": "Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn. Backed by a Cloudflare Worker with Durable Object SQLite + FTS5 search. Auth via Allen Labs SSO.",
+  "author": {
+    "name": "Allen Lim",
+    "email": "allenlim@allenlabs.org"
+  },
+  "license": "MIT",
+  "keywords": ["memory", "mcp", "recall", "context", "persistence"],
+  "skills": "./skills/"
+}

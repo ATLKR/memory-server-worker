@@ -1,0 +1,63 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "memory-server",
+  "compatibility_date": "2026-07-02",
+  // nodejs_compat is required by the Agents SDK (Durable Object durability +
+  // node:async_hooks for Cloudflare AsyncLocalStorage context) and by jose
+  // (WebCrypto + jose runtime).
+  "compatibility_flags": ["nodejs_compat"],
+
+  "main": "src/index.ts",
+
+  // Keep the workers.dev subdomain active alongside the custom domain.
+  "workers_dev": true,
+
+  "durable_objects": {
+    "bindings": [
+      {
+        "class_name": "MemoryAgent",
+        "name": "MEMORY_AGENT"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["MemoryAgent"]
+    }
+  ],
+
+  // Optional R2 bucket for skill-style large documents (loadable context).
+  // Uncomment after creating the bucket:
+  //   wrangler r2 bucket create memory-skills
+  // "r2_buckets": [
+  //   {
+  //     "binding": "SKILLS_BUCKET",
+  //     "bucket_name": "memory-skills"
+  //   }
+  // ],
+
+  "vars": {
+    // Allen Labs central auth API. The worker verifies RS256 JWTs minted by
+    // this server via its JWKS endpoint ({AUTH_API_URL}/.well-known/jwks.json).
+    // JWT issuer + audience must match this URL.
+    "AUTH_API_URL": "https://auth-api.allen.company",
+    // Auth web UI origin (where the browser sign-in form lives).
+    "AUTH_WEB_URL": "https://auth.allen.company",
+    // Default scope when a client doesn't specify one via x-memory-scope.
+    // Each scope gets its own Durable Object instance → isolated SQLite DB.
+    // When empty, the JWT's `sub` (user id) is used as the scope.
+    "DEFAULT_SCOPE": ""
+  },
+
+  // Custom domain — memory.allenlim.net (zone allenlim.net is on this CF account).
+  "routes": [
+    {
+      "pattern": "memory.allenlim.net",
+      "custom_domain": true
+    }
+  ]
+
+  // No secrets required — auth is delegated to the Allen Labs auth server
+  // via JWT/JWKS. The worker is stateless w.r.t. credentials.
+}

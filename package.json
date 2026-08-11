@@ -1,0 +1,18 @@
+{
+  "name": "memory-server-worker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Personal Memory MCP server + plugin on Cloudflare Workers, built on the Cloudflare Agents SDK memory layer (Durable Object SQLite + FTS5).",
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm -w memory-worker run dev",
+    "build": "npm -w memory-worker run build",
+    "deploy": "npm -w memory-worker run deploy",
+    "typecheck": "npm -w memory-worker run typecheck",
+    "types": "npm -w memory-worker run types"
+  }
+}
