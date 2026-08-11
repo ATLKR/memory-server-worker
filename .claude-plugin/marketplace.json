@@ -12,7 +12,7 @@
       "source": {
         "source": "github",
         "repo": "ATLKR/memory-server-worker",
-        "path": "packages/memory-plugin"
+        "subpath": "packages/memory-plugin"
       },
       "description": "Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn.",
       "version": "0.1.0",
