@@ -1,0 +1,11 @@
+# Copy this file to `.dev.vars` and fill in values for local dev.
+
+# Allen Labs central auth API URL. JWTs are verified against its JWKS.
+AUTH_API_URL=https://auth-api.allen.company
+
+# Auth web UI origin (browser sign-in form).
+AUTH_WEB_URL=https://auth.allen.company
+
+# Default logical sub-scope when x-memory-scope is absent.
+# It is always bound to the JWT subject; leave empty for the personal profile.
+DEFAULT_SCOPE=

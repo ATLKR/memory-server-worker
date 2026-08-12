@@ -1,14 +1,14 @@
 {
-  "name": "atlikr-memory-server",
+  "name": "allenlim-plugins",
   "interface": {
-    "displayName": "ATLKR Memory Server"
+    "displayName": "Allenlim Plugins"
   },
   "plugins": [
     {
-      "name": "memory",
+      "name": "allenlim-memory-server",
       "source": {
         "source": "local",
-        "path": "./packages/memory-plugin"
+        "path": "./plugins/allenlim-memory-server"
       },
       "policy": {
         "installation": "AVAILABLE",

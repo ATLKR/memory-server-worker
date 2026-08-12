@@ -5,8 +5,8 @@ import {
   Scripts,
   createRootRoute,
 } from "@tanstack/react-router";
-import { useState, useEffect } from "react";
-import { isLoggedIn, getUserInfo, logout } from "~/lib/api";
+import { logout } from "~/lib/api";
+import { useAuthSession } from "~/lib/use-auth-session";
 import appCss from "~/styles/app.css?url";
 
 export const Route = createRootRoute({
@@ -30,13 +30,7 @@ function RootComponent() {
 }
 
 function Navbar() {
-  const [loggedIn, setLoggedIn] = useState(false);
-  const [user, setUser] = useState<{ email?: string; name?: string } | null>(null);
-
-  useEffect(() => {
-    setLoggedIn(isLoggedIn());
-    setUser(getUserInfo());
-  }, []);
+  const { loggedIn, user } = useAuthSession();
 
   return (
     <nav className="navbar">
@@ -56,8 +50,8 @@ function Navbar() {
       </div>
       {loggedIn && (
         <div className="nav-user">
-          {user?.name ?? user?.email ?? ""}
-          <button className="btn btn-sm btn-secondary" onClick={logout}>
+          <span className="nav-user-name">{user?.name ?? user?.email ?? ""}</span>
+          <button type="button" className="btn btn-sm btn-secondary" onClick={logout}>
             Sign out
           </button>
         </div>
@@ -73,8 +67,9 @@ function RootDocument({ children }: { children: React.ReactNode }) {
         <HeadContent />
       </head>
       <body>
+        <a className="skip-link" href="#main-content">Skip to content</a>
         <Navbar />
-        <main className="container">{children}</main>
+        <main id="main-content" className="container">{children}</main>
         <Scripts />
       </body>
     </html>

@@ -18,9 +18,14 @@ A two-part system for giving AI agents persistent, searchable memory:
 
 Plus integration packages:
 
-- **`packages/memory-plugin`** — Devin / Claude Code / Codex plugin with
+- **`plugins/allenlim-memory-server`** — Devin / Claude Code / Codex plugin with
   hooks for automatic recall (pre-prompt) and capture (post-turn).
-- **`packages/memory-chatgpt-plugin`** — ChatGPT-compatible skills package.
+- **`distributions/chatgpt/allenlim-memory-server`** — ChatGPT-compatible
+  alternate distribution.
+
+Current release: **2.0.0**. This major release crosses the Agents/MCP SDK
+breaking dependency boundary while preserving stateless compatibility for
+published 2025 clients. Reinstall the plugin after updating.
 
 ## Architecture
 
@@ -45,6 +50,61 @@ Auth: SSO via Allen Labs central auth server (`auth-api.allen.company`).
 The client sends an RS256 JWT as `Authorization: Bearer <jwt>`. The worker
 verifies the JWT against the auth server's JWKS endpoint.
 
+Every profile is isolated by the authenticated JWT subject. An optional
+`x-memory-scope` value creates a logical sub-scope that is SHA-256-bound to
+that subject, so a caller cannot select another user's profile.
+
+### Migrating pre-2.0 profiles
+
+Before 2.0, `x-memory-scope` selected a sanitized Agent Memory profile name
+without binding it to the authenticated user. Version 2.0 deliberately has no
+runtime fallback to those names: a self-service fallback would let any user
+claim another legacy scope and would restore the original isolation flaw.
+
+Use the operator-only copy tool for a legacy profile that has been proven to
+belong to exactly one JWT subject and, for a scoped migration, one logical
+scope. First pause affected client traffic, deploy the user-bound worker to cut
+off arbitrary legacy-name access, and keep affected traffic paused while
+copying. Inventory normalization collisions as part of the ownership audit
+(for example, `Team_Memory` and `team-memory` formerly addressed the same
+profile).
+
+```bash
+# Cloudflare API token: grant only the required Agent Memory permissions.
+# Set CLOUDFLARE_ACCOUNT_ID and CLOUDFLARE_API_TOKEN in the environment.
+
+# Plan only (default): computes names, makes no network request, writes nothing.
+npm -w memory-worker run migrate:legacy-scope -- \
+  --owner-sub "<JWT_SUB>" --logical-scope "<OLD_SCOPE>"
+
+# Personal profile plan for a non-UUID JWT subject. This maps the former
+# sanitized subject name to the new collision-resistant user-bound name.
+npm -w memory-worker run migrate:legacy-scope -- \
+  --owner-sub "<JWT_SUB>" --personal
+
+# Apply: requires an explicit attestation that the whole source is exclusive
+# to this owner. Copies active memories and verifies the destination.
+npm -w memory-worker run migrate:legacy-scope -- \
+  --owner-sub "<JWT_SUB>" --logical-scope "<OLD_SCOPE>" \
+  --execute --confirm-exclusive-owner "<JWT_SUB>"
+
+# Use --personal instead of --logical-scope to apply a personal-profile plan.
+```
+
+The tool is copy-only and retry-safe: it matches exact content/session pairs,
+rejects unrelated data already present at the target, verifies that the source
+snapshot stayed stable and that the copy completed, and never deletes the
+legacy source. It refuses ambiguous `default`, UUID-shaped, and new-format
+source names. Do not automate a mixed or uncertain profile; manually classify
+it with the affected owners instead.
+
+Cloudflare's current public API enumerates active memories only. The copy
+preserves active memory text and session linkage, but Agent Memory assigns new
+IDs, classifications, summaries, and timestamps; superseded history remains in
+the untouched legacy profile. After the owner verifies recall/list behavior on
+the new scope, resume traffic. Keep the old profile dormant unless a separate
+retention review proves deletion is safe.
+
 ## MCP Tools
 
 | Tool | Agent Memory API | Description |
@@ -57,7 +117,7 @@ verifies the JWT against the auth server's JWKS endpoint.
 | `memory_delete` | `profile.delete()` | Delete a memory by ID |
 | `memory_delete_session` | `profile.deleteSession()` | Delete all memories for a session |
 | `memory_summary` | `profile.getSummary()` | Structured Markdown summary |
-| `memory_stats` | computed from `list()` | Total count + per-type breakdown |
+| `memory_stats` | computed from `list()` | Total count + per-type breakdown (with truncation flag) |
 
 ### Memory types
 
@@ -120,7 +180,7 @@ mem stats
 |----------|-------------|---------|
 | `MEMORY_SERVER_URL` | Worker URL | `https://memory.allenlim.net` |
 | `MEMORY_TOKEN` | JWT bearer token (overrides credential file) | — |
-| `MEMORY_SCOPE` | Scope header (defaults to JWT sub) | — |
+| `MEMORY_SCOPE` | Optional logical sub-scope within the authenticated user | — |
 
 ### Wrangler bindings (backend)
 
@@ -143,6 +203,9 @@ mem stats
 # Install dependencies
 npm install
 
+# Run all type checks, tests, and production builds
+npm run check
+
 # Build backend
 cd packages/memory-worker && npx tsc --noEmit
 
@@ -155,6 +218,26 @@ cd packages/memory-worker && npx wrangler deploy
 # Deploy UI
 cd packages/memory-ui && npx wrangler deploy
 ```
+
+## Plugin installation and updates
+
+Install from the repository marketplace:
+
+```bash
+codex plugin marketplace add https://github.com/ATLKR/memory-server-worker
+codex plugin add allenlim-memory-server@allenlim-plugins
+```
+
+After a new release is pushed, refresh the marketplace metadata and the
+installed plugin, then start a new Codex conversation:
+
+```bash
+codex plugin marketplace upgrade allenlim-plugins
+codex plugin add allenlim-memory-server@allenlim-plugins
+```
+
+Release versions are synchronized across workspace packages, Codex, Claude,
+Devin, ChatGPT manifests, marketplace metadata, and the packaged ZIP.
 
 ## License
 

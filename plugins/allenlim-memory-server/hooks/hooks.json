@@ -1,0 +1,35 @@
+{
+  "description": "Recall relevant memories before prompts and capture conversations after turns.",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/pre-prompt.mjs"
+            ],
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node",
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/post-turn.mjs"
+            ],
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}

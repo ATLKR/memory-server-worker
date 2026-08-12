@@ -1,12 +1,15 @@
 :root {
   --bg: #0d1117;
   --bg-card: #161b22;
+  --bg-secondary: #21262d;
   --bg-input: #0d1117;
   --border: #30363d;
   --text: #e6edf3;
   --text-muted: #8b949e;
   --primary: #2f81f7;
   --primary-hover: #1f6feb;
+  --button-primary: #1f6feb;
+  --button-primary-hover: #1158c7;
   --danger: #f85149;
   --danger-hover: #da3633;
   --radius: 6px;
@@ -16,6 +19,39 @@
   margin: 0;
   padding: 0;
   box-sizing: border-box;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.skip-link {
+  position: fixed;
+  top: 0.5rem;
+  left: 0.5rem;
+  z-index: 100;
+  padding: 0.5rem 0.75rem;
+  border-radius: var(--radius);
+  background: var(--text);
+  color: var(--bg);
+  transform: translateY(-150%);
+}
+
+.skip-link:focus {
+  transform: translateY(0);
+}
+
+:focus-visible {
+  outline: 2px solid #58a6ff;
+  outline-offset: 2px;
 }
 
 body {
@@ -77,6 +113,13 @@ a:hover {
   gap: 0.6rem;
   font-size: 0.85rem;
   color: var(--text-muted);
+  min-width: 0;
+}
+
+.nav-user-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .container {
@@ -158,9 +201,11 @@ a:hover {
   margin-bottom: 1rem;
 }
 
-.memory-detail-header h2 {
+.memory-detail-header h1 {
   margin: 0;
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .memory-detail-content pre {
@@ -201,6 +246,7 @@ a:hover {
 
 .search-input {
   flex: 1;
+  min-width: 0;
   padding: 0.6rem 0.9rem;
   background: var(--bg-input);
   border: 1px solid var(--border);
@@ -210,8 +256,13 @@ a:hover {
 }
 
 .search-input:focus {
-  outline: none;
   border-color: var(--primary);
+}
+
+.search-byte-limit {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+  margin: -1rem 0 1rem;
 }
 
 .btn {
@@ -232,17 +283,17 @@ a:hover {
 }
 
 .btn-primary {
-  background: var(--primary);
-  border-color: var(--primary);
+  background: var(--button-primary);
+  border-color: var(--button-primary);
   color: white;
 }
 
 .btn-primary:hover {
-  background: var(--primary-hover);
-  border-color: var(--primary-hover);
+  background: var(--button-primary-hover);
+  border-color: var(--button-primary-hover);
 }
 
-.btn-primary:disabled {
+.btn:disabled {
   opacity: 0.5;
   cursor: not-allowed;
 }
@@ -283,13 +334,16 @@ a:hover {
 .memory-card-header {
   display: flex;
   justify-content: space-between;
-  align-items: center;
+  align-items: flex-start;
+  gap: 0.75rem;
   margin-bottom: 0.5rem;
 }
 
 .memory-key {
   font-weight: 600;
   color: var(--text);
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .memory-key:hover {
@@ -320,6 +374,8 @@ a:hover {
   background: rgba(47, 129, 247, 0.1);
   padding: 0.1rem 0.4rem;
   border-radius: var(--radius);
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .memory-date {
@@ -333,7 +389,7 @@ a:hover {
   padding: 3rem 1rem;
 }
 
-.login-prompt h2 {
+.login-prompt h1 {
   margin-bottom: 0.5rem;
 }
 
@@ -367,7 +423,7 @@ a:hover {
   max-width: 700px;
 }
 
-.form-page h2 {
+.form-page h1 {
   margin-bottom: 1.5rem;
 }
 
@@ -403,7 +459,6 @@ a:hover {
 .form-field input:focus,
 .form-field select:focus,
 .form-field textarea:focus {
-  outline: none;
   border-color: var(--primary);
 }
 
@@ -472,4 +527,40 @@ a:hover {
   padding: 0.75rem;
   font-size: 0.8rem;
   overflow-x: auto;
+}
+
+@media (max-width: 640px) {
+  .navbar {
+    flex-wrap: wrap;
+    gap: 0.5rem;
+    padding: 0.75rem 1rem;
+  }
+
+  .nav-links {
+    margin-left: auto;
+    gap: 0.25rem;
+  }
+
+  .nav-user {
+    width: 100%;
+    margin-left: 0;
+    justify-content: flex-end;
+  }
+
+  .nav-user-name {
+    max-width: min(60vw, 18rem);
+  }
+
+  .container {
+    padding: 1rem;
+  }
+
+  .search-bar {
+    gap: 0.5rem;
+  }
+
+  .memory-card,
+  .memory-detail-content pre {
+    padding: 0.8rem;
+  }
 }

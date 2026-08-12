@@ -1,0 +1,17 @@
+{
+  "name": "allenlim-memory-server",
+  "version": "2.0.0",
+  "description": "Personal persistent memory plugin for Devin CLI, Claude Code, and Codex. Auto-recalls and captures memories via the memory-server-worker MCP endpoint.",
+  "license": "MIT",
+  "type": "module",
+  "bin": {
+    "mem": "scripts/cli.mjs"
+  },
+  "scripts": {
+    "pre-prompt": "node scripts/pre-prompt.mjs",
+    "post-turn": "node scripts/post-turn.mjs",
+    "mem": "node scripts/cli.mjs",
+    "test": "node --test scripts/*.test.mjs",
+    "typecheck": "node --check scripts/lib.mjs && node --check scripts/cli.mjs && node --check scripts/hook-runner.mjs && node --check scripts/pre-prompt.mjs && node --check scripts/post-turn.mjs"
+  }
+}

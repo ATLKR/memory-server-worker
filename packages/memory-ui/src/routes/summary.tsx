@@ -1,6 +1,7 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
-import { useState, useEffect } from "react";
-import { api, isLoggedIn, type SummaryResponse } from "~/lib/api";
+import { useState, useEffect, useRef } from "react";
+import { api, type SummaryResponse } from "~/lib/api";
+import { useAuthSession } from "~/lib/use-auth-session";
 
 export const Route = createFileRoute("/summary")({
   component: SummaryComponent,
@@ -10,16 +11,47 @@ function SummaryComponent() {
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [loggedIn] = useState(() => isLoggedIn());
+  const { ready, loggedIn } = useAuthSession();
+  const requestGeneration = useRef(0);
 
   useEffect(() => {
-    if (!loggedIn) return;
-    api
-      .summary()
-      .then(setSummary)
-      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load summary"))
-      .finally(() => setLoading(false));
+    const controller = new AbortController();
+    const generation = ++requestGeneration.current;
+
+    if (!loggedIn) {
+      controller.abort();
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+    setSummary(null);
+
+    void api
+      .summary(undefined, controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted && generation === requestGeneration.current) {
+          setSummary(result);
+        }
+      })
+      .catch((err) => {
+        if (!controller.signal.aborted && generation === requestGeneration.current) {
+          setError(err instanceof Error ? err.message : "Failed to load summary");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted && generation === requestGeneration.current) {
+          setLoading(false);
+        }
+      });
+
+    return () => {
+      controller.abort();
+      if (generation === requestGeneration.current) requestGeneration.current += 1;
+    };
   }, [loggedIn]);
+
+  if (!ready) return <div className="loading" role="status">Checking session…</div>;
 
   if (!loggedIn) {
     return (
@@ -33,12 +65,12 @@ function SummaryComponent() {
   return (
     <div className="memory-detail">
       <div className="memory-detail-header">
-        <h2>Memory Summary</h2>
+        <h1>Memory Summary</h1>
         <Link to="/" className="btn btn-secondary">← Back</Link>
       </div>
 
-      {loading && <div className="loading">Loading…</div>}
-      {error && <div className="error">{error}</div>}
+      {loading && <div className="loading" role="status">Loading…</div>}
+      {error && <div className="error" role="alert">{error}</div>}
       {summary && (
         <div className="memory-detail-content">
           <pre>{summary.summary}</pre>

@@ -1,0 +1,35 @@
+{
+  "name": "allenlim-memory-server",
+  "version": "2.0.0",
+  "description": "Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn. Backed by Cloudflare Agent Memory (managed service with automatic extraction, classification, and hybrid search). Auth via Allen Labs SSO.",
+  "author": {
+    "name": "Allen Lim",
+    "email": "allenlim@allenlabs.org"
+  },
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "mcp",
+    "recall",
+    "context",
+    "persistence"
+  ],
+  "skills": "./skills/",
+  "apps": "./.app.json",
+  "interface": {
+    "displayName": "Memory",
+    "shortDescription": "Recall and capture personal memories",
+    "longDescription": "Automatically recalls relevant memories before each prompt and captures conversation summaries after each turn. Memories are stored in Cloudflare Agent Memory (managed service with automatic extraction, classification, and hybrid search). Authentication via Allen Labs SSO (JWT/JWKS).",
+    "developerName": "Allen Lim",
+    "category": "Productivity",
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Recall relevant memories for my current request.",
+      "Remember this decision for future conversations.",
+      "Summarize what you know about this project."
+    ]
+  }
+}

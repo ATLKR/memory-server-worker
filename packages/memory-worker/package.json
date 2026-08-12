@@ -1,6 +1,6 @@
 {
   "name": "memory-worker",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "description": "Memory server worker backed by Cloudflare Agent Memory.",
   "license": "MIT",
@@ -10,17 +10,21 @@
     "build": "wrangler deploy --dry-run --outdir=dist",
     "deploy": "wrangler deploy",
     "types": "wrangler types env.d.ts --include-runtime false",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test src/*.test.ts",
+    "migrate:legacy-scope": "node --import tsx scripts/migrate-legacy-scope.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
-    "agents": "^0.14.2",
-    "jose": "^5.9.6",
+    "@modelcontextprotocol/client": "2.0.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "@modelcontextprotocol/server": "2.0.0",
+    "agents": "0.20.1",
+    "jose": "^6.2.8",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^4.20260511.1",
-    "typescript": "^5.7.0",
-    "wrangler": "^4.90.1"
+    "@cloudflare/workers-types": "^5.20260812.1",
+    "typescript": "^7.0.2",
+    "wrangler": "^4.121.0"
   }
 }

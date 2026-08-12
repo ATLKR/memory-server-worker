@@ -11,10 +11,11 @@
  * verifies the JWT signature against the auth server's JWKS endpoint
  * ({AUTH_API_URL}/.well-known/jwks.json) using `jose`.
  *
- * Scope resolution (each scope → its own Agent Memory profile):
- *   1. `x-memory-scope` header if present
- *   2. `DEFAULT_SCOPE` var if non-empty
- *   3. JWT `sub` (Better Auth user id) — the default for personal use
+ * Profile resolution:
+ *   1. JWT `sub` is always the user isolation boundary.
+ *   2. `x-memory-scope`, or `DEFAULT_SCOPE` when present, selects a logical
+ *      sub-scope that is cryptographically bound to that user.
+ *   3. With no logical scope, the legacy JWT-sub profile name is retained.
  *
  * MCP tools:
  *   - memory_add      → profile.remember()  (store a single memory)
@@ -28,10 +29,14 @@
  *   - memory_stats    → computed from list() (total + per-type counts)
  */
 
-import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
-import { ReadResourceRequestSchema } from "@modelcontextprotocol/sdk/types.js";
+import {
+  INVALID_PARAMS,
+  McpServer,
+  ProtocolError,
+  ResourceNotFoundError,
+} from "@modelcontextprotocol/server";
 import { z } from "zod";
-import { createMcpHandler } from "agents/mcp";
+import { createMcpHandler } from "agents/mcp/server";
 import { verifyJwt, extractBearerToken, type SessionPayload } from "./auth";
 import type { MemoryEntry, MemoryType, RecallResult, StatsResponse } from "./schema";
 import {
@@ -58,24 +63,58 @@ import {
   handleResourceRead,
   hasSkills,
 } from "./skills";
+import { isValidSsoState, resolveProfileName } from "./security";
+import { readBoundedBody, readJsonRequestBody } from "./body";
+
+const addMemoryInputSchema = z.object(addMemoryShape);
+const searchMemoryInputSchema = z.object(searchMemoryShape);
+const ingestMemoryInputSchema = z.object(ingestMemoryShape);
+const listMemoryInputSchema = z.object(listMemoryShape);
+const getMemoryInputSchema = z.object(getMemoryShape);
+const deleteMemoryInputSchema = z.object(deleteMemoryShape);
+const deleteSessionInputSchema = z.object(deleteSessionShape);
+const summaryInputSchema = z.object(summaryShape);
+
+const memoryEntrySchema = z.object(memoryEntryOutputShape);
+const searchResultSchema = z.object(searchOutputShape);
+const ingestResultSchema = z.object(ingestOutputShape);
+const listResultSchema = z.object(listOutputShape);
+const deleteResultSchema = z.object(deleteOutputShape);
+const deleteSessionResultSchema = z.object(deleteSessionOutputShape);
+const statsResultSchema = z.object(statsOutputShape);
+const summaryResultSchema = z.object(summaryOutputShape);
+const skillResourceSchema = z.object({
+  uri: z.string(),
+  digest: z.string(),
+});
+const skillEntrySchema = z.object({
+  uri: z.string(),
+  frontmatter: z.object({
+    name: z.string(),
+    description: z.string(),
+  }),
+  resources: z.array(skillResourceSchema),
+});
+const cacheMetadataSchema = {
+  ttlMs: z.number().int().nonnegative().optional(),
+  cacheScope: z.enum(["private", "public"]).optional(),
+};
+const skillsListResultSchema = z.object({
+  skills: z.array(skillEntrySchema),
+  nextCursor: z.string().optional(),
+  ...cacheMetadataSchema,
+});
+const skillsGetResultSchema = z.object({
+  skill: skillEntrySchema,
+  ...cacheMetadataSchema,
+});
 
 // ---------- Agent Memory helpers ----------
 
 /**
- * Get an Agent Memory profile for the given scope.
- * Each scope gets its own isolated memory profile.
- *
- * Agent Memory profile names must contain only lowercase letters (a-z),
- * digits (0-9), and hyphens (-), max 100 characters. We sanitize the
- * scope (which may be a JWT subject like "abc123_Uvwx") to fit.
+ * Get an Agent Memory profile by its already validated, user-bound name.
  */
-function getProfile(env: Env, scope: string) {
-  const profileName = scope
-    .toLowerCase()
-    .replace(/[^a-z0-9-]/g, "-")
-    .replace(/-+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 100) || "default";
+function getProfile(env: Env, profileName: string) {
   return env.MEMORY.getProfile(profileName);
 }
 
@@ -83,18 +122,16 @@ function getProfile(env: Env, scope: string) {
 
 /**
  * Authenticate the request by verifying the bearer JWT against the auth
- * server's JWKS. Returns the resolved scope + session payload, or null
+ * server's JWKS. Returns the resolved profile name + session payload, or null
  * if auth fails.
  *
- * Scope resolution order:
- *   1. `x-memory-scope` header (explicit override)
- *   2. `DEFAULT_SCOPE` var if non-empty
- *   3. JWT `sub` (user id) — default for personal use
+ * The JWT subject is always the profile boundary. A requested logical scope
+ * is hashed together with that subject before an Agent Memory profile is used.
  */
 async function authenticate(
   request: Request,
   env: Env,
-): Promise<{ scope: string; session: SessionPayload } | null> {
+): Promise<{ profileName: string; session: SessionPayload } | null> {
   const authApiUrl = env.AUTH_API_URL;
   if (!authApiUrl) {
     console.error("[auth] AUTH_API_URL is not configured");
@@ -105,20 +142,30 @@ async function authenticate(
   if (!token) return null;
 
   const session = await verifyJwt(authApiUrl, token);
-  if (!session) return null;
+  if (!session || !session.sub.trim() || session.banned === true || session.banned === 1) {
+    return null;
+  }
 
-  const scope =
-    request.headers.get("x-memory-scope") ||
-    env.DEFAULT_SCOPE ||
-    session.sub;
-  return { scope, session };
+  // A caller may choose a logical sub-scope, but resolveProfileName binds it
+  // cryptographically to the authenticated subject. It can never select
+  // another user's profile, even when two users provide the same header.
+  const logicalScope =
+    request.headers.get("x-memory-scope")?.trim() || env.DEFAULT_SCOPE?.trim() || null;
+  // Never fall back to the old caller-selected profile name. Legacy scoped
+  // data is copied offline only after an operator verifies exclusive ownership.
+  const profileName = await resolveProfileName(session.sub, logicalScope);
+  return { profileName, session };
 }
 
 // ---------- MCP server factory ----------
 
-function createServer(env: Env, scope: string): McpServer {
+function createServer(
+  env: Env,
+  profileName: string,
+  era: "legacy" | "modern",
+): McpServer {
   const server = new McpServer(
-    { name: "memory-server", version: "0.2.0" },
+    { name: "memory-server", version: "2.0.0" },
     {
       // Server-level instructions — ChatGPT/Codex read these on initialize.
       instructions:
@@ -137,49 +184,66 @@ function createServer(env: Env, scope: string): McpServer {
   // ---- Skills extension ----
   if (hasSkills()) {
     server.server.registerCapabilities({
-      resources: { listChanged: true },
-    });
-    server.server.registerCapabilities({
       extensions: { "io.modelcontextprotocol/skills": {} },
-    } as Record<string, unknown>);
-
-    const SkillsListSchema = z.object({
-      method: z.literal("skills/list"),
-      params: z.object({ cursor: z.string().optional() }).optional(),
-    });
-    const SkillsGetSchema = z.object({
-      method: z.literal("skills/get"),
-      params: z.object({ uri: z.string() }),
     });
 
+    const skillsListParamsSchema = z.object({ cursor: z.string().optional() });
+    const skillsGetParamsSchema = z.object({ uri: z.string() });
+
     server.server.setRequestHandler(
-      SkillsListSchema as unknown as Parameters<typeof server.server.setRequestHandler>[0],
-      async (req: { params?: { cursor?: string } }) => {
-        return await handleSkillsList({ cursor: req.params?.cursor });
+      "skills/list",
+      { params: skillsListParamsSchema, result: skillsListResultSchema },
+      async (params) => {
+        const result = await handleSkillsList({ cursor: params.cursor });
+        return era === "modern"
+          ? { ...result, ttlMs: 300_000, cacheScope: "private" as const }
+          : result;
       },
     );
 
     server.server.setRequestHandler(
-      SkillsGetSchema as unknown as Parameters<typeof server.server.setRequestHandler>[0],
-      async (req: { params?: { uri?: string } }) => {
-        const result = await handleSkillsGet({ uri: req.params?.uri ?? "" });
+      "skills/get",
+      { params: skillsGetParamsSchema, result: skillsGetResultSchema },
+      async (params) => {
+        const result = await handleSkillsGet({ uri: params.uri });
         if (!result) {
-          return { error: { code: -32602, message: "skill not found" } };
+          throw new ProtocolError(INVALID_PARAMS, "skill not found");
         }
-        return result;
+        return era === "modern"
+          ? { ...result, ttlMs: 300_000, cacheScope: "private" as const }
+          : result;
       },
     );
 
-    server.server.setRequestHandler(
-      ReadResourceRequestSchema,
-      async (req: { params: { uri: string } }) => {
-        const result = await handleResourceRead({ uri: req.params.uri });
-        if (!result) {
-          return { contents: [] };
-        }
-        return result;
+    for (const skill of [
+      {
+        name: "memory-recall-skill",
+        uri: "skill://memory/recall/SKILL.md",
+        description: "Instructions for recalling relevant personal memories.",
       },
-    );
+      {
+        name: "memory-capture-skill",
+        uri: "skill://memory/capture/SKILL.md",
+        description: "Instructions for capturing durable personal memories.",
+      },
+    ]) {
+      server.registerResource(
+        skill.name,
+        skill.uri,
+        {
+          description: skill.description,
+          mimeType: "text/markdown",
+          cacheHint: { ttlMs: 300_000, cacheScope: "private" },
+        },
+        async (uri) => {
+          const result = await handleResourceRead({ uri: uri.href });
+          if (!result) {
+            throw new ResourceNotFoundError(uri.href);
+          }
+          return result;
+        },
+      );
+    }
   }
 
   // ---- memory_add ----
@@ -194,12 +258,12 @@ function createServer(env: Env, scope: string): McpServer {
         "preserved). Use this when you know exactly what to remember. " +
         "For extracting memories from a conversation, use memory_ingest " +
         "instead.",
-      inputSchema: addMemoryShape,
-      outputSchema: memoryEntryOutputShape,
+      inputSchema: addMemoryInputSchema,
+      outputSchema: memoryEntrySchema,
     },
     async (params) => {
       try {
-        const profile = await getProfile(env, scope);
+        const profile = await getProfile(env, profileName);
         const memory = await profile.remember({
           content: params.content,
           sessionId: params.sessionId ?? null,
@@ -241,12 +305,12 @@ function createServer(env: Env, scope: string): McpServer {
         "and returns a synthesized answer grounded in stored content. " +
         "Call this at the start of every user message to recall " +
         "relevant context.",
-      inputSchema: searchMemoryShape,
-      outputSchema: searchOutputShape,
+      inputSchema: searchMemoryInputSchema,
+      outputSchema: searchResultSchema,
     },
     async (params) => {
       try {
-        const profile = await getProfile(env, scope);
+        const profile = await getProfile(env, profileName);
         const result: RecallResult = await profile.recall(params.query, {
           thinkingLevel: params.thinkingLevel,
           responseLength: params.responseLength,
@@ -285,12 +349,12 @@ function createServer(env: Env, scope: string): McpServer {
         "is idempotent — no duplicates are created. Call this after " +
         "a conversation turn or when the user goes idle, NOT after " +
         "every single message.",
-      inputSchema: ingestMemoryShape,
-      outputSchema: ingestOutputShape,
+      inputSchema: ingestMemoryInputSchema,
+      outputSchema: ingestResultSchema,
     },
     async (params) => {
       try {
-        const profile = await getProfile(env, scope);
+        const profile = await getProfile(env, profileName);
         await profile.ingest(
           params.messages.map((m) => ({
             role: m.role,
@@ -325,12 +389,12 @@ function createServer(env: Env, scope: string): McpServer {
         "List stored memories, optionally filtered by type or session. " +
         "Returns entries ordered by most recently updated. Use the " +
         "cursor for pagination.",
-      inputSchema: listMemoryShape,
-      outputSchema: listOutputShape,
+      inputSchema: listMemoryInputSchema,
+      outputSchema: listResultSchema,
     },
     async (params) => {
       try {
-        const profile = await getProfile(env, scope);
+        const profile = await getProfile(env, profileName);
         const result = await profile.list({
           type: params.type,
           sessionId: params.sessionId,
@@ -376,12 +440,12 @@ function createServer(env: Env, scope: string): McpServer {
       description:
         "Fetch a single memory by its ID. Returns the full entry " +
         "including content, type, and timestamps.",
-      inputSchema: getMemoryShape,
-      outputSchema: memoryEntryOutputShape,
+      inputSchema: getMemoryInputSchema,
+      outputSchema: memoryEntrySchema,
     },
     async (params) => {
       try {
-        const profile = await getProfile(env, scope);
+        const profile = await getProfile(env, profileName);
         const memory = await profile.get(params.id);
         const entry: MemoryEntry = {
           id: memory.id,
@@ -412,12 +476,12 @@ function createServer(env: Env, scope: string): McpServer {
     "memory_delete",
     {
       description: "Delete a memory by ID. This is irreversible.",
-      inputSchema: deleteMemoryShape,
-      outputSchema: deleteOutputShape,
+      inputSchema: deleteMemoryInputSchema,
+      outputSchema: deleteResultSchema,
     },
     async (params) => {
       try {
-        const profile = await getProfile(env, scope);
+        const profile = await getProfile(env, profileName);
         await profile.delete(params.id);
         const result = { deleted: true };
         return {
@@ -442,12 +506,12 @@ function createServer(env: Env, scope: string): McpServer {
       description:
         "Delete all memories associated with a session ID. " +
         "Idempotent — deleting a session with no memories is a no-op.",
-      inputSchema: deleteSessionShape,
-      outputSchema: deleteSessionOutputShape,
+      inputSchema: deleteSessionInputSchema,
+      outputSchema: deleteSessionResultSchema,
     },
     async (params) => {
       try {
-        const profile = await getProfile(env, scope);
+        const profile = await getProfile(env, profileName);
         await profile.deleteSession(params.sessionId);
         const result = { deleted: true };
         return {
@@ -476,12 +540,12 @@ function createServer(env: Env, scope: string): McpServer {
         "Generate a structured Markdown summary of everything stored " +
         "in memory. Use this to inspect what Agent Memory remembers " +
         "about the user, or to bootstrap a new session with context.",
-      inputSchema: summaryShape,
-      outputSchema: summaryOutputShape,
+      inputSchema: summaryInputSchema,
+      outputSchema: summaryResultSchema,
     },
     async (params) => {
       try {
-        const profile = await getProfile(env, scope);
+        const profile = await getProfile(env, profileName);
         const result = await profile.getSummary({
           sessionId: params.sessionId ?? null,
         });
@@ -514,11 +578,12 @@ function createServer(env: Env, scope: string): McpServer {
         "Return memory statistics: total count and per-type breakdown " +
         "(fact, event, instruction, task). Note: counts are approximate " +
         "for profiles with more than 500 memories.",
-      outputSchema: statsOutputShape,
+      inputSchema: z.object({}),
+      outputSchema: statsResultSchema,
     },
     async () => {
       try {
-        const profile = await getProfile(env, scope);
+        const profile = await getProfile(env, profileName);
         // Agent Memory doesn't have a direct stats endpoint, so we
         // compute from list() with a large limit. If there are more
         // than 500 memories, we note the approximate count.
@@ -530,6 +595,7 @@ function createServer(env: Env, scope: string): McpServer {
         const stats: StatsResponse = {
           total: all.cursor ? 500 : all.memories.length,
           byType,
+          truncated: Boolean(all.cursor),
         };
         return {
           content: [{ type: "text" as const, text: JSON.stringify(stats, null, 2) }],
@@ -635,6 +701,7 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
   ): Response {
     const headers = new Headers();
     headers.set("content-type", "application/json");
+    headers.set("cache-control", "no-store");
     for (const c of cookies) {
       headers.append("Set-Cookie", c);
     }
@@ -648,7 +715,7 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
     );
   }
 
-  if (stateParam && stateParam !== stateCookie) {
+  if (!isValidSsoState(stateCookie, stateParam)) {
     return errorResponse(
       JSON.stringify({ error: "state mismatch — possible CSRF attempt" }),
       400,
@@ -667,11 +734,17 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
 
   const clientId = requestUrl.origin;
 
-  const exchangeRes = await fetch(`${authApiUrl}/sso/exchange`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ code, client_id: clientId, include_token: true }),
-  });
+  let exchangeRes: Response;
+  try {
+    exchangeRes = await fetch(`${authApiUrl}/sso/exchange`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code, client_id: clientId, include_token: true }),
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch {
+    return errorResponse(JSON.stringify({ error: "SSO exchange unavailable" }), 502);
+  }
 
   const exchange = (await exchangeRes.json().catch(() => null)) as
     | { token?: string; expires_in?: number; user?: { id?: string; email?: string; name?: string | null } }
@@ -691,6 +764,7 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
     const tokenCookie = `${SSO_TOKEN_COOKIE}=${token}; Secure; SameSite=Lax; Max-Age=60; Path=/`;
     const headers = new Headers();
     headers.set("Location", "/");
+    headers.set("Cache-Control", "no-store");
     headers.append("Set-Cookie", tokenCookie);
     headers.append("Set-Cookie", clearStateCookie);
     headers.append("Set-Cookie", clearUiFlowCookie);
@@ -725,17 +799,49 @@ function parseCookie(cookieHeader: string, name: string): string | null {
 //
 // All endpoints require a valid JWT.
 
+const restAddMemorySchema = z.object(addMemoryShape).strict();
+const restSearchSchema = z.object(searchMemoryShape).strict();
+const restListSchema = z.object(listMemoryShape).strict();
+const restSummarySchema = z.object(summaryShape).strict();
+const restIdSchema = z.string().min(1).max(512);
+const restSessionIdSchema = z.string().min(1).max(64);
+// A 32K-character content string can expand to almost 192 KiB when every
+// character requires a JSON escape, so leave encoding headroom while keeping
+// REST requests tightly bounded.
+const MAX_REST_JSON_BYTES = 256 * 1024;
+
+function validationError(error: z.ZodError): Response {
+  return Response.json(
+    {
+      error: "invalid request",
+      issues: error.issues.map((issue) => ({
+        path: issue.path.join("."),
+        message: issue.message,
+      })),
+    },
+    { status: 400 },
+  );
+}
+
+function decodePathPart(value: string): string | null {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return null;
+  }
+}
+
 async function handleRestApi(
   request: Request,
   env: Env,
   url: URL,
-  scope: string,
+  profileName: string,
 ): Promise<Response> {
-  const profile = await getProfile(env, scope);
   const method = request.method;
   const path = url.pathname.replace(/^\/api\/?/, "");
 
   try {
+    const profile = await getProfile(env, profileName);
     // GET /api/stats
     if (path === "stats" && method === "GET") {
       const all = await profile.list({ limit: 500 });
@@ -746,22 +852,26 @@ async function handleRestApi(
       return Response.json({
         total: all.cursor ? 500 : all.memories.length,
         byType,
+        truncated: Boolean(all.cursor),
       });
     }
 
     // GET /api/memories?type=&sessionId=&limit=&cursor=
     if (path === "memories" && method === "GET") {
-      const type = url.searchParams.get("type") as MemoryType | null;
-      const sessionId = url.searchParams.get("sessionId") ?? undefined;
-      const limit = url.searchParams.get("limit")
-        ? Math.min(parseInt(url.searchParams.get("limit")!, 10), 500)
-        : 50;
-      const cursor = url.searchParams.get("cursor") ?? undefined;
+      const limitParam = url.searchParams.get("limit");
+      const parsed = restListSchema.safeParse({
+        type: url.searchParams.get("type") || undefined,
+        sessionId: url.searchParams.get("sessionId") || undefined,
+        limit: limitParam === null ? undefined : Number(limitParam),
+        cursor: url.searchParams.get("cursor") || undefined,
+      });
+      if (!parsed.success) return validationError(parsed.error);
+
       const result = await profile.list({
-        type: type ?? undefined,
-        sessionId,
-        limit,
-        cursor,
+        type: parsed.data.type,
+        sessionId: parsed.data.sessionId,
+        limit: parsed.data.limit ?? 50,
+        cursor: parsed.data.cursor,
       });
       return Response.json({
         count: result.memories.length,
@@ -779,19 +889,14 @@ async function handleRestApi(
 
     // POST /api/memories  { content, sessionId? }
     if (path === "memories" && method === "POST") {
-      const body = (await request.json().catch(() => null)) as {
-        content?: string;
-        sessionId?: string;
-      } | null;
-      if (!body?.content) {
-        return Response.json({ error: "content is required" }, { status: 400 });
-      }
-      if (body.content.length > 32768) {
-        return Response.json({ error: "content exceeds 32KB limit" }, { status: 400 });
-      }
+      const body = await readJsonRequestBody(request, MAX_REST_JSON_BYTES);
+      if (!body.ok) return Response.json({ error: body.error }, { status: body.status });
+      const parsed = restAddMemorySchema.safeParse(body.value);
+      if (!parsed.success) return validationError(parsed.error);
+
       const memory = await profile.remember({
-        content: body.content,
-        sessionId: body.sessionId ?? null,
+        content: parsed.data.content,
+        sessionId: parsed.data.sessionId ?? null,
       });
       return Response.json(
         {
@@ -809,20 +914,14 @@ async function handleRestApi(
 
     // POST /api/search  { query, thinkingLevel?, responseLength? }
     if (path === "search" && method === "POST") {
-      const body = (await request.json().catch(() => null)) as {
-        query?: string;
-        thinkingLevel?: "low" | "medium" | "high";
-        responseLength?: "short" | "medium" | "long";
-      } | null;
-      if (!body?.query) {
-        return Response.json({ error: "query is required" }, { status: 400 });
-      }
-      if (body.query.length > 1024) {
-        return Response.json({ error: "query exceeds 1KB limit" }, { status: 400 });
-      }
-      const result = await profile.recall(body.query, {
-        thinkingLevel: body.thinkingLevel,
-        responseLength: body.responseLength,
+      const body = await readJsonRequestBody(request, MAX_REST_JSON_BYTES);
+      if (!body.ok) return Response.json({ error: body.error }, { status: body.status });
+      const parsed = restSearchSchema.safeParse(body.value);
+      if (!parsed.success) return validationError(parsed.error);
+
+      const result = await profile.recall(parsed.data.query, {
+        thinkingLevel: parsed.data.thinkingLevel,
+        responseLength: parsed.data.responseLength,
       });
       return Response.json(result);
     }
@@ -833,15 +932,20 @@ async function handleRestApi(
       if (!q.trim()) {
         return Response.json({ count: 0, answer: "", candidates: [] });
       }
-      const result = await profile.recall(q);
+      const parsed = restSearchSchema.pick({ query: true }).safeParse({ query: q });
+      if (!parsed.success) return validationError(parsed.error);
+      const result = await profile.recall(parsed.data.query);
       return Response.json(result);
     }
 
     // GET /api/summary
     if (path === "summary" && method === "GET") {
-      const sessionId = url.searchParams.get("sessionId") ?? undefined;
+      const parsed = restSummarySchema.safeParse({
+        sessionId: url.searchParams.get("sessionId") || undefined,
+      });
+      if (!parsed.success) return validationError(parsed.error);
       const result = await profile.getSummary({
-        sessionId: sessionId ?? null,
+        sessionId: parsed.data.sessionId ?? null,
       });
       return Response.json(result);
     }
@@ -849,7 +953,10 @@ async function handleRestApi(
     // /api/memories/:id
     const idMatch = path.match(/^memories\/(.+)$/);
     if (idMatch) {
-      const id = decodeURIComponent(idMatch[1]!);
+      const decodedId = decodePathPart(idMatch[1]!);
+      const parsedId = restIdSchema.safeParse(decodedId);
+      if (!parsedId.success) return validationError(parsedId.error);
+      const id = parsedId.data;
 
       if (method === "GET") {
         try {
@@ -881,8 +988,10 @@ async function handleRestApi(
     // DELETE /api/session/:sessionId
     const sessionMatch = path.match(/^session\/(.+)$/);
     if (sessionMatch && method === "DELETE") {
-      const sessionId = decodeURIComponent(sessionMatch[1]!);
-      await profile.deleteSession(sessionId);
+      const decodedSessionId = decodePathPart(sessionMatch[1]!);
+      const parsedSessionId = restSessionIdSchema.safeParse(decodedSessionId);
+      if (!parsedSessionId.success) return validationError(parsedSessionId.error);
+      await profile.deleteSession(parsedSessionId.data);
       return Response.json({ deleted: true });
     }
 
@@ -890,13 +999,54 @@ async function handleRestApi(
   } catch (err) {
     console.error("[rest-api] error:", err);
     return Response.json(
-      { error: err instanceof Error ? err.message : "internal error" },
+      { error: "internal server error" },
       { status: 500 },
     );
   }
 }
 
 // ---------- Worker entry ----------
+
+const MCP_ALLOWED_HEADERS = [
+  "content-type",
+  "accept",
+  "authorization",
+  "x-memory-scope",
+  "mcp-session-id",
+  "mcp-protocol-version",
+  "mcp-method",
+  "mcp-name",
+  "last-event-id",
+].join(",");
+const MCP_EXPOSED_HEADERS = [
+  "mcp-session-id",
+  "mcp-protocol-version",
+  "www-authenticate",
+].join(",");
+const MAX_MCP_JSON_BYTES = 4 * 1024 * 1024;
+
+function mcpCorsHeaders(): Headers {
+  const headers = new Headers();
+  headers.set("access-control-allow-origin", "*");
+  headers.set("access-control-allow-methods", "GET,POST,DELETE,OPTIONS");
+  headers.set("access-control-allow-headers", MCP_ALLOWED_HEADERS);
+  headers.set("access-control-expose-headers", MCP_EXPOSED_HEADERS);
+  headers.set("access-control-max-age", "86400");
+  return headers;
+}
+
+function mcpJsonError(status: 400 | 413, message: string): Response {
+  const headers = mcpCorsHeaders();
+  headers.set("content-type", "application/json");
+  return new Response(
+    JSON.stringify({
+      jsonrpc: "2.0",
+      error: { code: status === 413 ? -32000 : -32700, message },
+      id: null,
+    }),
+    { status, headers },
+  );
+}
 
 export default {
   async fetch(
@@ -905,6 +1055,12 @@ export default {
     ctx: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
+
+    // Browser MCP clients send an unauthenticated preflight before the actual
+    // bearer-authenticated request. Handle it before JWT verification.
+    if (url.pathname === "/mcp" && request.method === "OPTIONS") {
+      return new Response(null, { status: 204, headers: mcpCorsHeaders() });
+    }
 
     if (url.pathname === "/healthz") {
       return Response.json({ ok: true, service: "memory-server" });
@@ -930,30 +1086,78 @@ export default {
 
     const auth = await authenticate(request, env);
     if (!auth) {
+      const headers = new Headers({
+        "content-type": "application/json",
+        "www-authenticate":
+          `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"`,
+      });
+      if (url.pathname === "/mcp") {
+        for (const [name, value] of mcpCorsHeaders()) headers.set(name, value);
+      }
       return new Response(JSON.stringify({ error: "Unauthorized" }), {
         status: 401,
-        headers: {
-          "content-type": "application/json",
-          "www-authenticate":
-            `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"`,
-        },
+        headers,
       });
     }
 
     if (url.pathname.startsWith("/api/")) {
-      return handleRestApi(request, env, url, auth.scope);
+      return handleRestApi(request, env, url, auth.profileName);
     }
 
-    const server = createServer(env, auth.scope);
-    const handler = createMcpHandler(server, {
-      route: "/mcp",
-      corsOptions: {
-        origin: "*",
-        methods: "GET,POST,DELETE,OPTIONS",
-        headers: "content-type,authorization,x-memory-scope",
-      },
-    });
+    let handlerRequest = request;
+    if (url.pathname === "/mcp" && request.method === "POST") {
+      // The Agents SDK only checks Content-Length before request.json(). Read
+      // the stream ourselves so chunked requests cannot bypass its 4 MiB cap.
+      const body = await readBoundedBody(request, MAX_MCP_JSON_BYTES);
+      if (!body.ok) {
+        if (body.reason === "too_large") {
+          return mcpJsonError(413, "Request body too large");
+        }
+        return mcpJsonError(400, "Parse error: Invalid JSON request body");
+      }
+      const headers = new Headers(request.headers);
+      headers.set("content-length", String(body.bytes.byteLength));
+      handlerRequest = new Request(request.url, {
+        method: request.method,
+        headers,
+        body: body.bytes,
+        redirect: request.redirect,
+        signal: request.signal,
+      });
+    }
 
-    return handler(request, env, ctx);
+    const handler = createMcpHandler(
+      ({ era }) => createServer(env, auth.profileName, era),
+      {
+        route: "/mcp",
+        corsOptions: {
+          origin: "*",
+          methods: "GET,POST,DELETE,OPTIONS",
+          headers: MCP_ALLOWED_HEADERS,
+          exposeHeaders: MCP_EXPOSED_HEADERS,
+        },
+        // The public UI domain proxies this endpoint through a service binding.
+        // Keep the direct Worker and local development endpoints explicit too.
+        allowedHostnames: [
+          "memory.allenlim.net",
+          "memory-server.allenlim.workers.dev",
+          "localhost",
+          "127.0.0.1",
+          "[::1]",
+        ],
+        allowedOriginHostnames: [
+          "memory.allenlim.net",
+          "memory-server.allenlim.workers.dev",
+          "chatgpt.com",
+          "chat.openai.com",
+          "platform.openai.com",
+          "localhost",
+          "127.0.0.1",
+          "[::1]",
+        ],
+      },
+    );
+
+    return handler(handlerRequest, env, ctx);
   },
 } satisfies ExportedHandler<Env>;

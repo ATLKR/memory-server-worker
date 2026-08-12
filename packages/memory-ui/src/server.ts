@@ -61,6 +61,6 @@ export default {
     }
 
     // Everything else: TanStack Start UI.
-    return handler.fetch(request, env, ctx);
+    return handler.fetch(request);
   },
 } satisfies ExportedHandler<UiEnv>;

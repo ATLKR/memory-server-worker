@@ -4,6 +4,10 @@
   "compatibility_date": "2026-07-02",
   "compatibility_flags": ["nodejs_compat"],
   "main": "src/server.ts",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
   "workers_dev": true,
   "assets": {
     "directory": "dist/client"

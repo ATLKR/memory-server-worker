@@ -8,6 +8,10 @@
   "compatibility_flags": ["nodejs_compat"],
 
   "main": "src/index.ts",
+  "observability": {
+    "enabled": true,
+    "head_sampling_rate": 1
+  },
 
   // Keep the workers.dev subdomain active — the UI worker proxies to this.
   "workers_dev": true,
@@ -19,9 +23,10 @@
     "AUTH_API_URL": "https://auth-api.allen.company",
     // Auth web UI origin (where the browser sign-in form lives).
     "AUTH_WEB_URL": "https://auth.allen.company",
-    // Default scope when a client doesn't specify one via x-memory-scope.
+    // Default logical sub-scope when x-memory-scope is absent.
     // Each scope gets its own Agent Memory profile → isolated memory store.
-    // When empty, the JWT's `sub` (user id) is used as the scope.
+    // Every logical scope is bound to the JWT `sub`; empty selects the user's
+    // personal identity (UUID subjects retain their legacy profile name).
     "DEFAULT_SCOPE": ""
   },
 

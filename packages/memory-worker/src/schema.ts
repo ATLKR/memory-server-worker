@@ -15,6 +15,26 @@
 
 import { z } from "zod";
 
+export const MAX_MEMORY_CONTENT_BYTES = 32 * 1024;
+export const MAX_SEARCH_QUERY_BYTES = 1024;
+export const MAX_INGEST_MESSAGES = 100;
+export const MAX_INGEST_BYTES = 1024 * 1024;
+
+export function utf8ByteLength(value: string): number {
+  return new TextEncoder().encode(value).byteLength;
+}
+
+function utf8BoundedString(maxBytes: number, label: string) {
+  const message = `${label} exceeds the ${maxBytes}-byte UTF-8 limit.`;
+  return z
+    .string()
+    .min(1)
+    // Retain maxLength in the generated MCP JSON Schema. Any value within the
+    // UTF-8 limit is also within this UTF-16 code-unit ceiling.
+    .max(maxBytes, message)
+    .refine((value) => utf8ByteLength(value) <= maxBytes, { message });
+}
+
 /** Memory types supported by Agent Memory. */
 export type MemoryType = "fact" | "event" | "instruction" | "task";
 
@@ -45,17 +65,15 @@ export interface RecallResult {
 export interface StatsResponse {
   total: number;
   byType: Partial<Record<MemoryType, number>>;
+  truncated: boolean;
 }
 
 // ---------- Zod raw shapes (for MCP tool inputSchema) ----------
 
 export const addMemoryShape = {
-  content: z
-    .string()
-    .min(1)
-    .max(32768)
+  content: utf8BoundedString(MAX_MEMORY_CONTENT_BYTES, "Memory content")
     .describe(
-      "The memory content to store (max 32 KB). Agent Memory will " +
+      "The memory content to store (max 32 KiB UTF-8). Agent Memory will " +
         "automatically classify it as a fact, event, instruction, or " +
         "task, and generate a summary. If a similar fact or instruction " +
         "already exists, it will be superseded (the old version is " +
@@ -72,12 +90,9 @@ export const addMemoryShape = {
 };
 
 export const searchMemoryShape = {
-  query: z
-    .string()
-    .min(1)
-    .max(1024)
+  query: utf8BoundedString(MAX_SEARCH_QUERY_BYTES, "Search query")
     .describe(
-      "Natural language search query (max 1 KB). Agent Memory runs " +
+      "Natural language search query (max 1 KiB UTF-8). Agent Memory runs " +
         "hybrid search (keyword + semantic + topic key) and returns a " +
         "synthesized answer grounded in stored content.",
     ),
@@ -102,13 +117,26 @@ export const ingestMemoryShape = {
     .array(
       z.object({
         role: z.enum(["system", "user", "assistant"]),
-        content: z.string().min(1).max(32768),
+        content: utf8BoundedString(MAX_MEMORY_CONTENT_BYTES, "Message content"),
       }),
     )
     .min(1)
-    .max(500)
+    .max(MAX_INGEST_MESSAGES)
+    .superRefine((messages, ctx) => {
+      let totalBytes = 0;
+      for (const message of messages) {
+        totalBytes += utf8ByteLength(message.content);
+        if (totalBytes > MAX_INGEST_BYTES) {
+          ctx.addIssue({
+            code: "custom",
+            message: "Combined message content exceeds the 1 MiB limit.",
+          });
+          return;
+        }
+      }
+    })
     .describe(
-      "Conversation messages to process (max 500, each max 32 KB). " +
+      "Conversation messages to process (max 100 and 1 MiB total, each max 32 KiB UTF-8). " +
         "Agent Memory will automatically extract facts, events, " +
         "instructions, and tasks from the conversation. Re-ingesting " +
         "the same messages is idempotent — no duplicates are created.",
@@ -142,20 +170,25 @@ export const listMemoryShape = {
     .describe("Maximum number of results. Defaults to 50."),
   cursor: z
     .string()
+    .max(4096)
     .optional()
     .describe("Opaque cursor from a previous page for pagination."),
 };
 
 export const getMemoryShape = {
-  id: z.string().describe("The memory ID to fetch."),
+  id: z.string().min(1).max(512).describe("The memory ID to fetch."),
 };
 
 export const deleteMemoryShape = {
-  id: z.string().describe("The memory ID to delete."),
+  id: z.string().min(1).max(512).describe("The memory ID to delete."),
 };
 
 export const deleteSessionShape = {
-  sessionId: z.string().describe("The session ID to delete all memories for."),
+  sessionId: z
+    .string()
+    .min(1)
+    .max(64)
+    .describe("The session ID to delete all memories for."),
 };
 
 export const summaryShape = {
@@ -230,6 +263,9 @@ export const statsOutputShape = {
   byType: z
     .record(z.string(), z.number())
     .describe("Count per memory type (fact, event, instruction, task)."),
+  truncated: z
+    .boolean()
+    .describe("Whether total and per-type counts are lower bounds capped at 500."),
 };
 
 export const summaryOutputShape = {

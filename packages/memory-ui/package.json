@@ -1,11 +1,12 @@
 {
   "name": "memory-ui",
-  "version": "0.1.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite dev",
     "build": "vite build",
+    "typecheck": "tsc --noEmit",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler deploy",
     "cf-typegen": "wrangler types"
@@ -17,13 +18,13 @@
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.29.0",
+    "@cloudflare/vite-plugin": "^1.51.3",
     "@tanstack/react-router-devtools": "^1.167.1",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
     "@vitejs/plugin-react": "^6.0.1",
-    "typescript": "^5.7.0",
+    "typescript": "^7.0.2",
     "vite": "^8.0.14",
-    "wrangler": "^4.74.0"
+    "wrangler": "^4.121.0"
   }
 }

@@ -43,6 +43,11 @@ export interface SearchResponse {
 export interface StatsResponse {
   total: number;
   byType: Partial<Record<MemoryType, number>>;
+  truncated: boolean;
+}
+
+interface ApiErrorBody {
+  error?: string;
 }
 
 export interface SummaryResponse {
@@ -102,7 +107,12 @@ export function clearToken(): void {
 export function isLoggedIn(): boolean {
   const token = getToken();
   if (!token) return false;
-  const expiresAt = sessionStorage.getItem("memory_expires_at");
+  let expiresAt: string | null = null;
+  try {
+    expiresAt = sessionStorage.getItem("memory_expires_at");
+  } catch {
+    return false;
+  }
   if (expiresAt) {
     const exp = new Date(expiresAt).getTime();
     if (Date.now() >= exp - 5 * 60 * 1000) return false;
@@ -114,7 +124,11 @@ export function getUserInfo(): { email?: string; name?: string } | null {
   const token = getToken();
   if (!token) return null;
   try {
-    const payload = JSON.parse(atob(token.split(".")[1]!));
+    const segment = token.split(".")[1];
+    if (!segment) return null;
+    const base64 = segment.replace(/-/g, "+").replace(/_/g, "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    const payload = JSON.parse(atob(padded));
     return { email: payload.email, name: payload.name ?? payload.preferredName };
   } catch {
     return null;
@@ -140,76 +154,81 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   return resp;
 }
 
+async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await apiFetch(path, init);
+  const body = (await response.json().catch(() => null)) as (ApiErrorBody & T) | null;
+
+  if (!response.ok) {
+    const message = body?.error || `Request failed (${response.status})`;
+    throw new Error(message);
+  }
+  if (body === null) {
+    throw new Error("The server returned an invalid JSON response");
+  }
+  return body;
+}
+
 export const api = {
   async list(params?: {
     type?: MemoryType;
     sessionId?: string;
     limit?: number;
     cursor?: string;
-  }): Promise<ListResponse> {
+  }, signal?: AbortSignal): Promise<ListResponse> {
     const search = new URLSearchParams();
     if (params?.type) search.set("type", params.type);
     if (params?.sessionId) search.set("sessionId", params.sessionId);
     if (params?.limit) search.set("limit", String(params.limit));
     if (params?.cursor) search.set("cursor", params.cursor);
     const qs = search.toString();
-    const resp = await apiFetch(`/api/memories${qs ? "?" + qs : ""}`);
-    return resp.json();
+    return apiJson<ListResponse>(`/api/memories${qs ? "?" + qs : ""}`, { signal });
   },
 
   async search(query: string, params?: {
     thinkingLevel?: "low" | "medium" | "high";
     responseLength?: "short" | "medium" | "long";
-  }): Promise<SearchResponse> {
-    const resp = await apiFetch("/api/search", {
+  }, signal?: AbortSignal): Promise<SearchResponse> {
+    return apiJson<SearchResponse>("/api/search", {
       method: "POST",
       body: JSON.stringify({ query, ...params }),
+      signal,
     });
-    return resp.json();
   },
 
-  async get(id: string): Promise<MemoryEntry> {
-    const resp = await apiFetch(`/api/memories/${encodeURIComponent(id)}`);
-    if (!resp.ok) throw new Error(`Failed to get memory: ${resp.status}`);
-    return resp.json();
+  async get(id: string, signal?: AbortSignal): Promise<MemoryEntry> {
+    return apiJson<MemoryEntry>(`/api/memories/${encodeURIComponent(id)}`, { signal });
   },
 
   async add(params: {
     content: string;
     sessionId?: string;
   }): Promise<MemoryEntry> {
-    const resp = await apiFetch("/api/memories", {
+    return apiJson<MemoryEntry>("/api/memories", {
       method: "POST",
       body: JSON.stringify(params),
     });
-    if (!resp.ok) throw new Error(`Failed to add memory: ${resp.status}`);
-    return resp.json();
   },
 
-  async delete(id: string): Promise<{ deleted: boolean }> {
-    const resp = await apiFetch(`/api/memories/${encodeURIComponent(id)}`, {
+  async delete(id: string, signal?: AbortSignal): Promise<{ deleted: boolean }> {
+    return apiJson<{ deleted: boolean }>(`/api/memories/${encodeURIComponent(id)}`, {
       method: "DELETE",
+      signal,
     });
-    if (!resp.ok) throw new Error(`Failed to delete memory: ${resp.status}`);
-    return resp.json();
   },
 
   async deleteSession(sessionId: string): Promise<{ deleted: boolean }> {
-    const resp = await apiFetch(`/api/session/${encodeURIComponent(sessionId)}`, {
-      method: "DELETE",
-    });
-    if (!resp.ok) throw new Error(`Failed to delete session: ${resp.status}`);
-    return resp.json();
+    return apiJson<{ deleted: boolean }>(
+      `/api/session/${encodeURIComponent(sessionId)}`,
+      { method: "DELETE" },
+    );
   },
 
   async stats(): Promise<StatsResponse> {
-    const resp = await apiFetch("/api/stats");
-    return resp.json();
+    return apiJson<StatsResponse>("/api/stats");
   },
 
-  async summary(sessionId?: string): Promise<SummaryResponse> {
+  async summary(sessionId?: string, signal?: AbortSignal): Promise<SummaryResponse> {
     const qs = sessionId ? `?sessionId=${encodeURIComponent(sessionId)}` : "";
-    const resp = await apiFetch(`/api/summary${qs}`);
-    return resp.json();
+    return apiJson<SummaryResponse>(`/api/summary${qs}`, { signal });
   },
 };

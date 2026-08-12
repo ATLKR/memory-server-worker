@@ -24,10 +24,10 @@
  * re-authenticate.
  */
 
-import { createLocalJWKSet, jwtVerify, type JWTPayload, type JSONWebKeySet, type JWTVerifyGetKey } from "jose";
+import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
 
 export interface SessionPayload extends JWTPayload {
-  sub: string; // Better Auth user id (UUID string)
+  sub: string; // Stable Better Auth user id (format is provider-defined)
   email?: string;
   name?: string | null;
   username?: string | null;
@@ -44,7 +44,7 @@ export interface SessionPayload extends JWTPayload {
 // reduces auth latency while still refreshing on key rotation.
 
 let jwksGetKey: JWTVerifyGetKey | null = null;
-let jwksExpires = 0;
+let jwksSourceUrl = "";
 const JWKS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const JWKS_FETCH_TIMEOUT = 5000; // 5 seconds
 
@@ -62,30 +62,24 @@ export async function verifyJwt(
 ): Promise<SessionPayload | null> {
   if (!token) return null;
   try {
-    const jwksUrl = `${authApiUrl.replace(/\/$/, "")}/.well-known/jwks.json`;
+    const normalizedAuthApiUrl = authApiUrl.replace(/\/$/, "");
+    const jwksUrl = `${normalizedAuthApiUrl}/.well-known/jwks.json`;
 
-    // Check cache — refresh if expired.
-    const now = Date.now();
-    if (!jwksGetKey || now >= jwksExpires) {
-      const resp = await fetch(jwksUrl, {
-        signal: AbortSignal.timeout(JWKS_FETCH_TIMEOUT),
+    // createRemoteJWKSet caches successful fetches and refreshes immediately
+    // when a JWT references an unknown key id, so auth survives key rotation.
+    if (!jwksGetKey || jwksSourceUrl !== jwksUrl) {
+      jwksGetKey = createRemoteJWKSet(new URL(jwksUrl), {
+        timeoutDuration: JWKS_FETCH_TIMEOUT,
+        cacheMaxAge: JWKS_CACHE_TTL,
+        cooldownDuration: 30_000,
       });
-      if (!resp.ok) {
-        console.error(`[verifyJwt] JWKS fetch failed: ${resp.status}`);
-        return null;
-      }
-      const jwksData = (await resp.json()) as JSONWebKeySet;
-      if (!jwksData?.keys || !Array.isArray(jwksData.keys)) {
-        console.error("[verifyJwt] JWKS response missing keys array");
-        return null;
-      }
-      jwksGetKey = createLocalJWKSet(jwksData);
-      jwksExpires = now + JWKS_CACHE_TTL;
+      jwksSourceUrl = jwksUrl;
     }
 
     const { payload } = await jwtVerify(token, jwksGetKey, {
-      issuer: authApiUrl,
-      audience: authApiUrl,
+      issuer: normalizedAuthApiUrl,
+      audience: normalizedAuthApiUrl,
+      algorithms: ["RS256"],
     });
     if (typeof payload.sub !== "string") return null;
     return payload as SessionPayload;
