@@ -21,7 +21,7 @@
  *   { "token": "<jwt>", "expiresAt": "<iso>", "user": { "id": "...", "email": "..." } }
  */
 
-import { createHash, scryptSync } from "node:crypto";
+import { scryptSync } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -35,8 +35,10 @@ const MAX_REQUEST_TIMEOUT_MS = 60_000;
 const MAX_REDIRECTS = 3;
 const REDIRECT_STATUSES = new Set([301, 302, 307, 308]);
 const MAX_ERROR_TEXT_BYTES = 4 * 1024;
-const CREDENTIAL_FINGERPRINT_BYTES = 32;
-const CREDENTIAL_FINGERPRINT_SCRYPT_OPTIONS = Object.freeze({
+const DESTINATION_FINGERPRINT_BYTES = 32;
+const DESTINATION_FINGERPRINT_SALT =
+  "allenlim-memory-server:checkpoint-destination:v1";
+const DESTINATION_FINGERPRINT_SCRYPT_OPTIONS = Object.freeze({
   N: 2 ** 14,
   r: 8,
   p: 1,
@@ -187,31 +189,32 @@ function getCanonicalServerUrl() {
  */
 export function getMemoryDestinationFingerprint() {
   const apiKey = getApiKey();
-  let authIdentity;
-  let scopeIdentity = "none";
+  let authKind;
+  let identity;
+  let logicalScope = null;
 
   if (apiKey) {
-    authIdentity = `api-key:${deriveCredentialFingerprint(apiKey, "api-key")}`;
+    authKind = "api-key";
+    identity = apiKey;
   } else {
     const token = loadStoredToken();
     if (token) {
       const stableUserId = getStableJwtUserId(token);
-      authIdentity = stableUserId
-        ? `jwt-user:${sha256(stableUserId)}`
-        : `jwt-credential:${deriveCredentialFingerprint(token, "jwt")}`;
-      scopeIdentity = sha256(process.env.MEMORY_SCOPE?.trim() || "");
+      authKind = stableUserId ? "jwt-user" : "jwt-credential";
+      identity = stableUserId || token;
+      logicalScope = process.env.MEMORY_SCOPE?.trim() || "";
     } else {
-      authIdentity = "anonymous";
+      authKind = "anonymous";
+      identity = "";
     }
   }
 
-  return sha256(
-    JSON.stringify({
-      authIdentity,
-      scopeIdentity,
-      server: getCanonicalServerUrl(),
-    }),
-  );
+  return deriveDestinationFingerprint({
+    authKind,
+    identity,
+    logicalScope,
+    server: getCanonicalServerUrl(),
+  });
 }
 
 function getStableJwtUserId(token) {
@@ -445,16 +448,19 @@ function truncateErrorText(value) {
   return "\u2026";
 }
 
-function sha256(value) {
-  return createHash("sha256").update(value).digest("hex");
-}
-
-function deriveCredentialFingerprint(credential, kind) {
+function deriveDestinationFingerprint(destinationMaterial) {
+  // This is a deterministic local checkpoint partition ID, not a stored
+  // password verifier. A random per-record salt would make existing
+  // checkpoints undiscoverable on the next process run. The fixed,
+  // feature-specific salt provides domain separation, while scrypt makes the
+  // final returned value a one-way KDF output even if a credential is weaker
+  // than the normally high-entropy API keys and JWTs. Raw destination material
+  // exists only for this call and is never returned or written to disk.
   return scryptSync(
-    credential,
-    `allenlim-memory-server:${kind}-destination:v1`,
-    CREDENTIAL_FINGERPRINT_BYTES,
-    CREDENTIAL_FINGERPRINT_SCRYPT_OPTIONS,
+    JSON.stringify(destinationMaterial),
+    DESTINATION_FINGERPRINT_SALT,
+    DESTINATION_FINGERPRINT_BYTES,
+    DESTINATION_FINGERPRINT_SCRYPT_OPTIONS,
   ).toString("hex");
 }
 
