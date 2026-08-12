@@ -1,13 +1,19 @@
 {
   "name": "memory",
   "version": "0.1.0",
-  "description": "Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn. Backed by a Cloudflare Worker with Durable Object SQLite + FTS5 search. Auth via Allen Labs SSO.",
+  "description": "Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn. Backed by Cloudflare Agent Memory (managed service with automatic extraction, classification, and hybrid search). Auth via Allen Labs SSO.",
   "author": {
     "name": "Allen Lim",
     "email": "allenlim@allenlabs.org"
   },
   "license": "MIT",
-  "keywords": ["memory", "mcp", "recall", "context", "persistence"],
+  "keywords": [
+    "memory",
+    "mcp",
+    "recall",
+    "context",
+    "persistence"
+  ],
   "skills": "./skills/",
   "apps": "./.app.json",
   "interface": {
@@ -16,6 +22,9 @@
     "longDescription": "Automatically recalls relevant memories before each prompt and captures conversation summaries after each turn. Memories are stored in a Cloudflare Worker with Durable Object SQLite + FTS5 full-text search. Authentication via Allen Labs SSO (JWT/JWKS).",
     "developerName": "Allen Lim",
     "category": "Productivity",
-    "capabilities": ["Interactive", "Write"]
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ]
   }
 }

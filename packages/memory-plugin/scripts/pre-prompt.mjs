@@ -43,7 +43,7 @@ async function main() {
     const answer = results.answer ?? "";
     const candidates = results.candidates ?? [];
 
-    if (!answer && candidates.length === 0) {
+    if (candidates.length === 0) {
       process.exit(0);
     }
 

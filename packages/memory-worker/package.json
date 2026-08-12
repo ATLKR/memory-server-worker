@@ -2,7 +2,7 @@
   "name": "memory-worker",
   "version": "0.1.0",
   "private": true,
-  "description": "Cloudflare Worker exposing a personal Memory MCP server backed by a Durable Object with SQLite + FTS5 (Cloudflare Agents SDK memory layer).",
+  "description": "Memory server worker backed by Cloudflare Agent Memory.",
   "license": "MIT",
   "type": "module",
   "scripts": {

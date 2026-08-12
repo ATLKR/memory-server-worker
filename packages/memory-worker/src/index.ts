@@ -198,24 +198,36 @@ function createServer(env: Env, scope: string): McpServer {
       outputSchema: memoryEntryOutputShape,
     },
     async (params) => {
-      const profile = await getProfile(env, scope);
-      const memory = await profile.remember({
-        content: params.content,
-        sessionId: params.sessionId ?? null,
-      });
-      const entry: MemoryEntry = {
-        id: memory.id,
-        type: memory.type,
-        summary: memory.summary,
-        content: memory.content,
-        sessionId: memory.sessionId,
-        createdAt: memory.createdAt.toISOString(),
-        updatedAt: memory.updatedAt.toISOString(),
-      };
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(entry, null, 2) }],
-        structuredContent: entry as unknown as Record<string, unknown>,
-      };
+      try {
+        const profile = await getProfile(env, scope);
+        const memory = await profile.remember({
+          content: params.content,
+          sessionId: params.sessionId ?? null,
+        });
+        const entry: MemoryEntry = {
+          id: memory.id,
+          type: memory.type,
+          summary: memory.summary,
+          content: memory.content,
+          sessionId: memory.sessionId,
+          createdAt: memory.createdAt.toISOString(),
+          updatedAt: memory.updatedAt.toISOString(),
+        };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(entry, null, 2) }],
+          structuredContent: entry as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Failed to store memory: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          isError: true as const,
+        };
+      }
     },
   );
 
@@ -233,20 +245,32 @@ function createServer(env: Env, scope: string): McpServer {
       outputSchema: searchOutputShape,
     },
     async (params) => {
-      const profile = await getProfile(env, scope);
-      const result: RecallResult = await profile.recall(params.query, {
-        thinkingLevel: params.thinkingLevel,
-        responseLength: params.responseLength,
-      });
-      return {
-        content: [
-          {
-            type: "text" as const,
-            text: JSON.stringify(result, null, 2),
-          },
-        ],
-        structuredContent: result as unknown as Record<string, unknown>,
-      };
+      try {
+        const profile = await getProfile(env, scope);
+        const result: RecallResult = await profile.recall(params.query, {
+          thinkingLevel: params.thinkingLevel,
+          responseLength: params.responseLength,
+        });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+          structuredContent: result as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Search failed: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          isError: true as const,
+        };
+      }
     },
   );
 
@@ -265,19 +289,31 @@ function createServer(env: Env, scope: string): McpServer {
       outputSchema: ingestOutputShape,
     },
     async (params) => {
-      const profile = await getProfile(env, scope);
-      await profile.ingest(
-        params.messages.map((m) => ({
-          role: m.role,
-          content: m.content,
-        })),
-        { sessionId: params.sessionId ?? null },
-      );
-      const result = { ingested: true };
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(result) }],
-        structuredContent: result as unknown as Record<string, unknown>,
-      };
+      try {
+        const profile = await getProfile(env, scope);
+        await profile.ingest(
+          params.messages.map((m) => ({
+            role: m.role,
+            content: m.content,
+          })),
+          { sessionId: params.sessionId ?? null },
+        );
+        const result = { ingested: true };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          structuredContent: result as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Ingest failed: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          isError: true as const,
+        };
+      }
     },
   );
 
@@ -293,31 +329,43 @@ function createServer(env: Env, scope: string): McpServer {
       outputSchema: listOutputShape,
     },
     async (params) => {
-      const profile = await getProfile(env, scope);
-      const result = await profile.list({
-        type: params.type,
-        sessionId: params.sessionId,
-        limit: params.limit ?? 50,
-        cursor: params.cursor,
-      });
-      const structured = {
-        count: result.memories.length,
-        memories: result.memories.map((m) => ({
-          id: m.id,
-          type: m.type,
-          summary: m.summary,
-          sessionId: m.sessionId,
-          createdAt: m.createdAt.toISOString(),
-          updatedAt: m.updatedAt.toISOString(),
-        })),
-        cursor: result.cursor ?? null,
-      };
-      return {
-        content: [
-          { type: "text" as const, text: JSON.stringify(structured, null, 2) },
-        ],
-        structuredContent: structured as unknown as Record<string, unknown>,
-      };
+      try {
+        const profile = await getProfile(env, scope);
+        const result = await profile.list({
+          type: params.type,
+          sessionId: params.sessionId,
+          limit: params.limit ?? 50,
+          cursor: params.cursor,
+        });
+        const structured = {
+          count: result.memories.length,
+          memories: result.memories.map((m) => ({
+            id: m.id,
+            type: m.type,
+            summary: m.summary,
+            sessionId: m.sessionId,
+            createdAt: m.createdAt.toISOString(),
+            updatedAt: m.updatedAt.toISOString(),
+          })),
+          cursor: result.cursor ?? null,
+        };
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(structured, null, 2) },
+          ],
+          structuredContent: structured as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `List failed: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          isError: true as const,
+        };
+      }
     },
   );
 
@@ -398,13 +446,25 @@ function createServer(env: Env, scope: string): McpServer {
       outputSchema: deleteSessionOutputShape,
     },
     async (params) => {
-      const profile = await getProfile(env, scope);
-      await profile.deleteSession(params.sessionId);
-      const result = { deleted: true };
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(result) }],
-        structuredContent: result as unknown as Record<string, unknown>,
-      };
+      try {
+        const profile = await getProfile(env, scope);
+        await profile.deleteSession(params.sessionId);
+        const result = { deleted: true };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(result) }],
+          structuredContent: result as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Failed to delete session: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          isError: true as const,
+        };
+      }
     },
   );
 
@@ -420,17 +480,29 @@ function createServer(env: Env, scope: string): McpServer {
       outputSchema: summaryOutputShape,
     },
     async (params) => {
-      const profile = await getProfile(env, scope);
-      const result = await profile.getSummary({
-        sessionId: params.sessionId ?? null,
-      });
-      const structured = { summary: result.summary };
-      return {
-        content: [
-          { type: "text" as const, text: JSON.stringify(structured, null, 2) },
-        ],
-        structuredContent: structured as unknown as Record<string, unknown>,
-      };
+      try {
+        const profile = await getProfile(env, scope);
+        const result = await profile.getSummary({
+          sessionId: params.sessionId ?? null,
+        });
+        const structured = { summary: result.summary };
+        return {
+          content: [
+            { type: "text" as const, text: JSON.stringify(structured, null, 2) },
+          ],
+          structuredContent: structured as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Summary failed: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          isError: true as const,
+        };
+      }
     },
   );
 
@@ -440,27 +512,40 @@ function createServer(env: Env, scope: string): McpServer {
     {
       description:
         "Return memory statistics: total count and per-type breakdown " +
-        "(fact, event, instruction, task).",
+        "(fact, event, instruction, task). Note: counts are approximate " +
+        "for profiles with more than 500 memories.",
       outputSchema: statsOutputShape,
     },
     async () => {
-      const profile = await getProfile(env, scope);
-      // Agent Memory doesn't have a direct stats endpoint, so we
-      // compute from list() with a large limit.
-      const all = await profile.list({ limit: 500 });
-      const byType: Partial<Record<MemoryType, number>> = {};
-      for (const m of all.memories) {
-        byType[m.type] = (byType[m.type] ?? 0) + 1;
+      try {
+        const profile = await getProfile(env, scope);
+        // Agent Memory doesn't have a direct stats endpoint, so we
+        // compute from list() with a large limit. If there are more
+        // than 500 memories, we note the approximate count.
+        const all = await profile.list({ limit: 500 });
+        const byType: Partial<Record<MemoryType, number>> = {};
+        for (const m of all.memories) {
+          byType[m.type] = (byType[m.type] ?? 0) + 1;
+        }
+        const stats: StatsResponse = {
+          total: all.cursor ? 500 : all.memories.length,
+          byType,
+        };
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(stats, null, 2) }],
+          structuredContent: stats as unknown as Record<string, unknown>,
+        };
+      } catch (err) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Stats failed: ${err instanceof Error ? err.message : String(err)}`,
+            },
+          ],
+          isError: true as const,
+        };
       }
-      // If there's a cursor, there are more than 500 — note it.
-      const stats: StatsResponse = {
-        total: all.cursor ? 500 : all.memories.length,
-        byType,
-      };
-      return {
-        content: [{ type: "text" as const, text: JSON.stringify(stats, null, 2) }],
-        structuredContent: stats as unknown as Record<string, unknown>,
-      };
     },
   );
 
@@ -701,6 +786,9 @@ async function handleRestApi(
       if (!body?.content) {
         return Response.json({ error: "content is required" }, { status: 400 });
       }
+      if (body.content.length > 32768) {
+        return Response.json({ error: "content exceeds 32KB limit" }, { status: 400 });
+      }
       const memory = await profile.remember({
         content: body.content,
         sessionId: body.sessionId ?? null,
@@ -728,6 +816,9 @@ async function handleRestApi(
       } | null;
       if (!body?.query) {
         return Response.json({ error: "query is required" }, { status: 400 });
+      }
+      if (body.query.length > 1024) {
+        return Response.json({ error: "query exceeds 1KB limit" }, { status: 400 });
       }
       const result = await profile.recall(body.query, {
         thinkingLevel: body.thinkingLevel,

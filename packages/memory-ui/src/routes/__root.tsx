@@ -50,6 +50,9 @@ function Navbar() {
         <Link to="/new" activeProps={{ className: "active" }}>
           New
         </Link>
+        <Link to="/summary" activeProps={{ className: "active" }}>
+          Summary
+        </Link>
       </div>
       {loggedIn && (
         <div className="nav-user">

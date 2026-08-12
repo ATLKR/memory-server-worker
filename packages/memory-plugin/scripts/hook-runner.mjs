@@ -43,27 +43,29 @@ async function runPrePrompt() {
     process.exit(0);
   }
 
-  const query = prompt.slice(0, 500);
+  // Agent Memory recall() accepts natural language. Trim to 1KB limit.
+  const query = prompt.slice(0, 1000);
 
   try {
-    const resultsText = await memory.search({ query, limit: 5 });
+    const resultsText = await memory.search({ query });
     const results = JSON.parse(resultsText);
-    const memories = results.results ?? [];
+    const answer = results.answer ?? "";
+    const candidates = results.candidates ?? [];
 
-    if (memories.length === 0) {
+    if (candidates.length === 0) {
       process.exit(0);
     }
 
-    const lines = memories.map((m, i) => {
-      const tags = m.tags?.length ? ` [${m.tags.join(", ")}]` : "";
-      const ns = m.namespace && m.namespace !== "default" ? ` (${m.namespace})` : "";
-      return `### Memory ${i + 1}${ns}${tags}\nKey: ${m.key ?? m.id}\n${m.content}`;
+    // Format the synthesized answer + candidate memories as context.
+    const lines = candidates.map((c, i) => {
+      return `### Memory ${i + 1}\n${c.summary}`;
     });
 
     const additionalContext =
-      `--- Retrieved from Personal Memory (${memories.length} entries) ---\n` +
+      `--- Retrieved from Personal Memory (${candidates.length} entries) ---\n` +
       `The following memories were recalled based on your current prompt. ` +
       `Use them as relevant context, but verify against the actual task:\n\n` +
+      (answer ? `**Synthesized answer:** ${answer}\n\n` : "") +
       lines.join("\n\n") +
       `\n\n--- End of Retrieved Memories ---`;
 
@@ -86,7 +88,7 @@ async function runPrePrompt() {
   }
 }
 
-// --- Post-turn: store conversation summary ---
+// --- Post-turn: ingest conversation into Agent Memory ---
 
 async function runPostTurn() {
   const raw = await readStdin();
@@ -101,48 +103,28 @@ async function runPostTurn() {
     process.exit(0);
   }
 
-  // Extract user and assistant text from whichever format we received.
-  const { userText, assistantText } = extractConversation(hookInput);
+  // Extract conversation messages from whichever format we received.
+  const messages = extractMessages(hookInput);
 
-  if (!userText && !assistantText) {
+  if (messages.length === 0) {
     process.exit(0);
   }
 
-  const maxLen = 2000;
-  const content =
-    `## Conversation Summary\n\n` +
-    `**User asked:**\n${truncate(userText, maxLen / 2)}\n\n` +
-    `**Assistant responded:**\n${truncate(assistantText, maxLen / 2)}\n\n` +
-    `*Session: ${hookInput.session_id ?? "unknown"}*\n` +
-    `*Timestamp: ${new Date().toISOString()}*`;
-
-  const key = `turn-${slugify(truncate(userText || assistantText, 60))}-${Date.now()}`;
+  // Agent Memory ingest() handles extraction, classification, dedup, and
+  // supersession automatically. Limit to last 50 messages for speed.
+  const recentMessages = messages.slice(-50);
+  const truncated = recentMessages.map((m) => ({
+    role: m.role,
+    content: truncate(m.content, 32000),
+  }));
 
   try {
-    // Check for existing similar conversation to append to.
-    const existingKey = await findSimilarConversation(userText || assistantText);
-    if (existingKey) {
-      const appendContent =
-        `\n\n---\n\n**Next turn (${new Date().toISOString()}):**\n` +
-        `**User asked:**\n${truncate(userText, maxLen / 2)}\n\n` +
-        `**Assistant responded:**\n${truncate(assistantText, maxLen / 2)}`;
-      await memory.update({
-        key: existingKey,
-        content: appendContent,
-        appendContent: true,
-      });
-    } else {
-      await memory.add({
-        content,
-        key,
-        namespace: "conversations",
-        tags: ["auto-captured"],
-        metadata: {
-          session_id: hookInput.session_id,
-          captured_at: new Date().toISOString(),
-        },
-      });
-    }
+    await memory.ingest({
+      messages: truncated,
+      sessionId: hookInput.session_id
+        ? String(hookInput.session_id).slice(0, 64)
+        : undefined,
+    });
   } catch (err) {
     if (isTokenExpired()) {
       console.error(
@@ -157,20 +139,19 @@ async function runPostTurn() {
 }
 
 /**
- * Extract user and assistant text from various hook input formats.
+ * Extract conversation messages from various hook input formats.
+ * Returns an array of { role, content } objects.
  */
-function extractConversation(hookInput) {
+function extractMessages(hookInput) {
   // Format 1: Claude Code with transcript_path
   if (hookInput.transcript_path) {
     try {
       const transcript = JSON.parse(readFileSync(hookInput.transcript_path, "utf8"));
       if (Array.isArray(transcript) && transcript.length > 0) {
-        const lastUser = [...transcript].reverse().find((m) => m.role === "user");
-        const lastAssistant = [...transcript].reverse().find((m) => m.role === "assistant");
-        return {
-          userText: lastUser ? extractText(lastUser) : "",
-          assistantText: lastAssistant ? extractText(lastAssistant) : "",
-        };
+        return transcript
+          .filter((m) => m.role === "user" || m.role === "assistant")
+          .map((m) => ({ role: m.role, content: extractText(m) }))
+          .filter((m) => m.content.trim().length > 0);
       }
     } catch {
       // Fall through to other formats.
@@ -179,71 +160,52 @@ function extractConversation(hookInput) {
 
   // Format 2: messages array directly in stdin (Devin or generic)
   if (Array.isArray(hookInput.messages) && hookInput.messages.length > 0) {
-    const lastUser = [...hookInput.messages].reverse().find((m) => m.role === "user");
-    const lastAssistant = [...hookInput.messages].reverse().find((m) => m.role === "assistant");
-    return {
-      userText: lastUser ? extractText(lastUser) : "",
-      assistantText: lastAssistant ? extractText(lastAssistant) : "",
-    };
+    return hookInput.messages
+      .filter((m) => m.role === "user" || m.role === "assistant")
+      .map((m) => ({ role: m.role, content: extractText(m) }))
+      .filter((m) => m.content.trim().length > 0);
   }
 
   // Format 3: Generic with user_message / assistant_message
   if (hookInput.user_message || hookInput.assistant_message) {
-    return {
-      userText: hookInput.user_message ?? "",
-      assistantText: hookInput.assistant_message ?? "",
-    };
+    const msgs = [];
+    if (hookInput.user_message) {
+      msgs.push({ role: "user", content: String(hookInput.user_message) });
+    }
+    if (hookInput.assistant_message) {
+      msgs.push({ role: "assistant", content: String(hookInput.assistant_message) });
+    }
+    return msgs;
   }
 
   // Format 4: prompt / response
   if (hookInput.prompt || hookInput.response) {
-    return {
-      userText: hookInput.prompt ?? "",
-      assistantText: hookInput.response ?? "",
-    };
+    const msgs = [];
+    if (hookInput.prompt) {
+      msgs.push({ role: "user", content: String(hookInput.prompt) });
+    }
+    if (hookInput.response) {
+      msgs.push({ role: "assistant", content: String(hookInput.response) });
+    }
+    return msgs;
   }
 
   // Format 5: last_user_message / last_assistant_message
   if (hookInput.last_user_message || hookInput.last_assistant_message) {
-    return {
-      userText: hookInput.last_user_message ?? "",
-      assistantText: hookInput.last_assistant_message ?? "",
-    };
-  }
-
-  return { userText: "", assistantText: "" };
-}
-
-/**
- * Search for an existing conversation memory about the same topic.
- * Only matches conversations from the last hour to avoid appending to
- * very old conversations.
- */
-async function findSimilarConversation(query) {
-  if (!query || query.length < 5) return null;
-  try {
-    const resultsText = await memory.search({
-      query: query.slice(0, 200),
-      namespace: "conversations",
-      limit: 3,
-    });
-    const results = JSON.parse(resultsText);
-    const memories = results.results ?? [];
-    if (memories.length === 0) return null;
-
-    const oneHourAgo = Date.now() - 60 * 60 * 1000;
-    for (const m of memories) {
-      const updatedAt = new Date(m.updatedAt).getTime();
-      if (updatedAt >= oneHourAgo && m.key) {
-        return m.key;
-      }
+    const msgs = [];
+    if (hookInput.last_user_message) {
+      msgs.push({ role: "user", content: String(hookInput.last_user_message) });
     }
-    return null;
-  } catch {
-    return null;
+    if (hookInput.last_assistant_message) {
+      msgs.push({ role: "assistant", content: String(hookInput.last_assistant_message) });
+    }
+    return msgs;
   }
+
+  return [];
 }
 
+/** Extract text from a message that may have a string or array content. */
 function extractText(msg) {
   if (!msg) return "";
   if (typeof msg.content === "string") return msg.content;
@@ -254,19 +216,11 @@ function extractText(msg) {
       .join("\n");
   }
   if (msg.message) return extractText(msg.message);
+  if (typeof msg.text === "string") return msg.text;
   return "";
 }
 
 function truncate(s, max) {
   if (!s) return "";
   return s.length > max ? s.slice(0, max) + "…" : s;
-}
-
-function slugify(s) {
-  return (s ?? "")
-    .toLowerCase()
-    // Keep Korean, alphanumerics. Replace other scripts/whitespace with -.
-    .replace(/[^\w\uac00-\ud7af\u3040-\u30ff\u4e00-\u9fff]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 60);
 }

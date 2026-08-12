@@ -6,8 +6,8 @@ description: Save important information to memory after each conversation turn. 
 # Capture Memories
 
 After you finish responding to the user, save any new, valuable information to
-memory using `memory_add`. This ensures future conversations can recall what
-was discussed and decided. **When in doubt, save it.**
+memory. This ensures future conversations can recall what was discussed and
+decided. **When in doubt, save it.**
 
 ## When to capture
 
@@ -25,78 +25,47 @@ Save a memory entry when the conversation reveals any of the following:
   save the correction so you don't repeat the mistake.
 - **Important outcomes** — when a task is completed, a bug is fixed, or a
   milestone is reached.
-- **Conversation summaries** — at the end of every substantive turn, save a
-  brief summary of what was discussed.
 
-## When NOT to capture
+## How to capture
 
-- Sensitive data (passwords, tokens, secrets, API keys).
-- Ephemeral details that won't matter in future conversations.
-- Exact duplicate of an existing memory (search first to check).
+There are two ways to save memories:
 
-## Procedure
+### 1. `memory_ingest` — automatic extraction (preferred for conversations)
 
-1. **Before saving**, call `memory_search` with the key topic to check if a
-   similar memory already exists.
-   - If a memory exists and needs updating, use `memory_update` with
-     `appendContent: true` to add new information.
-   - If no matching memory exists, use `memory_add` to create a new one.
-2. **Choose a descriptive `key`** — use kebab-case, make it specific and
-   searchable. Examples:
-   - `preference-editor-theme`
-   - `project-memory-server-stack`
-   - `decision-auth-jwt-vs-static-token`
-   - `fact-user-timezone`
-3. **Choose a `namespace`** — group related memories:
-   - `preferences` — user preferences and habits
-   - `projects` — project details and context
-   - `decisions` — architectural and design decisions
-   - `facts` — general facts about the user or environment
-   - `conversations` — conversation summaries
-4. **Add `tags`** for cross-namespace filtering. Examples: `ui`, `auth`,
-   `cloudflare`, `config`, `windows`, `typescript`.
-5. **Write clear content** — future-you should be able to understand the
-   memory without the surrounding conversation context. Include:
-   - What was decided/learned/preferred.
-   - Why (if a reason was given).
-   - Any relevant context (e.g., "decided because X is faster than Y").
-
-## Conversation summaries
-
-At the end of **every substantive conversation turn**, save a brief summary:
+Pass the conversation messages to `memory_ingest`. Agent Memory will
+automatically identify and extract facts, events, instructions, and tasks
+from the conversation. This is the preferred method after a conversation
+turn because it handles classification, deduplication, and supersession
+automatically.
 
 ```
-key: turn-<topic-slug>-<YYYY-MM-DD-HHMM>
-namespace: conversations
-tags: ["auto-captured", "<topic-tag>"]
-content: |
-  ## Conversation Turn
-
-  **User asked:** <brief summary of the question/request>
-
-  **What was done:** <brief summary of what was accomplished>
-
-  **Key decisions/outcomes:** <any decisions made or conclusions reached>
+memory_ingest({
+  messages: [
+    { role: "user", content: "..." },
+    { role: "assistant", content: "..." }
+  ]
+})
 ```
 
-Save conversation summaries even for moderately substantive exchanges. It's
-better to have too many memories than too few — the search will filter by
-relevance when recalling.
+### 2. `memory_add` — explicit single memory
 
-## Example
+Use `memory_add` when you know exactly what should be stored and want to
+save it as a specific entry. Agent Memory will still classify and summarize
+it automatically.
 
-User: "Let's use Cloudflare Durable Objects for the memory store instead of KV."
+```
+memory_add({
+  content: "User prefers TypeScript for all new projects"
+})
+```
 
-→ After responding, call `memory_search` with "memory store durable objects"
-→ No existing memory found
-→ Call `memory_add`:
-  - key: `decision-memory-store-durable-objects`
-  - namespace: `decisions`
-  - tags: `["architecture", "cloudflare", "memory"]`
-  - content: `Decided to use Cloudflare Durable Objects for the memory store instead of KV. Durable Objects provide per-scope SQLite databases with FTS5 search, which is better for structured memory than KV's flat key-value model.`
+## Important notes
 
-→ Also save a conversation summary:
-  - key: `turn-memory-store-2026-08-11-1430`
-  - namespace: `conversations`
-  - tags: `["auto-captured", "architecture"]`
-  - content: `User asked about memory store technology. Decided to use Cloudflare Durable Objects instead of KV for SQLite + FTS5 search capabilities.`
+- Agent Memory automatically classifies memories as **fact**, **event**,
+  **instruction**, or **task**.
+- If a similar fact or instruction already exists, the new one **supersedes**
+  the old (the old version is preserved but the new one surfaces in recall).
+- `memory_ingest` is **idempotent** — re-ingesting the same conversation
+  does not create duplicates.
+- Do not ingest after every single message. Do it after a meaningful
+  conversation turn or when the user goes idle.

@@ -21,67 +21,50 @@ tools to fulfill their request.
 
 ## When the user says "remember this"
 
-1. Call `memory_search` with the topic to check if a similar memory exists.
-2. If found, use `memory_update` with `appendContent: true` to add the new
-   information.
-3. If not found, use `memory_add`:
-   - Pick a descriptive `key` based on the content.
-   - Use the `facts` namespace for general facts, `preferences` for
-     preferences, `decisions` for decisions.
-   - Add relevant `tags`.
-4. Confirm to the user: "Saved. I'll remember this for future conversations."
+1. Call `memory_add` with the content the user wants to remember.
+   - Agent Memory will automatically classify it as a fact, event,
+     instruction, or task and generate a summary.
+   - If a similar fact or instruction already exists, the new one
+     supersedes the old (history is preserved).
 
-## When the user asks "what do you remember about X"
+```
+memory_add({
+  content: "User wants to use PostgreSQL for the new project database"
+})
+```
 
-1. Call `memory_search` with query "X".
-2. If results are found, summarize what you know:
-   "Here's what I remember about X:
-   - [memory 1 summary]
-   - [memory 2 summary]
-   Is there anything else you'd like me to recall or update?"
-3. If no results, say: "I don't have any memories about X yet. Would you like
-   to tell me about it so I can save it?"
+## When the user asks "what do you remember about..."
 
-## When the user says "do you remember..."
+1. Call `memory_search` with the topic as the query.
+2. Share the synthesized `answer` with the user.
+3. If they want more detail, use `memory_get` with a candidate's `id` to
+   fetch the full content.
 
-1. Call `memory_search` with the key terms from their question.
-2. If found, answer using the stored memory.
-3. If not found, be honest: "I don't have that stored in memory. It may have
-   been before memory tracking was enabled, or it wasn't saved."
+```
+memory_search({ query: "what database did the user choose?" })
+```
 
-## When the user says "forget..." or "delete..."
+## When the user says "forget..."
 
-1. Call `memory_search` to find the relevant memory.
-2. If found, call `memory_delete` with the key.
-3. Confirm: "Deleted that memory."
+1. If they reference a specific memory, use `memory_search` to find it,
+   then `memory_delete` with the memory's `id`.
+2. If they want to forget an entire session, use `memory_delete_session`
+   with the session ID.
 
-## When the user says "update what you know about X"
+```
+memory_delete({ id: "01KZR5ZD6ZMQNQ36FR98EP4Y40" })
+```
 
-1. Call `memory_search` with "X" to find existing memories.
-2. Show the user what's currently stored.
-3. Ask what they'd like to change.
-4. Use `memory_update` to replace content or `appendContent: true` to add.
+## Available tools
 
-## Example
-
-User: "Remember that I prefer tabs over spaces for TypeScript but spaces for Python."
-
-→ Call `memory_search` with "tabs spaces preference"
-→ No existing memory found
-→ Call `memory_add`:
-  - key: `preference-indentation-tabs-spaces`
-  - namespace: `preferences`
-  - tags: `["indentation", "typescript", "python", "coding-style"]`
-  - content: `User prefers tabs for TypeScript, spaces for Python.`
-→ Respond: "Saved. I'll remember: tabs for TypeScript, spaces for Python."
-
-User: "What do you remember about my setup?"
-
-→ Call `memory_search` with "setup environment workspace"
-→ Returns memories about timezone, editor, OS, tools
-→ Respond: "Here's what I remember about your setup:
-  - Timezone: Asia/Seoul
-  - OS: Windows
-  - Editor: VS Code with dark mode
-  - Shell: PowerShell
-  Anything you'd like me to update?"
+| Tool | Description |
+|------|-------------|
+| `memory_add` | Store a single memory explicitly |
+| `memory_search` | Hybrid search with synthesized answer |
+| `memory_ingest` | Extract memories from a conversation |
+| `memory_list` | List memories (filter by type/session) |
+| `memory_get` | Fetch a single memory by ID |
+| `memory_delete` | Delete a memory by ID |
+| `memory_delete_session` | Delete all memories for a session |
+| `memory_summary` | Structured Markdown summary of all memories |
+| `memory_stats` | Total count + per-type breakdown |

@@ -53,15 +53,17 @@ export const addMemoryShape = {
   content: z
     .string()
     .min(1)
+    .max(32768)
     .describe(
-      "The memory content to store. Agent Memory will automatically " +
-        "classify it as a fact, event, instruction, or task, and " +
-        "generate a summary. If a similar fact or instruction already " +
-        "exists, it will be superseded (the old version is preserved " +
-        "but the new one surfaces in recall).",
+      "The memory content to store (max 32 KB). Agent Memory will " +
+        "automatically classify it as a fact, event, instruction, or " +
+        "task, and generate a summary. If a similar fact or instruction " +
+        "already exists, it will be superseded (the old version is " +
+        "preserved but the new one surfaces in recall).",
     ),
   sessionId: z
     .string()
+    .max(64)
     .optional()
     .describe(
       "Optional session identifier to group related memories. " +
@@ -73,10 +75,11 @@ export const searchMemoryShape = {
   query: z
     .string()
     .min(1)
+    .max(1024)
     .describe(
-      "Natural language search query. Agent Memory runs hybrid search " +
-        "(keyword + semantic + topic key) and returns a synthesized " +
-        "answer grounded in stored content.",
+      "Natural language search query (max 1 KB). Agent Memory runs " +
+        "hybrid search (keyword + semantic + topic key) and returns a " +
+        "synthesized answer grounded in stored content.",
     ),
   thinkingLevel: z
     .enum(["low", "medium", "high"])
@@ -99,23 +102,24 @@ export const ingestMemoryShape = {
     .array(
       z.object({
         role: z.enum(["system", "user", "assistant"]),
-        content: z.string().min(1),
+        content: z.string().min(1).max(32768),
       }),
     )
     .min(1)
     .max(500)
     .describe(
-      "Conversation messages to process. Agent Memory will automatically " +
-        "extract facts, events, instructions, and tasks from the " +
-        "conversation. Re-ingesting the same messages is idempotent — " +
-        "no duplicates are created.",
+      "Conversation messages to process (max 500, each max 32 KB). " +
+        "Agent Memory will automatically extract facts, events, " +
+        "instructions, and tasks from the conversation. Re-ingesting " +
+        "the same messages is idempotent — no duplicates are created.",
     ),
   sessionId: z
     .string()
+    .max(64)
     .optional()
     .describe(
-      "Optional session identifier. If omitted, one is derived from " +
-        "the message content.",
+      "Optional session identifier (max 64 chars). If omitted, one " +
+        "is derived from the message content.",
     ),
 };
 
@@ -126,8 +130,9 @@ export const listMemoryShape = {
     .describe("Filter by memory type."),
   sessionId: z
     .string()
+    .max(64)
     .optional()
-    .describe("Filter by session ID."),
+    .describe("Filter by session ID (max 64 chars)."),
   limit: z
     .number()
     .int()
@@ -156,10 +161,11 @@ export const deleteSessionShape = {
 export const summaryShape = {
   sessionId: z
     .string()
+    .max(64)
     .optional()
     .describe(
-      "Optional session ID to scope the 'Last Session' section. " +
-        "If omitted, the most recent session is used.",
+      "Optional session ID (max 64 chars) to scope the 'Last Session' " +
+        "section. If omitted, the most recent session is used.",
     ),
 };
 

@@ -114,7 +114,7 @@ function HomeComponent() {
   const displayItems = searchResult
     ? searchResult.candidates.map((c) => ({
         id: c.id,
-        type: "fact" as MemoryType,
+        type: null as MemoryType | null,
         summary: c.summary,
         sessionId: c.sessionId,
         createdAt: "",
@@ -187,8 +187,8 @@ function HomeComponent() {
               >
                 {m.summary}
               </Link>
-              <span className={`memory-type ${TYPE_COLORS[m.type] ?? ""}`}>
-                {m.type}
+              <span className={`memory-type ${m.type ? TYPE_COLORS[m.type] ?? "" : ""}`}>
+                {m.type ?? "search"}
               </span>
             </div>
             {m.createdAt && (
