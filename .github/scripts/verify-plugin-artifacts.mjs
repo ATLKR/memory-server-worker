@@ -97,7 +97,9 @@ for (const relative of pluginIdentityFiles) {
 }
 
 const archive = path.join(root, "allenlim-memory-server-chatgpt.zip");
-const { stdout: archiveEntries } = await execFileAsync("tar", ["-tf", archive]);
+const archiveTool = process.platform === "win32" ? "tar" : "unzip";
+const listArgs = process.platform === "win32" ? ["-tf", archive] : ["-Z1", archive];
+const { stdout: archiveEntries } = await execFileAsync(archiveTool, listArgs);
 const expectedFiles = [
   ".codex-plugin/plugin.json",
   "skills/capture/SKILL.md",
@@ -106,7 +108,11 @@ const expectedFiles = [
 ];
 validateExactArchiveEntries(archiveEntries, expectedFiles);
 for (const relative of expectedFiles) {
-  const { stdout } = await execFileAsync("tar", ["-xOf", archive, relative], {
+  const extractArgs =
+    process.platform === "win32"
+      ? ["-xOf", archive, relative]
+      : ["-p", archive, relative];
+  const { stdout } = await execFileAsync(archiveTool, extractArgs, {
     encoding: "buffer",
     maxBuffer: 2 * 1024 * 1024,
   });
