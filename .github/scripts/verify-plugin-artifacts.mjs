@@ -119,7 +119,13 @@ for (const relative of expectedFiles) {
   const source = await readFile(
     path.join(root, "distributions/chatgpt/allenlim-memory-server", relative),
   );
-  const digest = (value) => createHash("sha256").update(value).digest("hex");
+  // Git normalizes these text files to LF, while a Windows working tree can
+  // present CRLF. Compare their canonical text bytes so verification behaves
+  // identically on developer machines and Linux CI.
+  const digest = (value) =>
+    createHash("sha256")
+      .update(value.toString("utf8").replaceAll("\r\n", "\n"), "utf8")
+      .digest("hex");
   assert.equal(digest(stdout), digest(source), `ZIP content drift: ${relative}`);
 }
 
