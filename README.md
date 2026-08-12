@@ -219,6 +219,9 @@ digest-only entries:
 
 ## Development
 
+Use Node.js 22.23.2 (the repository's `.nvmrc` and CI version). The supported
+engine range is declared in `package.json`.
+
 ```bash
 # Install dependencies
 npm install
