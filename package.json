@@ -5,6 +5,9 @@
   "description": "Personal persistent memory MCP server backed by Cloudflare Agent Memory.",
   "license": "MIT",
   "type": "module",
+  "engines": {
+    "node": "^22.22.2 || ^24.15.0 || >=26.0.0"
+  },
   "workspaces": [
     "packages/*",
     "plugins/*"
