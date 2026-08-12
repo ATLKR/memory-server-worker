@@ -127,7 +127,7 @@ function HomeComponent() {
       {stats && (
         <div className="stats-bar">
           <span className="stats-total">{stats.total} memories</span>
-          <div className="namespace-chips">
+          <div className="type-chips">
             <button
               className={`chip ${typeFilter === "" ? "chip-active" : ""}`}
               onClick={() => setTypeFilter("")}

@@ -1,13 +1,19 @@
 {
   "name": "memory",
   "version": "1.0.0",
-  "description": "Personal persistent memory — recalls relevant context before every response and captures every conversation. Backed by a Cloudflare Worker with Durable Object SQLite + FTS5 full-text search.",
+  "description": "Personal persistent memory — recalls relevant context before every response and captures every conversation. Backed by Cloudflare Agent Memory (managed hybrid search).",
   "author": {
     "name": "Allen Lim",
     "email": "allenlim@allenlabs.org"
   },
   "license": "MIT",
-  "keywords": ["memory", "recall", "context", "persistence", "personal"],
+  "keywords": [
+    "memory",
+    "recall",
+    "context",
+    "persistence",
+    "personal"
+  ],
   "skills": "./skills/",
   "interface": {
     "displayName": "Memory",
@@ -15,6 +21,9 @@
     "longDescription": "Automatically searches your personal memory before every response and captures every conversation turn. Memories are stored with full-text search so past conversations, decisions, preferences, and facts are always available.",
     "developerName": "Allen Lim",
     "category": "Productivity",
-    "capabilities": ["Interactive", "Write"]
+    "capabilities": [
+      "Interactive",
+      "Write"
+    ]
   }
 }

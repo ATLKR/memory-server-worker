@@ -99,7 +99,7 @@ a:hover {
   white-space: nowrap;
 }
 
-.namespace-chips {
+.type-chips {
   display: flex;
   gap: 0.4rem;
   flex-wrap: wrap;

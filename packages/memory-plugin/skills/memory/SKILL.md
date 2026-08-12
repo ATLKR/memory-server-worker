@@ -1,13 +1,15 @@
 ---
 name: memory
-description: Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn. Use `mem` CLI to manually add, search, get, list, update, or delete memories.
+description: Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn. Use `mem` CLI to manually add, search, get, list, or delete memories.
 ---
 
 # Memory Skill
 
 You have access to a personal persistent memory system. Memories are stored in
-a Cloudflare Worker (`https://memory.allenlim.net`) with Durable Object SQLite
-+ FTS5 full-text search. Authentication is via Allen Labs SSO (JWT/JWKS).
+[Cloudflare Agent Memory](https://developers.cloudflare.com/agent-memory/) —
+a managed service with automatic extraction, classification, deduplication,
+supersession, and hybrid search (keyword + semantic + topic key).
+Authentication is via Allen Labs SSO (JWT/JWKS).
 
 ## How it works
 
@@ -16,9 +18,9 @@ a Cloudflare Worker (`https://memory.allenlim.net`) with Durable Object SQLite
   them as additional context. You don't need to do anything — just use the
   recalled memories as relevant context.
 
-- **After each turn**: The `Stop` hook automatically captures a summary of the
-  conversation (user's question + your response) as a memory entry in the
-  `conversations` namespace. This happens silently.
+- **After each turn**: The `Stop` hook automatically ingests the conversation
+  messages into Agent Memory, which extracts facts, events, instructions, and
+  tasks automatically. This happens silently.
 
 ## Manual memory operations
 
@@ -29,23 +31,29 @@ Use the `mem` CLI to manually manage memories:
 mem whoami
 
 # Add a memory
-mem add "User prefers dark mode" --key preference-theme --namespace preferences --tags ui,theme
+mem add "User prefers dark mode"
 
-# Search memories (FTS5 full-text search)
+# Search memories (hybrid search with synthesized answer)
 mem search "dark mode preferences"
 
-# Get a specific memory by key
-mem get preference-theme
+# Ingest a conversation (JSON array of {role, content})
+echo '[{"role":"user","content":"..."},{"role":"assistant","content":"..."}]' | mem ingest
 
-# List all memories (optionally filtered by namespace or tag)
-mem list --namespace preferences
-mem list --tag ui
+# Get a specific memory by ID
+mem get 01KZR5ZD6ZMQNQ36FR98EP4Y40
 
-# Update a memory (append or replace)
-mem update preference-theme --content "Also prefers Monokai" --append
+# List memories (optionally filtered by type or session)
+mem list --type fact
+mem list --session my-session-id
 
 # Delete a memory
-mem delete preference-theme
+mem delete 01KZR5ZD6ZMQNQ36FR98EP4Y40
+
+# Delete all memories for a session
+mem delete-session my-session-id
+
+# Generate a structured summary
+mem summary
 
 # Show memory statistics
 mem stats
@@ -68,7 +76,11 @@ For CI/headless use, set `MEMORY_TOKEN` to a JWT directly.
 ## Tips
 
 - Memories are scoped to your user ID (JWT `sub`) by default.
-- Use namespaces to organize memories (e.g., `preferences`, `projects`, `facts`).
-- Use tags for cross-namespace filtering (e.g., `ui`, `cloudflare`, `auth`).
-- The FTS5 search supports multi-word queries and ranks by relevance.
-- Conversation summaries are auto-captured with the `auto-captured` tag in the `conversations` namespace.
+- Agent Memory automatically classifies memories as **fact**, **event**,
+  **instruction**, or **task**.
+- If a newer fact/instruction replaces an older one on the same topic, the
+  old version is preserved but the latest surfaces in recall.
+- `memory_ingest` is idempotent — re-ingesting the same conversation creates
+  no duplicates.
+- Use `memory_summary` to get a structured Markdown overview of everything
+  stored in memory.

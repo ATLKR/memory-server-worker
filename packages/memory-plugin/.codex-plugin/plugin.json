@@ -19,7 +19,7 @@
   "interface": {
     "displayName": "Memory",
     "shortDescription": "Recall and capture personal memories",
-    "longDescription": "Automatically recalls relevant memories before each prompt and captures conversation summaries after each turn. Memories are stored in a Cloudflare Worker with Durable Object SQLite + FTS5 full-text search. Authentication via Allen Labs SSO (JWT/JWKS).",
+    "longDescription": "Automatically recalls relevant memories before each prompt and captures conversation summaries after each turn. Memories are stored in Cloudflare Agent Memory (managed service with automatic extraction, classification, and hybrid search). Authentication via Allen Labs SSO (JWT/JWKS).",
     "developerName": "Allen Lim",
     "category": "Productivity",
     "capabilities": [

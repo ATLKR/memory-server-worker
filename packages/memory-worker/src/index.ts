@@ -375,7 +375,7 @@ function createServer(env: Env, scope: string): McpServer {
     {
       description:
         "Fetch a single memory by its ID. Returns the full entry " +
-        "including content and metadata.",
+        "including content, type, and timestamps.",
       inputSchema: getMemoryShape,
       outputSchema: memoryEntryOutputShape,
     },
