@@ -276,7 +276,15 @@ export async function handleSkillsList(params: {
     try {
       skills.push(buildSkillEntry(name, files));
     } catch (err) {
-      console.error(`[skills] Failed to build entry for ${name}:`, err);
+      const rawErrorType = err instanceof Error ? err.name : typeof err;
+      console.error(JSON.stringify({
+        level: "error",
+        event: "skill_entry_build_failed",
+        skill: name,
+        errorType: /^[A-Za-z0-9_.-]{1,64}$/.test(rawErrorType)
+          ? rawErrorType
+          : "UnknownError",
+      }));
     }
   }
 

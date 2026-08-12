@@ -6,16 +6,17 @@
  * provides automatic extraction, classification, supersession, and hybrid
  * search (keyword + semantic + topic key).
  *
- * Auth: SSO via the Allen Labs central auth server (auth-api.allen.company).
- * The client sends an RS256 JWT as `Authorization: Bearer <jwt>`. The worker
- * verifies the JWT signature against the auth server's JWKS endpoint
- * ({AUTH_API_URL}/.well-known/jwks.json) using `jose`.
+ * Auth: either SSO via the Allen Labs central auth server or a provisioned API
+ * key. JWTs use `Authorization: Bearer <jwt>`. API keys use
+ * `x-memory-api-key` or `Authorization: ApiKey <key>` and are verified against
+ * SHA-256 digests stored in the MEMORY_API_KEY_REGISTRY Worker secret.
  *
  * Profile resolution:
- *   1. JWT `sub` is always the user isolation boundary.
- *   2. `x-memory-scope`, or `DEFAULT_SCOPE` when present, selects a logical
- *      sub-scope that is cryptographically bound to that user.
- *   3. With no logical scope, the legacy JWT-sub profile name is retained.
+ *   1. JWT `sub` or the API-key registry's `userId` is always the user
+ *      isolation boundary.
+ *   2. JWT requests may select `x-memory-scope`/`DEFAULT_SCOPE`. API-key
+ *      requests always use the registry's fixed scope or the personal scope.
+ *   3. With no logical scope, UUID identities retain the legacy profile name.
  *
  * MCP tools:
  *   - memory_add      → profile.remember()  (store a single memory)
@@ -37,7 +38,13 @@ import {
 } from "@modelcontextprotocol/server";
 import { z } from "zod";
 import { createMcpHandler } from "agents/mcp/server";
-import { verifyJwt, extractBearerToken, type SessionPayload } from "./auth";
+import {
+  extractAuthorizationApiKey,
+  extractBearerToken,
+  verifyApiKey,
+  verifyJwt,
+  type SessionPayload,
+} from "./auth";
 import type { MemoryEntry, MemoryType, RecallResult, StatsResponse } from "./schema";
 import {
   addMemoryShape,
@@ -118,30 +125,215 @@ function getProfile(env: Env, profileName: string) {
   return env.MEMORY.getProfile(profileName);
 }
 
-// ---------- Auth (JWT via Allen Labs auth server JWKS) ----------
+type LogOperation =
+  | "authenticate"
+  | "sso_exchange"
+  | "memory_add"
+  | "memory_search"
+  | "memory_ingest"
+  | "memory_list"
+  | "memory_get"
+  | "memory_delete"
+  | "memory_delete_session"
+  | "memory_summary"
+  | "memory_stats"
+  | "rest_api"
+  | "worker_request";
+
+function safeErrorType(error: unknown): string {
+  const objectName = error && typeof error === "object"
+    ? (error as Record<string, unknown>).name
+    : null;
+  const raw = error instanceof Error
+    ? error.name
+    : typeof objectName === "string"
+      ? objectName
+      : typeof error;
+  return /^[A-Za-z0-9_.-]{1,64}$/.test(raw) ? raw : "UnknownError";
+}
+
+function numericErrorStatus(error: unknown): number | null {
+  if (error instanceof Response) return error.status;
+  if (!error || typeof error !== "object") return null;
+
+  const record = error as Record<string, unknown>;
+  for (const key of ["status", "statusCode"]) {
+    const value = record[key];
+    if (typeof value === "number" && Number.isInteger(value)) return value;
+  }
+  return null;
+}
 
 /**
- * Authenticate the request by verifying the bearer JWT against the auth
- * server's JWKS. Returns the resolved profile name + session payload, or null
- * if auth fails.
+ * Agent Memory documents that get/delete throw for a missing memory, but the
+ * current Workers binding does not expose a typed not-found error. Only map an
+ * explicit HTTP-style 404 status to not-found; every untyped/unknown failure
+ * stays an internal error instead of being mislabeled as a missing memory.
+ */
+export function isConfirmedAgentMemoryNotFound(error: unknown): boolean {
+  return numericErrorStatus(error) === 404;
+}
+
+function logOperationError(
+  requestId: string,
+  operation: LogOperation,
+  error: unknown,
+): void {
+  const status = numericErrorStatus(error);
+  console.error(JSON.stringify({
+    level: "error",
+    event: "memory_worker_operation_failed",
+    requestId,
+    operation,
+    errorType: safeErrorType(error),
+    ...(status === null ? {} : { status }),
+  }));
+}
+
+function toolError(message: string, requestId: string) {
+  return {
+    content: [
+      {
+        type: "text" as const,
+        text: `${message} Reference: ${requestId}`,
+      },
+    ],
+    isError: true as const,
+  };
+}
+
+// ---------- Auth (JWT or digest-backed API key) ----------
+
+type AuthenticatedRequest =
+  | {
+      method: "jwt";
+      profileName: string;
+      session: SessionPayload;
+    }
+  | {
+      method: "api-key";
+      profileName: string;
+      keyId: string;
+      userId: string;
+    }
+  | {
+      method: "session";
+      profileName: string;
+      session: SessionPayload;
+    };
+
+type AuthenticationResult =
+  | AuthenticatedRequest
+  | { method: "forbidden-cookie" }
+  | null;
+
+function matchesRequestOrigin(value: string | null, requestUrl: URL): boolean {
+  if (!value) return false;
+  try {
+    return new URL(value).origin === requestUrl.origin;
+  } catch {
+    return false;
+  }
+}
+
+function isSameOriginCookieRequest(request: Request, requestUrl: URL): boolean {
+  const origin = request.headers.get("origin");
+  const fetchSite = request.headers.get("sec-fetch-site")?.toLowerCase();
+
+  if (origin) return matchesRequestOrigin(origin, requestUrl);
+  if (fetchSite) return fetchSite === "same-origin";
+  return matchesRequestOrigin(request.headers.get("referer"), requestUrl);
+}
+
+function isAllowedCookieRequest(request: Request, requestUrl: URL): boolean {
+  if (!isSameOriginCookieRequest(request, requestUrl)) return false;
+
+  // Fetch sends Origin for non-GET/HEAD same-origin browser requests. Requiring
+  // an exact match gives unsafe cookie-authenticated operations a strong CSRF
+  // boundary; Fetch Metadata remains a fallback only for read-only requests.
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return matchesRequestOrigin(request.headers.get("origin"), requestUrl);
+  }
+  return true;
+}
+
+/**
+ * Authenticate the request with exactly one credential source. JWTs continue
+ * to support caller-selected logical sub-scopes that remain bound to `sub`.
+ * API keys cannot accept `x-memory-scope`; their registry entry chooses a
+ * fixed scope, or the user's personal profile when no scope is present.
  *
- * The JWT subject is always the profile boundary. A requested logical scope
- * is hashed together with that subject before an Agent Memory profile is used.
+ * The authenticated user id is always the profile boundary. Any logical scope
+ * is hashed together with that id before an Agent Memory profile is used.
  */
 async function authenticate(
   request: Request,
   env: Env,
-): Promise<{ profileName: string; session: SessionPayload } | null> {
+  requestUrl: URL,
+  requestId: string,
+): Promise<AuthenticationResult> {
+  const authorization = request.headers.get("authorization");
+  const headerApiKey = request.headers.get("x-memory-api-key");
+
+  // Reject ambiguous requests instead of assigning precedence. This also
+  // prevents a proxy-added bearer token from silently changing API-key auth.
+  if (headerApiKey !== null && authorization !== null) return null;
+
+  const authorizationApiKey = extractAuthorizationApiKey(authorization);
+  if (headerApiKey !== null || authorizationApiKey !== null) {
+    // An API key's scope is provisioned server-side. Even an empty override
+    // header is rejected so callers can never select a different profile.
+    if (request.headers.get("x-memory-scope") !== null) return null;
+
+    const providedKey = headerApiKey ?? authorizationApiKey;
+    if (!providedKey) return null;
+    const identity = await verifyApiKey(env.MEMORY_API_KEY_REGISTRY, providedKey);
+    if (!identity) return null;
+
+    const profileName = await resolveProfileName(
+      identity.userId,
+      identity.logicalScope,
+    );
+    return {
+      method: "api-key",
+      profileName,
+      keyId: identity.keyId,
+      userId: identity.userId,
+    };
+  }
+
   const authApiUrl = env.AUTH_API_URL;
   if (!authApiUrl) {
-    console.error("[auth] AUTH_API_URL is not configured");
+    logOperationError(requestId, "authenticate", { name: "AuthConfigError" });
     return null;
   }
 
-  const token = extractBearerToken(request.headers.get("authorization"));
+  const bearerToken = extractBearerToken(authorization);
+  let token = bearerToken;
+  let method: "jwt" | "session" = "jwt";
+
+  if (
+    !token &&
+    authorization === null &&
+    headerApiKey === null &&
+    requestUrl.pathname.startsWith("/api/")
+  ) {
+    const sessionToken = parseCookie(
+      request.headers.get("cookie") ?? "",
+      SESSION_COOKIE,
+    );
+    if (sessionToken) {
+      if (!isAllowedCookieRequest(request, requestUrl)) {
+        return { method: "forbidden-cookie" };
+      }
+      token = sessionToken;
+      method = "session";
+    }
+  }
+
   if (!token) return null;
 
-  const session = await verifyJwt(authApiUrl, token);
+  const session = await verifyJwt(authApiUrl, token, requestId);
   if (!session || !session.sub.trim() || session.banned === true || session.banned === 1) {
     return null;
   }
@@ -149,12 +341,13 @@ async function authenticate(
   // A caller may choose a logical sub-scope, but resolveProfileName binds it
   // cryptographically to the authenticated subject. It can never select
   // another user's profile, even when two users provide the same header.
-  const logicalScope =
-    request.headers.get("x-memory-scope")?.trim() || env.DEFAULT_SCOPE?.trim() || null;
+  const logicalScope = method === "jwt"
+    ? request.headers.get("x-memory-scope")?.trim() || env.DEFAULT_SCOPE?.trim() || null
+    : env.DEFAULT_SCOPE?.trim() || null;
   // Never fall back to the old caller-selected profile name. Legacy scoped
   // data is copied offline only after an operator verifies exclusive ownership.
   const profileName = await resolveProfileName(session.sub, logicalScope);
-  return { profileName, session };
+  return { method, profileName, session };
 }
 
 // ---------- MCP server factory ----------
@@ -163,9 +356,10 @@ function createServer(
   env: Env,
   profileName: string,
   era: "legacy" | "modern",
+  requestId: string,
 ): McpServer {
   const server = new McpServer(
-    { name: "memory-server", version: "2.0.0" },
+    { name: "memory-server", version: "2.1.0" },
     {
       // Server-level instructions — ChatGPT/Codex read these on initialize.
       instructions:
@@ -282,15 +476,8 @@ function createServer(
           structuredContent: entry as unknown as Record<string, unknown>,
         };
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Failed to store memory: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true as const,
-        };
+        logOperationError(requestId, "memory_add", err);
+        return toolError("Unable to store memory.", requestId);
       }
     },
   );
@@ -325,15 +512,8 @@ function createServer(
           structuredContent: result as unknown as Record<string, unknown>,
         };
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Search failed: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true as const,
-        };
+        logOperationError(requestId, "memory_search", err);
+        return toolError("Unable to search memories.", requestId);
       }
     },
   );
@@ -368,15 +548,8 @@ function createServer(
           structuredContent: result as unknown as Record<string, unknown>,
         };
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Ingest failed: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true as const,
-        };
+        logOperationError(requestId, "memory_ingest", err);
+        return toolError("Unable to ingest memories.", requestId);
       }
     },
   );
@@ -420,15 +593,8 @@ function createServer(
           structuredContent: structured as unknown as Record<string, unknown>,
         };
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `List failed: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true as const,
-        };
+        logOperationError(requestId, "memory_list", err);
+        return toolError("Unable to list memories.", requestId);
       }
     },
   );
@@ -460,13 +626,12 @@ function createServer(
           content: [{ type: "text" as const, text: JSON.stringify(entry, null, 2) }],
           structuredContent: entry as unknown as Record<string, unknown>,
         };
-      } catch {
-        return {
-          content: [
-            { type: "text" as const, text: `No memory found with id: ${params.id}` },
-          ],
-          isError: true as const,
-        };
+      } catch (err) {
+        if (isConfirmedAgentMemoryNotFound(err)) {
+          return toolError("Memory not found.", requestId);
+        }
+        logOperationError(requestId, "memory_get", err);
+        return toolError("Unable to retrieve memory.", requestId);
       }
     },
   );
@@ -488,13 +653,12 @@ function createServer(
           content: [{ type: "text" as const, text: JSON.stringify(result) }],
           structuredContent: result as unknown as Record<string, unknown>,
         };
-      } catch {
-        return {
-          content: [
-            { type: "text" as const, text: `No memory found with id: ${params.id}` },
-          ],
-          isError: true as const,
-        };
+      } catch (err) {
+        if (isConfirmedAgentMemoryNotFound(err)) {
+          return toolError("Memory not found.", requestId);
+        }
+        logOperationError(requestId, "memory_delete", err);
+        return toolError("Unable to delete memory.", requestId);
       }
     },
   );
@@ -519,15 +683,8 @@ function createServer(
           structuredContent: result as unknown as Record<string, unknown>,
         };
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Failed to delete session: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true as const,
-        };
+        logOperationError(requestId, "memory_delete_session", err);
+        return toolError("Unable to delete session memories.", requestId);
       }
     },
   );
@@ -557,15 +714,8 @@ function createServer(
           structuredContent: structured as unknown as Record<string, unknown>,
         };
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Summary failed: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true as const,
-        };
+        logOperationError(requestId, "memory_summary", err);
+        return toolError("Unable to summarize memories.", requestId);
       }
     },
   );
@@ -602,15 +752,8 @@ function createServer(
           structuredContent: stats as unknown as Record<string, unknown>,
         };
       } catch (err) {
-        return {
-          content: [
-            {
-              type: "text" as const,
-              text: `Stats failed: ${err instanceof Error ? err.message : String(err)}`,
-            },
-          ],
-          isError: true as const,
-        };
+        logOperationError(requestId, "memory_stats", err);
+        return toolError("Unable to load memory statistics.", requestId);
       }
     },
   );
@@ -630,19 +773,76 @@ function createServer(
 //   3. The user signs in on auth.allen.company
 //   4. auth-web mints a code and redirects back to /auth/callback?code=...&state=...
 //   5. The worker validates the state cookie (CSRF protection), exchanges
-//      the code at {AUTH_API_URL}/sso/exchange, and returns the JWT as JSON.
+//      the code at {AUTH_API_URL}/sso/exchange, and either returns the JWT to
+//      the CLI or stores it in an HttpOnly, host-bound browser session cookie.
 //
 // The state cookie proves the callback originated from a legitimate
-// /auth/sso flow on this worker. An attacker on a different origin cannot
-// set cookies on this worker's domain, so they cannot forge the state.
+// /auth/sso flow on this worker. Its __Host- prefix also prevents a sibling
+// subdomain from shadowing it with a parent-domain cookie.
 //
 // The worker needs AUTH_WEB_URL (the auth UI origin) configured as a var.
 
 const AUTH_WEB_URL_DEFAULT = "https://auth.allen.company";
-const SSO_STATE_COOKIE = "memory_sso_state";
-const SSO_UI_FLOW_COOKIE = "memory_sso_ui";
-const SSO_TOKEN_COOKIE = "memory_token";
+const SSO_STATE_COOKIE = "__Host-memory_sso_state";
+const SSO_UI_FLOW_COOKIE = "__Host-memory_sso_ui";
+const SESSION_COOKIE = "__Host-memory_session";
+const LEGACY_SSO_STATE_COOKIE = "memory_sso_state";
+const LEGACY_SSO_UI_FLOW_COOKIE = "memory_sso_ui";
+const LEGACY_SESSION_COOKIE = "memory_session";
+const LEGACY_UI_TOKEN_COOKIE = "memory_token";
 const SSO_STATE_MAX_AGE = 600; // 10 minutes
+const SESSION_MAX_AGE = 8 * 60 * 60;
+const ssoExchangeSchema = z.object({
+  token: z
+    .string()
+    .min(1)
+    .max(16 * 1024)
+    .regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/),
+  expires_in: z.number().int().nonnegative().optional(),
+  user: z.object({
+    id: z.string().max(256).optional(),
+    email: z.string().max(320).optional(),
+    name: z.string().max(256).nullable().optional(),
+  }).optional(),
+});
+
+function sessionCookie(token: string, maxAge: number): string {
+  // The __Host- prefix requires Secure, Path=/, and no Domain attribute. That
+  // prevents sibling subdomains from shadowing the session cookie. Path=/ lets
+  // the UI Worker validate the session during SSR; the backend still accepts
+  // it only on same-origin /api/* requests and ignores it completely for MCP.
+  return `${SESSION_COOKIE}=${token}; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}; Path=/`;
+}
+
+function clearLegacySessionCookies(): string[] {
+  return [
+    `${LEGACY_SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/`,
+    `${LEGACY_SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/api`,
+    `${LEGACY_UI_TOKEN_COOKIE}=; Secure; SameSite=Lax; Max-Age=0; Path=/`,
+  ];
+}
+
+function clearSessionCookies(): string[] {
+  return [
+    `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/`,
+    ...clearLegacySessionCookies(),
+  ];
+}
+
+function clearLegacySsoCookies(): string[] {
+  return [
+    `${LEGACY_SSO_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`,
+    `${LEGACY_SSO_UI_FLOW_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`,
+  ];
+}
+
+function clearSsoCookies(): string[] {
+  return [
+    `${SSO_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/`,
+    `${SSO_UI_FLOW_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/`,
+    ...clearLegacySsoCookies(),
+  ];
+}
 
 /**
  * Generate a cryptographically random state value for CSRF protection.
@@ -668,15 +868,27 @@ async function handleSsoStart(env: Env, requestUrl: URL): Promise<Response> {
 
   const redirect = Response.redirect(signInUrl, 302);
   const headers = new Headers(redirect.headers);
+  headers.set("Cache-Control", "no-store");
   headers.append(
     "Set-Cookie",
-    `${SSO_STATE_COOKIE}=${state}; HttpOnly; Secure; SameSite=Lax; Max-Age=${SSO_STATE_MAX_AGE}; Path=/auth`,
+    `${SSO_STATE_COOKIE}=${state}; HttpOnly; Secure; SameSite=Lax; Max-Age=${SSO_STATE_MAX_AGE}; Path=/`,
   );
   if (isUiFlow) {
     headers.append(
       "Set-Cookie",
-      `${SSO_UI_FLOW_COOKIE}=1; HttpOnly; Secure; SameSite=Lax; Max-Age=${SSO_STATE_MAX_AGE}; Path=/auth`,
+      `${SSO_UI_FLOW_COOKIE}=1; HttpOnly; Secure; SameSite=Lax; Max-Age=${SSO_STATE_MAX_AGE}; Path=/`,
     );
+  } else {
+    headers.append(
+      "Set-Cookie",
+      `${SSO_UI_FLOW_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/`,
+    );
+  }
+  for (const cookie of [
+    ...clearLegacySsoCookies(),
+    ...clearLegacySessionCookies(),
+  ]) {
+    headers.append("Set-Cookie", cookie);
   }
   return new Response(redirect.body, {
     status: redirect.status,
@@ -685,19 +897,21 @@ async function handleSsoStart(env: Env, requestUrl: URL): Promise<Response> {
   });
 }
 
-async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): Promise<Response> {
+async function handleSsoCallback(
+  env: Env,
+  requestUrl: URL,
+  request: Request,
+  requestId: string,
+): Promise<Response> {
   const cookieHeader = request.headers.get("cookie") ?? "";
   const stateCookie = parseCookie(cookieHeader, SSO_STATE_COOKIE);
   const stateParam = requestUrl.searchParams.get("state");
   const isUiFlow = parseCookie(cookieHeader, SSO_UI_FLOW_COOKIE) === "1";
 
-  const clearStateCookie = `${SSO_STATE_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`;
-  const clearUiFlowCookie = `${SSO_UI_FLOW_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/auth`;
-
   function errorResponse(
-    body: string,
+    error: string,
     status: number,
-    cookies: string[] = [clearStateCookie, clearUiFlowCookie],
+    cookies: string[] = clearSsoCookies(),
   ): Response {
     const headers = new Headers();
     headers.set("content-type", "application/json");
@@ -705,31 +919,32 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
     for (const c of cookies) {
       headers.append("Set-Cookie", c);
     }
-    return new Response(body, { status, headers });
+    return new Response(JSON.stringify({ error, requestId }), { status, headers });
   }
 
   if (!stateCookie) {
     return errorResponse(
-      JSON.stringify({ error: "missing state cookie — start the login flow from /auth/sso" }),
+      "missing state cookie; start the login flow from /auth/sso",
       400,
     );
   }
 
   if (!isValidSsoState(stateCookie, stateParam)) {
     return errorResponse(
-      JSON.stringify({ error: "state mismatch — possible CSRF attempt" }),
+      "state mismatch; start a new login flow",
       400,
     );
   }
 
   const code = requestUrl.searchParams.get("code");
   if (!code) {
-    return errorResponse(JSON.stringify({ error: "missing code parameter" }), 400);
+    return errorResponse("missing code parameter", 400);
   }
 
   const authApiUrl = (env.AUTH_API_URL ?? "").replace(/\/$/, "");
   if (!authApiUrl) {
-    return errorResponse(JSON.stringify({ error: "AUTH_API_URL not configured" }), 500);
+    logOperationError(requestId, "sso_exchange", { name: "AuthConfigError" });
+    return errorResponse("SSO is unavailable", 500);
   }
 
   const clientId = requestUrl.origin;
@@ -742,38 +957,57 @@ async function handleSsoCallback(env: Env, requestUrl: URL, request: Request): P
       body: JSON.stringify({ code, client_id: clientId, include_token: true }),
       signal: AbortSignal.timeout(5000),
     });
-  } catch {
-    return errorResponse(JSON.stringify({ error: "SSO exchange unavailable" }), 502);
+  } catch (err) {
+    logOperationError(requestId, "sso_exchange", err);
+    return errorResponse("SSO exchange unavailable", 502);
   }
 
-  const exchange = (await exchangeRes.json().catch(() => null)) as
-    | { token?: string; expires_in?: number; user?: { id?: string; email?: string; name?: string | null } }
-    | { error?: string }
-    | null;
+  const exchangeBody: unknown = await exchangeRes.json().catch(() => null);
+  const exchange = ssoExchangeSchema.safeParse(exchangeBody);
 
-  if (!exchangeRes.ok || !exchange || !("token" in exchange) || !exchange.token) {
-    const error =
-      exchange && "error" in exchange ? exchange.error : `SSO exchange failed (${exchangeRes.status})`;
-    return errorResponse(JSON.stringify({ error }), exchangeRes.status === 400 ? 400 : 502);
+  if (!exchangeRes.ok || !exchange.success) {
+    logOperationError(requestId, "sso_exchange", {
+      name: "UpstreamResponseError",
+      status: exchangeRes.status,
+    });
+    return errorResponse(
+      "SSO exchange failed",
+      exchangeRes.status === 400 ? 400 : 502,
+    );
   }
 
-  const token = exchange.token;
-  const expiresIn = exchange.expires_in ?? 8 * 60 * 60;
+  const token = exchange.data.token;
+  const expiresIn = typeof exchange.data.expires_in === "number"
+    ? Math.min(exchange.data.expires_in, SESSION_MAX_AGE)
+    : SESSION_MAX_AGE;
 
   if (isUiFlow) {
-    const tokenCookie = `${SSO_TOKEN_COOKIE}=${token}; Secure; SameSite=Lax; Max-Age=60; Path=/`;
     const headers = new Headers();
     headers.set("Location", "/");
     headers.set("Cache-Control", "no-store");
-    headers.append("Set-Cookie", tokenCookie);
-    headers.append("Set-Cookie", clearStateCookie);
-    headers.append("Set-Cookie", clearUiFlowCookie);
+    headers.append("Set-Cookie", sessionCookie(token, expiresIn));
+    for (const cookie of [
+      ...clearLegacySessionCookies(),
+      ...clearSsoCookies(),
+    ]) {
+      headers.append("Set-Cookie", cookie);
+    }
     return new Response(null, { status: 302, headers });
   }
 
-  return errorResponse(
-    JSON.stringify({ token, expires_in: expiresIn, user: exchange.user }),
-    200,
+  const headers = new Headers({
+    "content-type": "application/json",
+    "cache-control": "no-store",
+  });
+  for (const cookie of [
+    ...clearLegacySessionCookies(),
+    ...clearSsoCookies(),
+  ]) {
+    headers.append("Set-Cookie", cookie);
+  }
+  return new Response(
+    JSON.stringify({ token, expires_in: expiresIn, user: exchange.data.user }),
+    { status: 200, headers },
   );
 }
 
@@ -792,12 +1026,33 @@ function parseCookie(cookieHeader: string, name: string): string | null {
   return null;
 }
 
+function handleLogout(request: Request, requestUrl: URL, requestId: string): Response {
+  if (!isAllowedCookieRequest(request, requestUrl)) {
+    return Response.json(
+      { error: "forbidden", requestId },
+      { status: 403 },
+    );
+  }
+
+  const headers = new Headers({
+    "content-type": "application/json",
+    "cache-control": "no-store",
+  });
+  for (const cookie of clearSessionCookies()) {
+    headers.append("Set-Cookie", cookie);
+  }
+  for (const cookie of clearSsoCookies()) {
+    headers.append("Set-Cookie", cookie);
+  }
+  return new Response(JSON.stringify({ loggedOut: true }), { headers });
+}
+
 // ---------- REST API for the web UI ----------
 //
 // Simple REST endpoints that call the same Agent Memory APIs as the MCP
 // tools. The web UI proxies these through a service binding.
 //
-// All endpoints require a valid JWT.
+// All endpoints require a valid JWT, browser session, or provisioned API key.
 
 const restAddMemorySchema = z.object(addMemoryShape).strict();
 const restSearchSchema = z.object(searchMemoryShape).strict();
@@ -831,17 +1086,47 @@ function decodePathPart(value: string): string | null {
   }
 }
 
+function safeSessionResponse(auth: AuthenticatedRequest): Response {
+  if (auth.method === "api-key") {
+    return Response.json({
+      authenticated: true,
+      authMode: auth.method,
+      user: { id: auth.userId, email: null, name: null },
+    });
+  }
+
+  const { session } = auth;
+  const names = [session.preferredName, session.name, session.username];
+  const name = names.find((value): value is string =>
+    typeof value === "string" && value.trim().length > 0
+  ) ?? null;
+  return Response.json({
+    authenticated: true,
+    authMode: auth.method,
+    user: {
+      id: session.sub,
+      email: typeof session.email === "string" ? session.email : null,
+      name,
+    },
+  });
+}
+
 async function handleRestApi(
   request: Request,
   env: Env,
   url: URL,
-  profileName: string,
+  auth: AuthenticatedRequest,
+  requestId: string,
 ): Promise<Response> {
   const method = request.method;
   const path = url.pathname.replace(/^\/api\/?/, "");
 
   try {
-    const profile = await getProfile(env, profileName);
+    if (path === "session" && method === "GET") {
+      return safeSessionResponse(auth);
+    }
+
+    const profile = await getProfile(env, auth.profileName);
     // GET /api/stats
     if (path === "stats" && method === "GET") {
       const all = await profile.list({ limit: 500 });
@@ -970,8 +1255,15 @@ async function handleRestApi(
             createdAt: memory.createdAt.toISOString(),
             updatedAt: memory.updatedAt.toISOString(),
           });
-        } catch {
-          return Response.json({ error: "not found" }, { status: 404 });
+        } catch (err) {
+          if (isConfirmedAgentMemoryNotFound(err)) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          logOperationError(requestId, "memory_get", err);
+          return Response.json(
+            { error: "internal server error", requestId },
+            { status: 500 },
+          );
         }
       }
 
@@ -979,8 +1271,15 @@ async function handleRestApi(
         try {
           await profile.delete(id);
           return Response.json({ deleted: true });
-        } catch {
-          return Response.json({ error: "not found" }, { status: 404 });
+        } catch (err) {
+          if (isConfirmedAgentMemoryNotFound(err)) {
+            return Response.json({ error: "not found" }, { status: 404 });
+          }
+          logOperationError(requestId, "memory_delete", err);
+          return Response.json(
+            { error: "internal server error", requestId },
+            { status: 500 },
+          );
         }
       }
     }
@@ -997,9 +1296,9 @@ async function handleRestApi(
 
     return Response.json({ error: "not found" }, { status: 404 });
   } catch (err) {
-    console.error("[rest-api] error:", err);
+    logOperationError(requestId, "rest_api", err);
     return Response.json(
-      { error: "internal server error" },
+      { error: "internal server error", requestId },
       { status: 500 },
     );
   }
@@ -1011,6 +1310,7 @@ const MCP_ALLOWED_HEADERS = [
   "content-type",
   "accept",
   "authorization",
+  "x-memory-api-key",
   "x-memory-scope",
   "mcp-session-id",
   "mcp-protocol-version",
@@ -1022,6 +1322,7 @@ const MCP_EXPOSED_HEADERS = [
   "mcp-session-id",
   "mcp-protocol-version",
   "www-authenticate",
+  "x-request-id",
 ].join(",");
 const MAX_MCP_JSON_BYTES = 4 * 1024 * 1024;
 
@@ -1048,13 +1349,20 @@ function mcpJsonError(status: 400 | 413, message: string): Response {
   );
 }
 
-export default {
-  async fetch(
-    request: Request,
-    env: Env,
-    ctx: ExecutionContext,
-  ): Promise<Response> {
-    const url = new URL(request.url);
+function methodNotAllowed(allowed: string): Response {
+  return Response.json(
+    { error: "method not allowed" },
+    { status: 405, headers: { Allow: allowed } },
+  );
+}
+
+async function handleRequest(
+  request: Request,
+  env: Env,
+  ctx: ExecutionContext,
+  requestId: string,
+): Promise<Response> {
+  const url = new URL(request.url);
 
     // Browser MCP clients send an unauthenticated preflight before the actual
     // bearer-authenticated request. Handle it before JWT verification.
@@ -1078,13 +1386,25 @@ export default {
     }
 
     if (url.pathname === "/auth/sso") {
+      if (request.method !== "GET") return methodNotAllowed("GET");
       return handleSsoStart(env, url);
     }
     if (url.pathname === "/auth/callback") {
-      return handleSsoCallback(env, url, request);
+      if (request.method !== "GET") return methodNotAllowed("GET");
+      return handleSsoCallback(env, url, request, requestId);
+    }
+    if (url.pathname === "/auth/logout") {
+      if (request.method !== "POST") return methodNotAllowed("POST");
+      return handleLogout(request, url, requestId);
     }
 
-    const auth = await authenticate(request, env);
+    const auth = await authenticate(request, env, url, requestId);
+    if (auth?.method === "forbidden-cookie") {
+      return Response.json(
+        { error: "forbidden", requestId },
+        { status: 403 },
+      );
+    }
     if (!auth) {
       const headers = new Headers({
         "content-type": "application/json",
@@ -1101,7 +1421,7 @@ export default {
     }
 
     if (url.pathname.startsWith("/api/")) {
-      return handleRestApi(request, env, url, auth.profileName);
+      return handleRestApi(request, env, url, auth, requestId);
     }
 
     let handlerRequest = request;
@@ -1127,7 +1447,7 @@ export default {
     }
 
     const handler = createMcpHandler(
-      ({ era }) => createServer(env, auth.profileName, era),
+      ({ era }) => createServer(env, auth.profileName, era, requestId),
       {
         route: "/mcp",
         corsOptions: {
@@ -1159,5 +1479,59 @@ export default {
     );
 
     return handler(handlerRequest, env, ctx);
+}
+
+function requestIdFor(request: Request): string {
+  const candidate = request.headers.get("x-request-id")?.trim();
+  return candidate && /^[A-Za-z0-9._-]{1,128}$/.test(candidate)
+    ? candidate
+    : crypto.randomUUID();
+}
+
+function withResponseMetadata(
+  response: Response,
+  requestUrl: URL,
+  requestId: string,
+): Response {
+  const headers = new Headers(response.headers);
+  headers.set("x-request-id", requestId);
+  if (
+    requestUrl.pathname === "/mcp" ||
+    requestUrl.pathname.startsWith("/api/")
+  ) {
+    headers.set("cache-control", "private, no-store");
+  } else if (requestUrl.pathname.startsWith("/auth/")) {
+    headers.set("cache-control", "no-store");
+  }
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
+export default {
+  async fetch(
+    request: Request,
+    env: Env,
+    ctx: ExecutionContext,
+  ): Promise<Response> {
+    const requestId = requestIdFor(request);
+    const requestUrl = new URL(request.url);
+    try {
+      const response = await handleRequest(request, env, ctx, requestId);
+      return withResponseMetadata(response, requestUrl, requestId);
+    } catch (err) {
+      logOperationError(requestId, "worker_request", err);
+      const headers = requestUrl.pathname === "/mcp"
+        ? mcpCorsHeaders()
+        : new Headers();
+      headers.set("content-type", "application/json");
+      const response = new Response(
+        JSON.stringify({ error: "internal server error", requestId }),
+        { status: 500, headers },
+      );
+      return withResponseMetadata(response, requestUrl, requestId);
+    }
   },
 } satisfies ExportedHandler<Env>;

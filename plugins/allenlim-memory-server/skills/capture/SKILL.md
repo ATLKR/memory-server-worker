@@ -76,3 +76,8 @@ memory_add({
   1 MiB of UTF-8 message content in total.
 - Do not ingest after every single message. Do it after a meaningful
   conversation turn or when the user goes idle.
+- Claude Stop hooks capture only complete, previously unacknowledged JSONL
+  records. A checkpoint advances after each successful ingest batch, so a
+  timeout or server failure is retried without skipping later messages.
+- Configure `MEMORY_API_KEY` for API-key auth, or use `MEMORY_TOKEN`/`mem login`
+  for JWT auth. API-key auth takes precedence and does not send JWT scope.

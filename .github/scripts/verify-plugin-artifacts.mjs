@@ -3,15 +3,27 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
-import { promisify } from "node:util";
-import { execFile } from "node:child_process";
-import { validateExactArchiveEntries } from "./plugin-archive-entries.mjs";
+import {
+  ARCHIVE_ENTRIES,
+  ARCHIVE_NAME,
+  CHECKSUM_NAME,
+  createDeterministicZip,
+} from "./build-plugin-artifact.mjs";
 
-const execFileAsync = promisify(execFile);
 const root = process.cwd();
 const releaseVersion = JSON.parse(
   await readFile(path.join(root, "package.json"), "utf8"),
 ).version;
+
+const packageLock = JSON.parse(
+  await readFile(path.join(root, "package-lock.json"), "utf8"),
+);
+assert.equal(packageLock.version, releaseVersion, "package-lock.json version drift");
+assert.equal(
+  packageLock.packages?.[""]?.version,
+  releaseVersion,
+  "package-lock.json root package version drift",
+);
 
 const jsonVersionFiles = [
   "packages/memory-worker/package.json",
@@ -27,6 +39,18 @@ const jsonVersionFiles = [
 for (const relative of jsonVersionFiles) {
   const parsed = JSON.parse(await readFile(path.join(root, relative), "utf8"));
   assert.equal(parsed.version, releaseVersion, `${relative} version drift`);
+}
+
+for (const relative of [
+  "packages/memory-worker",
+  "packages/memory-ui",
+  "plugins/allenlim-memory-server",
+]) {
+  assert.equal(
+    packageLock.packages?.[relative]?.version,
+    releaseVersion,
+    `package-lock.json ${relative} version drift`,
+  );
 }
 
 const marketplace = JSON.parse(
@@ -96,37 +120,36 @@ for (const relative of pluginIdentityFiles) {
   assert.equal(parsed.name, "allenlim-memory-server", `${relative} name drift`);
 }
 
-const archive = path.join(root, "allenlim-memory-server-chatgpt.zip");
-const archiveTool = process.platform === "win32" ? "tar" : "unzip";
-const listArgs = process.platform === "win32" ? ["-tf", archive] : ["-Z1", archive];
-const { stdout: archiveEntries } = await execFileAsync(archiveTool, listArgs);
-const expectedFiles = [
-  ".codex-plugin/plugin.json",
-  "skills/capture/SKILL.md",
-  "skills/recall/SKILL.md",
-  "skills/remember/SKILL.md",
-];
-validateExactArchiveEntries(archiveEntries, expectedFiles);
-for (const relative of expectedFiles) {
-  const extractArgs =
-    process.platform === "win32"
-      ? ["-xOf", archive, relative]
-      : ["-p", archive, relative];
-  const { stdout } = await execFileAsync(archiveTool, extractArgs, {
-    encoding: "buffer",
-    maxBuffer: 2 * 1024 * 1024,
-  });
-  const source = await readFile(
-    path.join(root, "distributions/chatgpt/allenlim-memory-server", relative),
-  );
-  // Git normalizes these text files to LF, while a Windows working tree can
-  // present CRLF. Compare their canonical text bytes so verification behaves
-  // identically on developer machines and Linux CI.
-  const digest = (value) =>
-    createHash("sha256")
-      .update(value.toString("utf8").replaceAll("\r\n", "\n"), "utf8")
-      .digest("hex");
-  assert.equal(digest(stdout), digest(source), `ZIP content drift: ${relative}`);
-}
+const archive = path.join(root, ARCHIVE_NAME);
+const archiveBytes = await readFile(archive);
+const archiveDigest = createHash("sha256").update(archiveBytes).digest("hex");
+assert.equal(
+  await readFile(path.join(root, CHECKSUM_NAME), "utf8"),
+  `${archiveDigest}  ${ARCHIVE_NAME}\n`,
+  "plugin ZIP checksum drift",
+);
+const sourceRoot = path.join(
+  root,
+  "distributions",
+  "chatgpt",
+  "allenlim-memory-server",
+);
+const expectedEntries = await Promise.all(
+  ARCHIVE_ENTRIES.map(async (name) => ({
+    name,
+    contents: Buffer.from(
+      (await readFile(path.join(sourceRoot, name), "utf8")).replaceAll(
+        "\r\n",
+        "\n",
+      ),
+      "utf8",
+    ),
+  })),
+);
+assert.deepEqual(
+  archiveBytes,
+  createDeterministicZip(expectedEntries),
+  "plugin ZIP bytes drift from canonical distribution sources",
+);
 
 console.log(`Plugin artifacts verified at version ${releaseVersion}.`);

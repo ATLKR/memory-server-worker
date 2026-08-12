@@ -5,30 +5,36 @@
  * All requests go over HTTP to the deployed (or local) Worker's /mcp route
  * using the MCP "tools/call" JSON-RPC method.
  *
- * Auth: RS256 JWT obtained via the Allen Labs auth server SSO flow.
- * The JWT is stored in a local credential file (~/.memory/credentials.json)
- * after `mem login`. It's sent as `Authorization: Bearer <jwt>`.
+ * Auth: an API key from MEMORY_API_KEY, or an RS256 JWT obtained through the
+ * Allen Labs auth server SSO flow. API-key auth takes precedence and is sent
+ * only as x-memory-api-key. JWT auth uses Authorization: Bearer <jwt>.
  *
  * Configuration via environment variables:
  *   MEMORY_SERVER_URL  — base URL of the worker (defaults to https://memory.allenlim.net)
+ *   MEMORY_API_KEY     — API key (takes precedence over JWT credentials)
  *   MEMORY_TOKEN       — JWT bearer token (overrides credential file; for CI/headless)
  *   MEMORY_SCOPE       — optional logical sub-scope within the authenticated user
  *   MEMORY_AUTH_API_URL — auth API URL for login (defaults to https://auth-api.allen.company)
+ *   MEMORY_REQUEST_TIMEOUT_MS — request timeout in milliseconds (default 10000; 100-60000)
  *
  * Credential file (~/.memory/credentials.json):
  *   { "token": "<jwt>", "expiresAt": "<iso>", "user": { "id": "...", "email": "..." } }
  */
 
+import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 const CREDENTIALS_PATH = join(homedir(), ".memory", "credentials.json");
 
-const SERVER_URL = (process.env.MEMORY_SERVER_URL?.trim() || "https://memory.allenlim.net").replace(/\/$/, "");
-const AUTH_API_URL = (process.env.MEMORY_AUTH_API_URL ?? "https://auth-api.allen.company").replace(/\/$/, "");
-const SCOPE = process.env.MEMORY_SCOPE ?? "";
-const PLUGIN_VERSION = "2.0.0";
+const PLUGIN_VERSION = "2.1.0";
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+const MIN_REQUEST_TIMEOUT_MS = 100;
+const MAX_REQUEST_TIMEOUT_MS = 60_000;
+const MAX_REDIRECTS = 3;
+const REDIRECT_STATUSES = new Set([301, 302, 307, 308]);
+const MAX_ERROR_TEXT_BYTES = 4 * 1024;
 
 /**
  * Load the stored JWT from the credential file. Returns null if the file
@@ -96,7 +102,20 @@ export function getCurrentUser() {
  * Check if we have a valid (non-expired) token.
  */
 export function isLoggedIn() {
+  if (getApiKey()) {
+    TOKEN_EXPIRED = false;
+    return true;
+  }
   return loadStoredToken() !== null;
+}
+
+/** Return the active auth mode without exposing the credential itself. */
+export function getAuthenticationMode() {
+  if (getApiKey()) {
+    TOKEN_EXPIRED = false;
+    return "api-key";
+  }
+  return loadStoredToken() ? "jwt" : null;
 }
 
 /**
@@ -121,21 +140,128 @@ function getToken() {
       );
     }
     throw new Error(
-      "Not authenticated. Run `mem login` to sign in via the Allen Labs auth server.",
+      "Not authenticated. Set MEMORY_API_KEY or run `mem login` to sign in.",
     );
   }
   return token;
+}
+
+function getApiKey() {
+  return process.env.MEMORY_API_KEY?.trim() || null;
+}
+
+function getServerUrl() {
+  return (
+    process.env.MEMORY_SERVER_URL?.trim() || "https://memory.allenlim.net"
+  ).replace(/\/$/, "");
+}
+
+function getCanonicalServerUrl() {
+  const serverUrl = new URL(getServerUrl());
+  if (
+    !["http:", "https:"].includes(serverUrl.protocol) ||
+    serverUrl.username ||
+    serverUrl.password
+  ) {
+    throw new Error("MEMORY_SERVER_URL must be an HTTP(S) URL without credentials.");
+  }
+  serverUrl.hash = "";
+  serverUrl.search = "";
+  serverUrl.pathname = serverUrl.pathname.replace(/\/$/, "");
+  return serverUrl.href.replace(/\/$/, "");
+}
+
+/**
+ * Return a one-way identity for the active server/auth destination.
+ *
+ * This value is safe to use in checkpoint keys: it never contains the raw
+ * server URL, API key, JWT, user id, or logical scope. A stable JWT subject is
+ * preferred so refreshing the same user's token does not replay transcripts.
+ */
+export function getMemoryDestinationFingerprint() {
+  const apiKey = getApiKey();
+  let authIdentity;
+  let scopeIdentity = "none";
+
+  if (apiKey) {
+    authIdentity = `api-key:${sha256(apiKey)}`;
+  } else {
+    const token = loadStoredToken();
+    if (token) {
+      const stableUserId = getStableJwtUserId(token);
+      authIdentity = stableUserId
+        ? `jwt-user:${sha256(stableUserId)}`
+        : `jwt-credential:${sha256(token)}`;
+      scopeIdentity = sha256(process.env.MEMORY_SCOPE?.trim() || "");
+    } else {
+      authIdentity = "anonymous";
+    }
+  }
+
+  return sha256(
+    JSON.stringify({
+      authIdentity,
+      scopeIdentity,
+      server: getCanonicalServerUrl(),
+    }),
+  );
+}
+
+function getStableJwtUserId(token) {
+  const tokenSubject = decodeJwtSubject(token);
+  if (process.env.MEMORY_TOKEN) return tokenSubject;
+
+  const user = getCurrentUser();
+  const storedUserId = user?.id ?? user?.sub;
+  return typeof storedUserId === "string" && storedUserId.trim()
+    ? storedUserId.trim()
+    : tokenSubject;
+}
+
+function decodeJwtSubject(token) {
+  try {
+    const payloadSegment = token.split(".")[1];
+    if (!payloadSegment || payloadSegment.length > 16 * 1024) return null;
+    const payload = JSON.parse(
+      Buffer.from(payloadSegment, "base64url").toString("utf8"),
+    );
+    return typeof payload?.sub === "string" && payload.sub.trim()
+      ? payload.sub.trim()
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+export function getRequestTimeoutMs() {
+  const raw = process.env.MEMORY_REQUEST_TIMEOUT_MS?.trim();
+  if (!raw) return DEFAULT_REQUEST_TIMEOUT_MS;
+  const configured = Number(raw);
+  if (!Number.isFinite(configured)) return DEFAULT_REQUEST_TIMEOUT_MS;
+  return Math.min(
+    MAX_REQUEST_TIMEOUT_MS,
+    Math.max(MIN_REQUEST_TIMEOUT_MS, Math.trunc(configured)),
+  );
 }
 
 function headers() {
   const h = {
     "content-type": "application/json",
     accept: "application/json, text/event-stream",
-    authorization: `Bearer ${getToken()}`,
     "mcp-protocol-version": "2025-11-25",
     "user-agent": `allenlim-memory-server/${PLUGIN_VERSION}`,
   };
-  if (SCOPE) h["x-memory-scope"] = SCOPE;
+
+  const apiKey = getApiKey();
+  if (apiKey) {
+    TOKEN_EXPIRED = false;
+    h["x-memory-api-key"] = apiKey;
+    return h;
+  }
+
+  h.authorization = `Bearer ${getToken()}`;
+  const scope = process.env.MEMORY_SCOPE?.trim();
+  if (scope) h["x-memory-scope"] = scope;
   return h;
 }
 
@@ -148,35 +274,162 @@ function headers() {
  * request, so the plugin no longer pays for an initialize handshake.
  */
 export async function callTool(name, args = {}) {
-  const callRes = await fetch(`${SERVER_URL}/mcp`, {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: { name, arguments: args },
-    }),
+  const timeoutMs = getRequestTimeoutMs();
+  const signal = AbortSignal.timeout(timeoutMs);
+  const body = JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    method: "tools/call",
+    params: { name, arguments: args },
   });
+  let callRes;
+  try {
+    callRes = await fetchWithSameOriginRedirects(
+      `${getCanonicalServerUrl()}/mcp`,
+      { body, headers: headers(), signal },
+    );
+  } catch (error) {
+    if (
+      signal.aborted ||
+      error?.name === "AbortError" ||
+      error?.name === "TimeoutError"
+    ) {
+      throw new Error(`Memory request timed out after ${timeoutMs} ms.`);
+    }
+    throw error;
+  }
 
   if (!callRes.ok) {
-    const text = await callRes.text().catch(() => "");
+    const text = await readBoundedErrorText(callRes).catch(() => "");
     throw new Error(`MCP tools/call failed (${callRes.status}): ${text}`);
   }
 
   const callResult = await parseMcpResponse(callRes);
 
-  // Extract text content from the result.
-  if (callResult?.result?.content) {
-    return callResult.result.content
-      .filter((c) => c.type === "text")
-      .map((c) => c.text)
-      .join("\n");
+  if (callResult.error) {
+    throw new Error(
+      `MCP error ${callResult.error.code}: ${truncateErrorText(callResult.error.message)}`,
+    );
   }
-  if (callResult?.error) {
-    throw new Error(`MCP error: ${JSON.stringify(callResult.error)}`);
+
+  const result = callResult.result;
+  if (result.isError === true) {
+    const errorText = joinTextContent(result.content, { bounded: true });
+    throw new Error(errorText || "MCP tool returned an error result.");
   }
-  return JSON.stringify(callResult);
+
+  return joinTextContent(result.content);
+}
+
+async function fetchWithSameOriginRedirects(initialUrl, { body, headers, signal }) {
+  const initial = new URL(initialUrl);
+  let current = initial;
+
+  for (let redirects = 0; ; redirects += 1) {
+    const response = await fetch(current.href, {
+      method: "POST",
+      headers: { ...headers },
+      body,
+      signal,
+      redirect: "manual",
+    });
+
+    if (!REDIRECT_STATUSES.has(response.status)) return response;
+
+    const location = response.headers.get("location");
+    if (!location) return response;
+    if (redirects >= MAX_REDIRECTS) {
+      throw new Error("Memory request exceeded the same-origin redirect limit.");
+    }
+
+    const target = new URL(location, current);
+    await response.body?.cancel().catch(() => {});
+    if (
+      target.origin !== initial.origin ||
+      !["http:", "https:"].includes(target.protocol) ||
+      target.username ||
+      target.password
+    ) {
+      throw new Error("Memory server refused a cross-origin redirect.");
+    }
+
+    current = target;
+  }
+}
+
+function joinTextContent(contents, { bounded = false } = {}) {
+  let output = "";
+  for (const content of contents) {
+    if (content?.type !== "text" || typeof content.text !== "string") continue;
+    const separator = output ? "\n" : "";
+    if (!bounded) {
+      output += `${separator}${content.text}`;
+      continue;
+    }
+
+    // Only retain a small prefix before applying the UTF-8 byte bound. This
+    // avoids constructing an unbounded joined error string from many blocks.
+    output += `${separator}${content.text.slice(0, MAX_ERROR_TEXT_BYTES + 1)}`;
+    if (Buffer.byteLength(output, "utf8") > MAX_ERROR_TEXT_BYTES) {
+      return truncateErrorText(output);
+    }
+  }
+  return output;
+}
+
+async function readBoundedErrorText(response) {
+  if (!response.body?.getReader) {
+    return truncateErrorText(await response.text());
+  }
+
+  const reader = response.body.getReader();
+  const chunks = [];
+  let bytes = 0;
+  let truncated = false;
+  try {
+    while (bytes <= MAX_ERROR_TEXT_BYTES) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const remaining = MAX_ERROR_TEXT_BYTES + 1 - bytes;
+      if (value.byteLength > remaining) {
+        chunks.push(value.subarray(0, remaining));
+        bytes += remaining;
+        truncated = true;
+        break;
+      }
+      chunks.push(value);
+      bytes += value.byteLength;
+      if (bytes > MAX_ERROR_TEXT_BYTES) {
+        truncated = true;
+        break;
+      }
+    }
+  } finally {
+    if (truncated) await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+
+  const text = Buffer.concat(chunks.map((chunk) => Buffer.from(chunk))).toString(
+    "utf8",
+  );
+  return truncateErrorText(text);
+}
+
+function truncateErrorText(value) {
+  const text = typeof value === "string" ? value : String(value ?? "");
+  if (Buffer.byteLength(text, "utf8") <= MAX_ERROR_TEXT_BYTES) return text;
+
+  let end = MAX_ERROR_TEXT_BYTES;
+  while (end > 0) {
+    const candidate = Buffer.from(text, "utf8").subarray(0, end).toString("utf8");
+    if (!candidate.endsWith("\uFFFD")) return `${candidate}\u2026`;
+    end -= 1;
+  }
+  return "\u2026";
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 /**
@@ -191,23 +444,55 @@ async function parseMcpResponse(res) {
     // Extract the data: lines and parse the JSON-RPC message.
     const lines = text.split("\n");
     for (const line of lines) {
-      if (line.startsWith("data: ")) {
+      if (line.startsWith("data:")) {
         try {
-          return JSON.parse(line.slice(6));
+          return validateMcpResponse(JSON.parse(line.slice(5).trimStart()));
         } catch {
           // continue
         }
       }
     }
-    return null;
+    throw new Error("Malformed MCP response: no valid JSON-RPC event.");
   }
 
   // Plain JSON response.
   try {
-    return await res.json();
-  } catch {
-    return null;
+    return validateMcpResponse(await res.json());
+  } catch (error) {
+    if (error?.message?.startsWith("Malformed MCP response:")) throw error;
+    throw new Error("Malformed MCP response: invalid JSON.");
   }
+}
+
+function validateMcpResponse(value) {
+  if (!value || typeof value !== "object" || value.jsonrpc !== "2.0") {
+    throw new Error("Malformed MCP response: expected a JSON-RPC 2.0 object.");
+  }
+  if (value.id !== 1) {
+    throw new Error("Malformed MCP response: mismatched request id.");
+  }
+
+  if (value.error !== undefined) {
+    if (
+      !value.error ||
+      typeof value.error !== "object" ||
+      !Number.isInteger(value.error.code) ||
+      typeof value.error.message !== "string"
+    ) {
+      throw new Error("Malformed MCP response: invalid error object.");
+    }
+    return value;
+  }
+
+  if (
+    !value.result ||
+    typeof value.result !== "object" ||
+    !Array.isArray(value.result.content)
+  ) {
+    throw new Error("Malformed MCP response: missing tool result content.");
+  }
+
+  return value;
 }
 
 /** Convenience wrappers for common memory operations (Agent Memory API). */

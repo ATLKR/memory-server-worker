@@ -2,14 +2,10 @@ import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { api } from "~/lib/api";
 import { useAuthSession } from "~/lib/use-auth-session";
-
-const MAX_CONTENT_BYTES = 32 * 1024;
-
-function utf8ByteLength(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
+import { MAX_MEMORY_CONTENT_BYTES, utf8ByteLength } from "~/lib/validation";
 
 export const Route = createFileRoute("/new")({
+  head: () => ({ meta: [{ title: "New memory — Allen Labs" }] }),
   component: NewMemoryComponent,
 });
 
@@ -21,7 +17,7 @@ function NewMemoryComponent() {
   const [error, setError] = useState<string | null>(null);
   const { ready, loggedIn } = useAuthSession();
   const contentBytes = utf8ByteLength(content.trim());
-  const contentTooLarge = contentBytes > MAX_CONTENT_BYTES;
+  const contentTooLarge = contentBytes > MAX_MEMORY_CONTENT_BYTES;
 
   if (!ready) {
     return <div className="loading" role="status">Checking session…</div>;
@@ -40,7 +36,7 @@ function NewMemoryComponent() {
     e.preventDefault();
     const trimmedContent = content.trim();
     if (!trimmedContent) return;
-    if (utf8ByteLength(trimmedContent) > MAX_CONTENT_BYTES) {
+    if (utf8ByteLength(trimmedContent) > MAX_MEMORY_CONTENT_BYTES) {
       setError("Content exceeds the 32 KiB UTF-8 limit.");
       return;
     }
@@ -82,7 +78,7 @@ function NewMemoryComponent() {
             autoFocus
           />
           <p id="content-byte-limit" className="form-hint">
-            {contentBytes.toLocaleString()} / {MAX_CONTENT_BYTES.toLocaleString()} UTF-8 bytes
+            {contentBytes.toLocaleString()} / {MAX_MEMORY_CONTENT_BYTES.toLocaleString()} UTF-8 bytes
           </p>
         </div>
         <div className="form-field">

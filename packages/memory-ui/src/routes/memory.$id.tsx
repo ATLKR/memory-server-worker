@@ -1,9 +1,10 @@
-import { createFileRoute, useNavigate, useParams } from "@tanstack/react-router";
+import { createFileRoute, Link, useNavigate, useParams } from "@tanstack/react-router";
 import { useState, useEffect, useRef } from "react";
-import { api, type MemoryEntry } from "~/lib/api";
+import { api, ApiError, type MemoryEntry } from "~/lib/api";
 import { useAuthSession } from "~/lib/use-auth-session";
 
 export const Route = createFileRoute("/memory/$id")({
+  head: () => ({ meta: [{ title: "Memory details — Allen Labs" }] }),
   component: MemoryDetailComponent,
 });
 
@@ -13,7 +14,8 @@ function MemoryDetailComponent() {
   const [memory, setMemory] = useState<MemoryEntry | null>(null);
   const [loading, setLoading] = useState(true);
   const [deleting, setDeleting] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  const [error, setError] = useState<Error | null>(null);
+  const [loadRevision, setLoadRevision] = useState(0);
   const { ready, loggedIn } = useAuthSession();
   const loadGeneration = useRef(0);
   const deleteGeneration = useRef(0);
@@ -40,7 +42,7 @@ function MemoryDetailComponent() {
         }
       } catch (err) {
         if (!controller.signal.aborted && generation === loadGeneration.current) {
-          setError(err instanceof Error ? err.message : "Failed to load");
+          setError(err instanceof Error ? err : new Error("Failed to load"));
         }
       } finally {
         if (!controller.signal.aborted && generation === loadGeneration.current) {
@@ -53,7 +55,7 @@ function MemoryDetailComponent() {
       controller.abort();
       if (generation === loadGeneration.current) loadGeneration.current += 1;
     };
-  }, [id, loggedIn]);
+  }, [id, loadRevision, loggedIn]);
 
   useEffect(() => {
     setDeleting(false);
@@ -80,7 +82,7 @@ function MemoryDetailComponent() {
       }
     } catch (err) {
       if (!controller.signal.aborted && generation === deleteGeneration.current) {
-        setError(err instanceof Error ? err.message : "Delete failed");
+        setError(err instanceof Error ? err : new Error("Delete failed"));
       }
     } finally {
       if (generation === deleteGeneration.current) {
@@ -102,8 +104,43 @@ function MemoryDetailComponent() {
   }
 
   if (loading) return <div className="loading" role="status">Loading…</div>;
-  if (error && !memory) return <div className="error" role="alert">{error}</div>;
-  if (!memory) return <div className="empty">Memory not found.</div>;
+  if ((error instanceof ApiError && error.status === 404) || (!error && !memory)) {
+    return (
+      <section className="status-page" aria-labelledby="memory-not-found-title">
+        <h1 id="memory-not-found-title">Memory not found</h1>
+        <p>This memory may have been deleted or the link may be incorrect.</p>
+        <div className="status-actions">
+          <button
+            type="button"
+            className="btn btn-secondary"
+            onClick={() => setLoadRevision((value) => value + 1)}
+          >
+            Try again
+          </button>
+          <Link to="/" className="btn btn-primary">Go to memories</Link>
+        </div>
+      </section>
+    );
+  }
+  if (error && !memory) {
+    return (
+      <section className="status-page" aria-labelledby="memory-error-title">
+        <h1 id="memory-error-title">Memory could not load</h1>
+        <p role="alert">{error.message}</p>
+        <div className="status-actions">
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={() => setLoadRevision((value) => value + 1)}
+          >
+            Try again
+          </button>
+          <Link to="/" className="btn btn-secondary">Go to memories</Link>
+        </div>
+      </section>
+    );
+  }
+  if (!memory) return null;
 
   return (
     <div className="memory-detail">
@@ -125,7 +162,7 @@ function MemoryDetailComponent() {
         <div><strong>Updated:</strong> {new Date(memory.updatedAt).toLocaleString()}</div>
       </div>
 
-      {error && <div className="error" role="alert">{error}</div>}
+      {error && <div className="error" role="alert">{error.message}</div>}
 
       <div className="memory-detail-actions">
         <button

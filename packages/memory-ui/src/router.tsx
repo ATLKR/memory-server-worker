@@ -1,14 +1,12 @@
 import { createRouter } from "@tanstack/react-router";
 import { routeTree } from "./routeTree.gen";
 
-const router = createRouter({
-  routeTree,
-  defaultPreload: "intent",
-  scrollRestoration: true,
-});
-
 export function getRouter() {
-  return router;
+  return createRouter({
+    routeTree,
+    defaultPreload: "intent",
+    scrollRestoration: true,
+  });
 }
 
-export type AppRouter = typeof router;
+export type AppRouter = ReturnType<typeof getRouter>;

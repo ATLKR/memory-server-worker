@@ -54,102 +54,119 @@ export interface SummaryResponse {
   summary: string;
 }
 
+export interface SessionUser {
+  id: string;
+  email: string | null;
+  name: string | null;
+}
+
+export type AuthMode = "session" | "jwt" | "api-key";
+
+export interface AuthenticatedSession {
+  authenticated: true;
+  authMode: AuthMode;
+  user: SessionUser;
+}
+
+export interface AnonymousSession {
+  authenticated: false;
+  authMode: null;
+  user: null;
+}
+
+export type AuthSession = AuthenticatedSession | AnonymousSession;
+
+export const ANONYMOUS_SESSION: AnonymousSession = {
+  authenticated: false,
+  authMode: null,
+  user: null,
+};
+
+export const AUTH_INVALIDATED_EVENT = "memory-auth-invalidated";
+
+export function clearLegacyClientCredentials(): void {
+  if (typeof window !== "undefined") {
+    try {
+      window.sessionStorage.removeItem("memory_token");
+      window.sessionStorage.removeItem("memory_expires_at");
+    } catch {
+      // Storage can be unavailable in hardened/private browsing contexts.
+    }
+  }
+  if (typeof document !== "undefined") {
+    try {
+      document.cookie =
+        "memory_token=; Secure; SameSite=Lax; Max-Age=0; Path=/";
+    } catch {
+      // Cookie access can be disabled; the server also expires this cookie.
+    }
+  }
+}
+
 /**
  * API client — calls the REST API on the same origin.
  * The UI worker proxies /api/* to the backend worker via service binding.
  *
- * Auth: the browser must have a valid JWT. For the web UI, we store the
- * token in sessionStorage after SSO login and attach it as a Bearer token.
+ * Auth: the browser uses an HttpOnly, Secure, SameSite session cookie. The
+ * cookie is never exposed to JavaScript; `credentials: same-origin` lets the
+ * browser attach it only to this origin.
  */
 
-function getToken(): string | null {
-  let token: string | null = null;
-  try {
-    token = sessionStorage.getItem("memory_token");
-  } catch {
-    // ignore
-  }
-
-  if (!token && typeof document !== "undefined") {
-    const match = document.cookie.match(/(?:^|;\s*)memory_token=([^;]+)/);
-    if (match?.[1]) {
-      token = match[1];
-      try {
-        sessionStorage.setItem("memory_token", token);
-        document.cookie = "memory_token=; Max-Age=0; Path=/; SameSite=Lax";
-      } catch {
-        // ignore
-      }
-    }
-  }
-
-  return token;
+function isSessionUser(value: unknown): value is SessionUser {
+  if (!value || typeof value !== "object") return false;
+  const user = value as Record<string, unknown>;
+  return typeof user.id === "string" &&
+    (user.email === null || typeof user.email === "string") &&
+    (user.name === null || typeof user.name === "string");
 }
 
-export function setToken(token: string, expiresAt?: string): void {
-  try {
-    sessionStorage.setItem("memory_token", token);
-    if (expiresAt) sessionStorage.setItem("memory_expires_at", expiresAt);
-  } catch {
-    // ignore
-  }
-}
-
-export function clearToken(): void {
-  try {
-    sessionStorage.removeItem("memory_token");
-    sessionStorage.removeItem("memory_expires_at");
-  } catch {
-    // ignore
-  }
-}
-
-export function isLoggedIn(): boolean {
-  const token = getToken();
-  if (!token) return false;
-  let expiresAt: string | null = null;
-  try {
-    expiresAt = sessionStorage.getItem("memory_expires_at");
-  } catch {
-    return false;
-  }
-  if (expiresAt) {
-    const exp = new Date(expiresAt).getTime();
-    if (Date.now() >= exp - 5 * 60 * 1000) return false;
-  }
-  return true;
-}
-
-export function getUserInfo(): { email?: string; name?: string } | null {
-  const token = getToken();
-  if (!token) return null;
-  try {
-    const segment = token.split(".")[1];
-    if (!segment) return null;
-    const base64 = segment.replace(/-/g, "+").replace(/_/g, "/");
-    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
-    const payload = JSON.parse(atob(padded));
-    return { email: payload.email, name: payload.name ?? payload.preferredName };
-  } catch {
+export function parseSessionResponse(value: unknown): AuthenticatedSession | null {
+  if (!value || typeof value !== "object") return null;
+  const session = value as Record<string, unknown>;
+  if (
+    session.authenticated !== true ||
+    !["session", "jwt", "api-key"].includes(String(session.authMode)) ||
+    !isSessionUser(session.user)
+  ) {
     return null;
   }
+  return {
+    authenticated: true,
+    authMode: session.authMode as AuthMode,
+    user: session.user,
+  };
 }
 
-export function logout(): void {
-  clearToken();
-  window.location.href = "/";
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    readonly requestId: string | null = null,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
+
+function notifyAuthInvalidated(): void {
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new Event(AUTH_INVALIDATED_EVENT));
+  }
 }
 
 async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
-  const token = getToken();
   const headers = new Headers(init?.headers);
-  headers.set("content-type", "application/json");
-  if (token) headers.set("authorization", `Bearer ${token}`);
-  const resp = await fetch(path, { ...init, headers });
+  headers.set("accept", "application/json");
+  if (init?.body !== undefined && !headers.has("content-type")) {
+    headers.set("content-type", "application/json");
+  }
+  const resp = await fetch(path, {
+    ...init,
+    headers,
+    credentials: "same-origin",
+  });
   if (resp.status === 401) {
-    clearToken();
-    window.location.href = "/auth/sso?ui=1";
-    throw new Error("Authentication required");
+    notifyAuthInvalidated();
   }
   return resp;
 }
@@ -160,12 +177,56 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
 
   if (!response.ok) {
     const message = body?.error || `Request failed (${response.status})`;
-    throw new Error(message);
+    throw new ApiError(message, response.status, response.headers.get("x-request-id"));
   }
   if (body === null) {
     throw new Error("The server returned an invalid JSON response");
   }
   return body;
+}
+
+export async function fetchSession(signal?: AbortSignal): Promise<AuthSession> {
+  const response = await fetch("/api/session", {
+    credentials: "same-origin",
+    headers: { accept: "application/json" },
+    signal,
+  });
+  if (response.status === 401) return ANONYMOUS_SESSION;
+
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const error = body && typeof body === "object"
+      ? (body as ApiErrorBody).error
+      : null;
+    throw new ApiError(
+      error || "Unable to verify the session",
+      response.status,
+      response.headers.get("x-request-id"),
+    );
+  }
+
+  const session = parseSessionResponse(body);
+  if (!session) {
+    throw new ApiError(
+      "The server returned an invalid session response",
+      502,
+      response.headers.get("x-request-id"),
+    );
+  }
+  return session;
+}
+
+export async function logout(): Promise<void> {
+  clearLegacyClientCredentials();
+  const response = await apiFetch("/auth/logout", { method: "POST" });
+  if (!response.ok) {
+    const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
+    throw new ApiError(
+      body?.error || "Unable to sign out",
+      response.status,
+      response.headers.get("x-request-id"),
+    );
+  }
 }
 
 export const api = {

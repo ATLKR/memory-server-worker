@@ -66,3 +66,9 @@ Returns:
 - **`memory_list`** — list all memories, optionally filtered by type
   (fact/event/instruction/task) or session ID.
 - **`memory_get`** — fetch a single memory by its ID for full content.
+
+## Authentication
+
+The plugin accepts `MEMORY_API_KEY` for service/headless use or SSO JWT
+credentials from `MEMORY_TOKEN`/`mem login`. API-key auth takes precedence;
+when it is active, the client omits JWT and `x-memory-scope` headers.

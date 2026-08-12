@@ -19,12 +19,14 @@
  *   - `role`   — platform role ('admin' | 'user')
  *   - `memberships` — org memberships
  *
- * No secrets are stored on this worker — auth is fully delegated. The JWT
- * is valid for 8h (per auth-api config), after which the client must
+ * JWT verification itself needs no shared secret. API-key authentication is
+ * handled separately below through a digest-only Worker secret. The JWT is
+ * valid for 8h (per auth-api config), after which the client must
  * re-authenticate.
  */
 
 import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
+import { z } from "zod";
 
 export interface SessionPayload extends JWTPayload {
   sub: string; // Stable Better Auth user id (format is provider-defined)
@@ -59,6 +61,7 @@ const JWKS_FETCH_TIMEOUT = 5000; // 5 seconds
 export async function verifyJwt(
   authApiUrl: string,
   token: string,
+  requestId?: string,
 ): Promise<SessionPayload | null> {
   if (!token) return null;
   try {
@@ -84,10 +87,16 @@ export async function verifyJwt(
     if (typeof payload.sub !== "string") return null;
     return payload as SessionPayload;
   } catch (err) {
-    console.error(
-      "[verifyJwt] failed:",
-      err instanceof Error ? `${err.name}: ${err.message}` : String(err),
-    );
+    const rawErrorType = err instanceof Error ? err.name : typeof err;
+    const errorType = /^[A-Za-z0-9_.-]{1,64}$/.test(rawErrorType)
+      ? rawErrorType
+      : "UnknownError";
+    console.error(JSON.stringify({
+      level: "error",
+      event: "jwt_verification_failed",
+      ...(requestId ? { requestId } : {}),
+      errorType,
+    }));
     return null;
   }
 }
@@ -102,4 +111,165 @@ export function extractBearerToken(authHeader: string | null): string | null {
   if (!trimmed.startsWith("Bearer ")) return null;
   const token = trimmed.slice("Bearer ".length).trim();
   return token || null;
+}
+
+// ---------- API key registry ----------
+
+/**
+ * API keys are stored as SHA-256 digests in one Worker secret named
+ * MEMORY_API_KEY_REGISTRY. The secret uses this versioned JSON shape:
+ *
+ * {
+ *   "version": 1,
+ *   "keys": [{
+ *     "id": "automation",
+ *     "digest": "sha256:<64 lowercase hex characters>",
+ *     "userId": "stable-user-id",
+ *     "logicalScope": "optional-fixed-scope"
+ *   }]
+ * }
+ *
+ * Plaintext API keys must never be placed in the registry. `strict()` also
+ * rejects accidental fields such as `key` or `token`.
+ */
+const apiKeyRegistryEntrySchema = z
+  .object({
+    id: z.string().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+    digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+    userId: z
+      .string()
+      .min(1)
+      .max(256)
+      .refine((value) => value === value.trim(), {
+        message: "userId must not have surrounding whitespace",
+      }),
+    logicalScope: z
+      .string()
+      .min(1)
+      .max(128)
+      .refine((value) => value === value.trim(), {
+        message: "logicalScope must not have surrounding whitespace",
+      })
+      .optional(),
+  })
+  .strict();
+
+const apiKeyRegistrySchema = z
+  .object({
+    version: z.literal(1),
+    keys: z.array(apiKeyRegistryEntrySchema).min(1).max(20),
+  })
+  .strict()
+  .superRefine((registry, context) => {
+    const ids = new Set<string>();
+    const digests = new Set<string>();
+    for (const [index, entry] of registry.keys.entries()) {
+      if (ids.has(entry.id)) {
+        context.addIssue({
+          code: "custom",
+          path: ["keys", index, "id"],
+          message: "API key ids must be unique",
+        });
+      }
+      if (digests.has(entry.digest)) {
+        context.addIssue({
+          code: "custom",
+          path: ["keys", index, "digest"],
+          message: "API key digests must be unique",
+        });
+      }
+      ids.add(entry.id);
+      digests.add(entry.digest);
+    }
+  });
+
+// Cloudflare limits each Worker secret/environment variable to 5 KiB.
+export const API_KEY_REGISTRY_MAX_BYTES = 5 * 1024;
+export const API_KEY_MAX_BYTES = 512;
+// Provision keys from at least 32 cryptographically random bytes. Base64url
+// encoding that material produces a convenient 43-character header value.
+const API_KEY_MIN_BYTES = 32;
+const SHA_256_BYTES = 32;
+const API_KEY_AUTHORIZATION_PATTERN = /^ApiKey[ \t]+([^\s]+)$/i;
+const VISIBLE_ASCII_PATTERN = /^[\x21-\x7e]+$/;
+
+export interface ApiKeyIdentity {
+  keyId: string;
+  userId: string;
+  logicalScope: string | null;
+}
+
+/** Extract an API key from `Authorization: ApiKey <key>`. */
+export function extractAuthorizationApiKey(authHeader: string | null): string | null {
+  if (!authHeader) return null;
+  return API_KEY_AUTHORIZATION_PATTERN.exec(authHeader.trim())?.[1] ?? null;
+}
+
+function decodeSha256Digest(value: string): Uint8Array {
+  const hex = value.slice("sha256:".length);
+  const bytes = new Uint8Array(SHA_256_BYTES);
+  for (let index = 0; index < SHA_256_BYTES; index += 1) {
+    bytes[index] = Number.parseInt(hex.slice(index * 2, index * 2 + 2), 16);
+  }
+  return bytes;
+}
+
+function parseApiKeyRegistry(registryJson: string): z.infer<typeof apiKeyRegistrySchema> | null {
+  // Check code-unit length before encoding so an unexpectedly huge binding
+  // cannot force a proportionally larger temporary allocation.
+  if (!registryJson || registryJson.length > API_KEY_REGISTRY_MAX_BYTES) return null;
+  const bytes = new TextEncoder().encode(registryJson);
+  if (bytes.byteLength > API_KEY_REGISTRY_MAX_BYTES) return null;
+
+  let value: unknown;
+  try {
+    value = JSON.parse(registryJson);
+  } catch {
+    return null;
+  }
+
+  const parsed = apiKeyRegistrySchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * Verify one presented API key against the digest-only registry.
+ *
+ * Both operands passed to `timingSafeEqual` are SHA-256 digests, so their
+ * length is always fixed at 32 bytes. The plaintext key is never logged or
+ * retained in the returned identity.
+ */
+export async function verifyApiKey(
+  registryJson: string | undefined,
+  providedKey: string,
+): Promise<ApiKeyIdentity | null> {
+  if (!registryJson || providedKey !== providedKey.trim()) return null;
+  if (!VISIBLE_ASCII_PATTERN.test(providedKey)) return null;
+
+  const keyBytes = new TextEncoder().encode(providedKey);
+  if (
+    keyBytes.byteLength < API_KEY_MIN_BYTES ||
+    keyBytes.byteLength > API_KEY_MAX_BYTES
+  ) {
+    return null;
+  }
+
+  const registry = parseApiKeyRegistry(registryJson);
+  if (!registry) return null;
+
+  const providedDigest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", keyBytes),
+  );
+  let identity: ApiKeyIdentity | null = null;
+  for (const entry of registry.keys) {
+    const expectedDigest = decodeSha256Digest(entry.digest);
+    if (crypto.subtle.timingSafeEqual(providedDigest, expectedDigest)) {
+      identity = {
+        keyId: entry.id,
+        userId: entry.userId,
+        logicalScope: entry.logicalScope ?? null,
+      };
+    }
+  }
+  return identity;
 }

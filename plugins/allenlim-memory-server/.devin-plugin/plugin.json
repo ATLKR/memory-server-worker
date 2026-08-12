@@ -1,7 +1,7 @@
 {
   "name": "allenlim-memory-server",
-  "version": "2.0.0",
-  "description": "Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn. Backed by Cloudflare Agent Memory (managed service with automatic extraction, classification, and hybrid search). Auth via Allen Labs SSO.",
+  "version": "2.1.0",
+  "description": "Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn. Backed by Cloudflare Agent Memory with API-key or Allen Labs SSO authentication.",
   "author": {
     "name": "Allen Lim",
     "email": "allenlim@allenlabs.org"

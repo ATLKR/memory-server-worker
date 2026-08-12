@@ -33,8 +33,25 @@ export function validateExactArchiveEntries(listing, expectedFiles) {
     throw new TypeError("Expected archive entries must be unique");
   }
 
+  const entries = validateArchiveEntryNames(parseArchiveListing(listing));
+  const seen = new Set(entries);
+  const missing = expectedFiles.filter((entry) => !seen.has(entry));
+  const additional = [...seen].filter((entry) => !expected.has(entry));
+  if (missing.length > 0 || additional.length > 0) {
+    throw new Error(
+      `Archive entry set mismatch (missing: ${JSON.stringify(missing)}, additional: ${JSON.stringify(additional)})`,
+    );
+  }
+
+  return entries;
+}
+
+export function validateArchiveEntryNames(entries) {
+  if (!Array.isArray(entries) || entries.some((entry) => typeof entry !== "string")) {
+    throw new TypeError("Archive entries must be an array of strings");
+  }
   const seen = new Set();
-  for (const entry of parseArchiveListing(listing)) {
+  for (const entry of entries) {
     if (entry.includes("\\")) {
       throw new Error(`Archive entry uses a backslash: ${JSON.stringify(entry)}`);
     }
@@ -59,14 +76,5 @@ export function validateExactArchiveEntries(listing, expectedFiles) {
     }
     seen.add(normalized);
   }
-
-  const missing = expectedFiles.filter((entry) => !seen.has(entry));
-  const additional = [...seen].filter((entry) => !expected.has(entry));
-  if (missing.length > 0 || additional.length > 0) {
-    throw new Error(
-      `Archive entry set mismatch (missing: ${JSON.stringify(missing)}, additional: ${JSON.stringify(additional)})`,
-    );
-  }
-
   return [...seen];
 }

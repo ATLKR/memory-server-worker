@@ -9,3 +9,11 @@ AUTH_WEB_URL=https://auth.allen.company
 # Default logical sub-scope when x-memory-scope is absent.
 # It is always bound to the JWT subject; leave empty for the personal profile.
 DEFAULT_SCOPE=
+
+# API-key registry for local development. This value contains only
+# SHA-256 digests, never plaintext API keys. Production must use:
+#   npx wrangler secret put MEMORY_API_KEY_REGISTRY
+# Generate each key from at least 32 cryptographically random bytes (a
+# base64url encoding is 43 characters), then store only its SHA-256 digest.
+# Schema: {"version":1,"keys":[{"id":"automation","digest":"sha256:<64 lowercase hex>","userId":"stable-user-id","logicalScope":"optional-fixed-scope"}]}
+MEMORY_API_KEY_REGISTRY=
