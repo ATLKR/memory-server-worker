@@ -1,6 +1,7 @@
 {
   "name": "allenlim-plugins",
   "version": "2.0.0",
+  "description": "Allen Lim's personal productivity plugins.",
   "owner": {
     "name": "Allen Lim",
     "email": "allenlim@allenlabs.org",
