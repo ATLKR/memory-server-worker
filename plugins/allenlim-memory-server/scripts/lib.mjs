@@ -21,7 +21,7 @@
  *   { "token": "<jwt>", "expiresAt": "<iso>", "user": { "id": "...", "email": "..." } }
  */
 
-import { createHash } from "node:crypto";
+import { createHash, scryptSync } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { homedir } from "node:os";
@@ -35,6 +35,13 @@ const MAX_REQUEST_TIMEOUT_MS = 60_000;
 const MAX_REDIRECTS = 3;
 const REDIRECT_STATUSES = new Set([301, 302, 307, 308]);
 const MAX_ERROR_TEXT_BYTES = 4 * 1024;
+const CREDENTIAL_FINGERPRINT_BYTES = 32;
+const CREDENTIAL_FINGERPRINT_SCRYPT_OPTIONS = Object.freeze({
+  N: 2 ** 14,
+  r: 8,
+  p: 1,
+  maxmem: 32 * 1024 * 1024,
+});
 
 /**
  * Load the stored JWT from the credential file. Returns null if the file
@@ -184,14 +191,14 @@ export function getMemoryDestinationFingerprint() {
   let scopeIdentity = "none";
 
   if (apiKey) {
-    authIdentity = `api-key:${sha256(apiKey)}`;
+    authIdentity = `api-key:${deriveCredentialFingerprint(apiKey, "api-key")}`;
   } else {
     const token = loadStoredToken();
     if (token) {
       const stableUserId = getStableJwtUserId(token);
       authIdentity = stableUserId
         ? `jwt-user:${sha256(stableUserId)}`
-        : `jwt-credential:${sha256(token)}`;
+        : `jwt-credential:${deriveCredentialFingerprint(token, "jwt")}`;
       scopeIdentity = sha256(process.env.MEMORY_SCOPE?.trim() || "");
     } else {
       authIdentity = "anonymous";
@@ -275,19 +282,48 @@ function headers() {
  */
 export async function callTool(name, args = {}) {
   const timeoutMs = getRequestTimeoutMs();
-  const signal = AbortSignal.timeout(timeoutMs);
+  const timeoutController = new AbortController();
+  // Keep this timer referenced. AbortSignal.timeout() deliberately uses an
+  // unref'ed timer in some Node releases, which can let short-lived CLI and
+  // hook processes exit before a stalled request is rejected.
+  const timeoutId = setTimeout(() => {
+    const error = new Error(`Memory request timed out after ${timeoutMs} ms.`);
+    error.name = "TimeoutError";
+    timeoutController.abort(error);
+  }, timeoutMs);
+  const { signal } = timeoutController;
   const body = JSON.stringify({
     jsonrpc: "2.0",
     id: 1,
     method: "tools/call",
     params: { name, arguments: args },
   });
-  let callRes;
   try {
-    callRes = await fetchWithSameOriginRedirects(
+    const callRes = await fetchWithSameOriginRedirects(
       `${getCanonicalServerUrl()}/mcp`,
       { body, headers: headers(), signal },
     );
+
+    if (!callRes.ok) {
+      const text = await readBoundedErrorText(callRes).catch(() => "");
+      throw new Error(`MCP tools/call failed (${callRes.status}): ${text}`);
+    }
+
+    const callResult = await parseMcpResponse(callRes);
+
+    if (callResult.error) {
+      throw new Error(
+        `MCP error ${callResult.error.code}: ${truncateErrorText(callResult.error.message)}`,
+      );
+    }
+
+    const result = callResult.result;
+    if (result.isError === true) {
+      const errorText = joinTextContent(result.content, { bounded: true });
+      throw new Error(errorText || "MCP tool returned an error result.");
+    }
+
+    return joinTextContent(result.content);
   } catch (error) {
     if (
       signal.aborted ||
@@ -297,28 +333,9 @@ export async function callTool(name, args = {}) {
       throw new Error(`Memory request timed out after ${timeoutMs} ms.`);
     }
     throw error;
+  } finally {
+    clearTimeout(timeoutId);
   }
-
-  if (!callRes.ok) {
-    const text = await readBoundedErrorText(callRes).catch(() => "");
-    throw new Error(`MCP tools/call failed (${callRes.status}): ${text}`);
-  }
-
-  const callResult = await parseMcpResponse(callRes);
-
-  if (callResult.error) {
-    throw new Error(
-      `MCP error ${callResult.error.code}: ${truncateErrorText(callResult.error.message)}`,
-    );
-  }
-
-  const result = callResult.result;
-  if (result.isError === true) {
-    const errorText = joinTextContent(result.content, { bounded: true });
-    throw new Error(errorText || "MCP tool returned an error result.");
-  }
-
-  return joinTextContent(result.content);
 }
 
 async function fetchWithSameOriginRedirects(initialUrl, { body, headers, signal }) {
@@ -430,6 +447,15 @@ function truncateErrorText(value) {
 
 function sha256(value) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function deriveCredentialFingerprint(credential, kind) {
+  return scryptSync(
+    credential,
+    `allenlim-memory-server:${kind}-destination:v1`,
+    CREDENTIAL_FINGERPRINT_BYTES,
+    CREDENTIAL_FINGERPRINT_SCRYPT_OPTIONS,
+  ).toString("hex");
 }
 
 /**

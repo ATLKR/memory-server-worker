@@ -418,8 +418,19 @@ test("destination fingerprints partition server, auth identity, and JWT scope", 
   process.env.MEMORY_SERVER_URL = "https://memory.allenlim.net";
   process.env.MEMORY_API_KEY = "api-key-a";
   const apiKeyA = getMemoryDestinationFingerprint();
+  assert.equal(getMemoryDestinationFingerprint(), apiKeyA);
+  assert.equal(apiKeyA.includes("api-key-a"), false);
   process.env.MEMORY_SCOPE = "ignored-for-api-key";
   assert.equal(getMemoryDestinationFingerprint(), apiKeyA);
   process.env.MEMORY_API_KEY = "api-key-b";
   assert.notEqual(getMemoryDestinationFingerprint(), apiKeyA);
+
+  delete process.env.MEMORY_API_KEY;
+  delete process.env.MEMORY_SCOPE;
+  process.env.MEMORY_TOKEN = "opaque-jwt-credential-a";
+  const opaqueJwtA = getMemoryDestinationFingerprint();
+  assert.equal(getMemoryDestinationFingerprint(), opaqueJwtA);
+  assert.equal(opaqueJwtA.includes("opaque-jwt-credential-a"), false);
+  process.env.MEMORY_TOKEN = "opaque-jwt-credential-b";
+  assert.notEqual(getMemoryDestinationFingerprint(), opaqueJwtA);
 });
