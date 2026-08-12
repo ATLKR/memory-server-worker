@@ -1,6 +1,6 @@
 {
   "name": "memory-server-worker",
-  "version": "2.0.0",
+  "version": "2.1.0",
   "private": true,
   "description": "Personal persistent memory MCP server backed by Cloudflare Agent Memory.",
   "license": "MIT",
@@ -15,8 +15,9 @@
     "deploy": "npm -w memory-worker run deploy",
     "typecheck": "npm -w memory-worker run typecheck && npm -w memory-ui run typecheck && npm -w allenlim-memory-server run typecheck",
     "check": "npm run typecheck && npm run test && npm run build",
-    "test": "npm -w memory-worker run test && npm -w allenlim-memory-server run test && npm run test:artifact-verifier && npm run verify:plugins",
-    "test:artifact-verifier": "node --test .github/scripts/plugin-archive-entries.test.mjs",
+    "test": "npm -w memory-worker run test && npm -w memory-ui run test && npm -w allenlim-memory-server run test && npm run test:artifact-verifier && npm run verify:plugins",
+    "test:artifact-verifier": "node --test .github/scripts/*.test.mjs",
+    "build:plugin-artifact": "node .github/scripts/build-plugin-artifact.mjs",
     "verify:plugins": "node .github/scripts/verify-plugin-artifacts.mjs",
     "types": "npm -w memory-worker run types"
   },

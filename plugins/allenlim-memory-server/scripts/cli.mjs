@@ -18,11 +18,21 @@
  *
  * Environment:
  *   MEMORY_SERVER_URL  — worker URL (defaults to https://memory.allenlim.net)
+ *   MEMORY_API_KEY     — API key (takes precedence over JWT credentials)
  *   MEMORY_TOKEN       — JWT bearer token (overrides credential file; for CI/headless)
  *   MEMORY_SCOPE       — scope header (optional)
+ *   MEMORY_REQUEST_TIMEOUT_MS — request timeout in milliseconds (default 10000)
  */
 
-import { memory, saveCredentials, getCurrentUser, isLoggedIn, logout, readStdin } from "./lib.mjs";
+import {
+  getAuthenticationMode,
+  getCurrentUser,
+  isLoggedIn,
+  logout,
+  memory,
+  readStdin,
+  saveCredentials,
+} from "./lib.mjs";
 
 function parseArgs(argv) {
   const args = argv.slice(2);
@@ -131,7 +141,11 @@ function handleLogout() {
 
 function handleWhoami() {
   if (!isLoggedIn()) {
-    console.log("Not authenticated. Run `mem login` to sign in.");
+    console.log("Not authenticated. Set MEMORY_API_KEY or run `mem login` to sign in.");
+    return;
+  }
+  if (getAuthenticationMode() === "api-key") {
+    console.log("Authenticated with MEMORY_API_KEY.");
     return;
   }
   const user = getCurrentUser();

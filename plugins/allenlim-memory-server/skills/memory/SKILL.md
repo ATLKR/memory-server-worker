@@ -9,7 +9,8 @@ You have access to a personal persistent memory system. Memories are stored in
 [Cloudflare Agent Memory](https://developers.cloudflare.com/agent-memory/) —
 a managed service with automatic extraction, classification, deduplication,
 supersession, and hybrid search (keyword + semantic + topic key).
-Authentication is via Allen Labs SSO (JWT/JWKS).
+Authentication uses either a server-issued API key or Allen Labs SSO
+(JWT/JWKS). API keys are suitable for CI, services, and headless automation.
 
 ## How it works
 
@@ -73,9 +74,22 @@ Override with the `MEMORY_SERVER_URL` environment variable if needed.
 Credentials are stored in `~/.memory/credentials.json` after `mem login`.
 For CI/headless use, set `MEMORY_TOKEN` to a JWT directly.
 
+For API-key authentication, set `MEMORY_API_KEY`. It takes precedence over
+`MEMORY_TOKEN` and stored SSO credentials. In API-key mode, the client sends
+only `x-memory-api-key`; it does not send `Authorization` or `x-memory-scope`.
+The server determines the memory profile and permissions associated with the
+key, so `MEMORY_SCOPE` applies only to JWT authentication.
+
+Set `MEMORY_REQUEST_TIMEOUT_MS` to change the per-request timeout. It defaults
+to 10 seconds and is clamped to 100-60000 milliseconds.
+
 ## Tips
 
 - Memories are scoped to your user ID (JWT `sub`) by default.
+- With API-key auth, memories are scoped to the profile assigned to the key.
+- Claude transcript capture is incremental. Privacy-preserving checkpoints
+  under `~/.memory/transcript-checkpoints/` contain hashes and byte offsets,
+  never transcript paths, conversation content, session IDs, or credentials.
 - Agent Memory automatically classifies memories as **fact**, **event**,
   **instruction**, or **task**.
 - If a newer fact/instruction replaces an older one on the same topic, the

@@ -5,6 +5,7 @@ import { validateExactArchiveEntries } from "./plugin-archive-entries.mjs";
 
 const expectedFiles = [
   ".codex-plugin/plugin.json",
+  "LICENSE",
   "skills/capture/SKILL.md",
   "skills/recall/SKILL.md",
   "skills/remember/SKILL.md",

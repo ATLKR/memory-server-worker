@@ -23,9 +23,9 @@ Plus integration packages:
 - **`distributions/chatgpt/allenlim-memory-server`** — ChatGPT-compatible
   alternate distribution.
 
-Current release: **2.0.0**. This major release crosses the Agents/MCP SDK
-breaking dependency boundary while preserving stateless compatibility for
-published 2025 clients. Reinstall the plugin after updating.
+Current release: **2.1.0**. This release adds operator-mapped API keys,
+HttpOnly browser sessions, incremental capture checkpoints, and security and
+release hardening on top of the Agents/MCP SDK 2.0 migration.
 
 ## Architecture
 
@@ -46,9 +46,15 @@ memory.allenlim.net (UI Worker — TanStack Start)
     Cloudflare Agent Memory (namespace: "memory")
 ```
 
-Auth: SSO via Allen Labs central auth server (`auth-api.allen.company`).
-The client sends an RS256 JWT as `Authorization: Bearer <jwt>`. The worker
-verifies the JWT against the auth server's JWKS endpoint.
+Auth supports Allen Labs SSO and operator-provisioned API keys. CLI/MCP clients
+send an RS256 JWT as `Authorization: Bearer <jwt>` or a high-entropy key as
+`x-memory-api-key`. Browser SSO uses a Secure, HttpOnly session cookie that is
+accepted only on same-origin `/api/*` requests and never on `/mcp`.
+
+API-key plaintext belongs in a secret manager such as Proton Pass. The Worker
+receives only a SHA-256 digest registry in the `MEMORY_API_KEY_REGISTRY` secret;
+each entry maps a key to one fixed user identity and optional logical scope.
+Callers cannot override an API key's scope.
 
 Every profile is isolated by the authenticated JWT subject. An optional
 `x-memory-scope` value creates a logical sub-scope that is SHA-256-bound to
@@ -170,6 +176,9 @@ mem delete-session my-session-id
 # Summary and stats
 mem summary
 mem stats
+
+# Headless/automation use (resolve this from a secret manager)
+MEMORY_API_KEY="..." mem stats
 ```
 
 ## Configuration
@@ -179,8 +188,10 @@ mem stats
 | Variable | Description | Default |
 |----------|-------------|---------|
 | `MEMORY_SERVER_URL` | Worker URL | `https://memory.allenlim.net` |
+| `MEMORY_API_KEY` | API key for headless automation; takes precedence over JWT auth | — |
 | `MEMORY_TOKEN` | JWT bearer token (overrides credential file) | — |
-| `MEMORY_SCOPE` | Optional logical sub-scope within the authenticated user | — |
+| `MEMORY_SCOPE` | Optional JWT logical sub-scope; ignored for API-key auth | — |
+| `MEMORY_REQUEST_TIMEOUT_MS` | Plugin request timeout, clamped to 100–60000 ms | `10000` |
 
 ### Wrangler bindings (backend)
 
@@ -197,6 +208,15 @@ mem stats
 }
 ```
 
+Provision `MEMORY_API_KEY_REGISTRY` with `wrangler secret put`; never place the
+registry or API-key plaintext in `wrangler.jsonc`, `.dev.vars`, source control,
+shell history, or command arguments. The registry is versioned JSON containing
+digest-only entries:
+
+```json
+{"version":1,"keys":[{"id":"automation","digest":"sha256:<64-lowercase-hex>","userId":"<stable-user-id>"}]}
+```
+
 ## Development
 
 ```bash
@@ -205,6 +225,9 @@ npm install
 
 # Run all type checks, tests, and production builds
 npm run check
+
+# Rebuild the deterministic ChatGPT plugin ZIP + SHA-256 checksum
+npm run build:plugin-artifact
 
 # Build backend
 cd packages/memory-worker && npx tsc --noEmit
@@ -238,6 +261,7 @@ codex plugin add allenlim-memory-server@allenlim-plugins
 
 Release versions are synchronized across workspace packages, Codex, Claude,
 Devin, ChatGPT manifests, marketplace metadata, and the packaged ZIP.
+Tagged releases additionally publish the ZIP, checksum, and a CycloneDX SBOM.
 
 ## License
 

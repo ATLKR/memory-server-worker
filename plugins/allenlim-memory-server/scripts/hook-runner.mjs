@@ -10,13 +10,40 @@
  * it never blocks the conversation.
  */
 
-import { readFileSync } from "node:fs";
-import { memory, readStdin, isTokenExpired } from "./lib.mjs";
+import { createHash, randomBytes } from "node:crypto";
+import {
+  closeSync,
+  fstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+import {
+  getMemoryDestinationFingerprint,
+  isTokenExpired,
+  memory,
+  readStdin,
+} from "./lib.mjs";
 
 const MAX_INGEST_MESSAGES = 100;
 const MAX_INGEST_MESSAGE_BYTES = 32 * 1024;
 const MAX_INGEST_TOTAL_BYTES = 1024 * 1024;
 const MAX_SEARCH_QUERY_BYTES = 1024;
+const TRANSCRIPT_READ_CHUNK_BYTES = 64 * 1024;
+const MAX_TRANSCRIPT_RECORD_BYTES = 1024 * 1024;
+const CHECKPOINT_ANCHOR_BYTES = 64;
+const CHECKPOINT_VERSION = 1;
+const CHECKPOINT_LOCK_ATTEMPTS = 100;
+const CHECKPOINT_LOCK_RETRY_MS = 10;
+const CHECKPOINT_LOCK_STALE_MS = 30_000;
 
 export async function runHook(hookName) {
   switch (hookName) {
@@ -109,8 +136,48 @@ async function runPostTurn() {
     process.exit(0);
   }
 
+  const sessionId = hookInput.session_id
+    ? String(hookInput.session_id).slice(0, 64)
+    : undefined;
+
+  // Claude transcripts are append-only JSONL in normal operation. Read only
+  // bytes not acknowledged by a previous successful ingest so Stop hooks stay
+  // fast even for long sessions. Any failure remains fail-open and leaves the
+  // checkpoint unchanged for a safe retry.
+  let incrementalIngestAttempted = false;
+  let incrementalFallback = false;
+  if (
+    typeof hookInput.transcript_path === "string" &&
+    hookInput.transcript_path &&
+    !transcriptStartsWithJsonArray(hookInput.transcript_path)
+  ) {
+    try {
+      await ingestTranscriptIncrementally(hookInput.transcript_path, {
+        ingest: async (params) => {
+          incrementalIngestAttempted = true;
+          return memory.ingest(params);
+        },
+        sessionId,
+      });
+      process.exit(0);
+    } catch {
+      console.error(
+        incrementalIngestAttempted
+          ? "[allenlim-memory-server:post-turn] Could not process the transcript; it will be retried."
+          : "[allenlim-memory-server:post-turn] Could not process the transcript incrementally; using direct hook messages when available.",
+      );
+      // If an incremental server request was already attempted, do not send a
+      // second overlapping fallback payload. Filesystem/setup failures that
+      // happened before any request can still use the hook's direct messages.
+      if (incrementalIngestAttempted) process.exit(0);
+      incrementalFallback = true;
+    }
+  }
+
   // Extract conversation messages from whichever format we received.
-  const messages = extractMessages(hookInput);
+  const messages = extractMessages(hookInput, {
+    includeTranscript: !incrementalFallback,
+  });
 
   if (messages.length === 0) {
     process.exit(0);
@@ -127,9 +194,7 @@ async function runPostTurn() {
   try {
     await memory.ingest({
       messages: trimmedMessages,
-      sessionId: hookInput.session_id
-        ? String(hookInput.session_id).slice(0, 64)
-        : undefined,
+      sessionId,
     });
   } catch (err) {
     if (isTokenExpired()) {
@@ -148,9 +213,9 @@ async function runPostTurn() {
  * Extract conversation messages from various hook input formats.
  * Returns an array of { role, content } objects.
  */
-export function extractMessages(hookInput) {
+export function extractMessages(hookInput, { includeTranscript = true } = {}) {
   // Format 1: Claude Code with transcript_path
-  if (hookInput.transcript_path) {
+  if (includeTranscript && hookInput.transcript_path) {
     try {
       const transcript = parseTranscript(
         readFileSync(hookInput.transcript_path, "utf8"),
@@ -205,6 +270,422 @@ export function extractMessages(hookInput) {
   }
 
   return [];
+}
+
+function transcriptStartsWithJsonArray(transcriptPath) {
+  let file;
+  try {
+    file = openSync(transcriptPath, "r");
+    const prefix = Buffer.alloc(4 * 1024);
+    const bytesRead = readSync(file, prefix, 0, prefix.length, 0);
+    return prefix
+      .subarray(0, bytesRead)
+      .toString("utf8")
+      .trimStart()
+      .startsWith("[");
+  } catch {
+    return false;
+  } finally {
+    if (file !== undefined) closeSync(file);
+  }
+}
+
+/**
+ * Incrementally ingest a Claude JSONL transcript.
+ *
+ * Checkpoints contain only hashed source/file identifiers, a byte offset, and
+ * a hash of the bytes immediately before that offset. They never contain the
+ * transcript path, transcript content, session identifiers, or credentials.
+ * Message offsets are persisted only after their batch is accepted. Complete
+ * malformed/non-message/oversized rows are acknowledged without a retry loop.
+ */
+export async function ingestTranscriptIncrementally(
+  transcriptPath,
+  {
+    checkpointDir = join(homedir(), ".memory", "transcript-checkpoints"),
+    destinationFingerprint = getMemoryDestinationFingerprint(),
+    ingest = (params) => memory.ingest(params),
+    sessionId,
+  } = {},
+) {
+  const canonicalPath = realpathSync.native(transcriptPath);
+  const sourceId = getCheckpointSourceId(
+    canonicalPath,
+    destinationFingerprint,
+  );
+  const checkpointPath = join(checkpointDir, `${sourceId}.json`);
+  mkdirSync(checkpointDir, { recursive: true, mode: 0o700 });
+
+  const file = openSync(canonicalPath, "r");
+  try {
+    const stat = fstatSync(file);
+    const fileId = getFileId(stat);
+    const fileSize = stat.size;
+    const checkpoint = loadCheckpoint(checkpointPath);
+    const startOffset = isCheckpointCurrent(
+      checkpoint,
+      { sourceId, fileId, fileSize },
+      file,
+    )
+      ? checkpoint.offset
+      : 0;
+
+    let position = startOffset;
+    let lineChunks = [];
+    let lineBytes = 0;
+    let discardingOversizedRecord = false;
+    let batch = [];
+    let batchBytes = 0;
+    let processedOffset = startOffset;
+    let checkpointAttemptedOffset = startOffset;
+    let ingestedMessages = 0;
+    let ingestedBatches = 0;
+
+    const commitProcessed = async () => {
+      if (processedOffset <= checkpointAttemptedOffset) return;
+      const value = {
+        version: CHECKPOINT_VERSION,
+        sourceId,
+        fileId,
+        offset: processedOffset,
+        anchor: readAnchor(file, processedOffset),
+      };
+      await commitCheckpoint(checkpointPath, value, {
+        canonicalPath,
+        transcriptPath,
+      });
+      checkpointAttemptedOffset = processedOffset;
+    };
+
+    const flush = async () => {
+      if (batch.length > 0) {
+        const messages = batch;
+        await ingest({ messages, sessionId });
+        ingestedMessages += messages.length;
+        ingestedBatches += 1;
+        batch = [];
+        batchBytes = 0;
+      }
+      await commitProcessed();
+    };
+
+    const queueRecord = async (
+      recordBytes,
+      endOffset,
+      { completeRecord },
+    ) => {
+      const line = stripTrailingCarriageReturn(recordBytes).toString("utf8");
+      if (!line.trim()) {
+        processedOffset = endOffset;
+        return;
+      }
+
+      let record;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        // Newline-terminated malformed records can never become valid later,
+        // so acknowledge them. A bounded incomplete tail remains pending.
+        if (completeRecord) processedOffset = endOffset;
+        return;
+      }
+
+      const message = normalizeConversationRecords([record])[0];
+      if (!message) {
+        processedOffset = endOffset;
+        return;
+      }
+
+      const content = truncateUtf8(message.content, MAX_INGEST_MESSAGE_BYTES);
+      if (!content) {
+        processedOffset = endOffset;
+        return;
+      }
+      const contentBytes = Buffer.byteLength(content, "utf8");
+
+      if (
+        batch.length >= MAX_INGEST_MESSAGES ||
+        batchBytes + contentBytes > MAX_INGEST_TOTAL_BYTES
+      ) {
+        await flush();
+      }
+
+      batch.push({ role: message.role, content });
+      batchBytes += contentBytes;
+      processedOffset = endOffset;
+    };
+
+    while (position < fileSize) {
+      const requested = Math.min(
+        TRANSCRIPT_READ_CHUNK_BYTES,
+        fileSize - position,
+      );
+      const chunk = Buffer.allocUnsafe(requested);
+      const chunkStart = position;
+      const bytesRead = readSync(file, chunk, 0, requested, position);
+      if (bytesRead === 0) break;
+      position += bytesRead;
+
+      let cursor = 0;
+      let newline;
+      while ((newline = chunk.indexOf(0x0a, cursor)) !== -1) {
+        const segment = chunk.subarray(cursor, newline);
+        const endOffset = chunkStart + newline + 1;
+
+        if (discardingOversizedRecord) {
+          processedOffset = endOffset;
+        } else if (
+          lineBytes + segment.length > MAX_TRANSCRIPT_RECORD_BYTES
+        ) {
+          processedOffset = endOffset;
+        } else {
+          if (segment.length > 0) {
+            lineChunks.push(segment);
+            lineBytes += segment.length;
+          }
+          const recordBytes = materializeLine(lineChunks, lineBytes);
+          await queueRecord(recordBytes, endOffset, { completeRecord: true });
+        }
+
+        lineChunks = [];
+        lineBytes = 0;
+        discardingOversizedRecord = false;
+        cursor = newline + 1;
+      }
+
+      const tail = chunk.subarray(cursor, bytesRead);
+      if (
+        !discardingOversizedRecord &&
+        lineBytes + tail.length > MAX_TRANSCRIPT_RECORD_BYTES
+      ) {
+        lineChunks = [];
+        lineBytes = 0;
+        discardingOversizedRecord = true;
+      } else if (!discardingOversizedRecord && tail.length > 0) {
+        lineChunks.push(tail);
+        lineBytes += tail.length;
+      }
+    }
+
+    // A valid JSON object at EOF is a complete record even if the producer has
+    // not written its trailing newline yet. A bounded invalid tail is retained
+    // for a future append. An oversized tail is intentionally acknowledged so
+    // it cannot cause an unbounded retry loop.
+    if (discardingOversizedRecord) {
+      processedOffset = fileSize;
+    } else if (lineBytes > 0) {
+      await queueRecord(materializeLine(lineChunks, lineBytes), fileSize, {
+        completeRecord: false,
+      });
+    }
+
+    await flush();
+    return {
+      batches: ingestedBatches,
+      messages: ingestedMessages,
+      startOffset,
+    };
+  } finally {
+    closeSync(file);
+  }
+}
+
+/** Return the privacy-preserving checkpoint path for a transcript. */
+export function getTranscriptCheckpointPath(
+  transcriptPath,
+  checkpointDir = join(homedir(), ".memory", "transcript-checkpoints"),
+  destinationFingerprint = getMemoryDestinationFingerprint(),
+) {
+  const sourceId = getCheckpointSourceId(
+    realpathSync.native(transcriptPath),
+    destinationFingerprint,
+  );
+  return join(checkpointDir, `${sourceId}.json`);
+}
+
+function getCheckpointSourceId(canonicalPath, destinationFingerprint) {
+  // Hash the destination again before combining it with the canonical path so
+  // even an injected/raw test identity can never appear in the checkpoint.
+  const destinationId = sha256(String(destinationFingerprint));
+  return sha256(`${canonicalPath}\0${destinationId}`);
+}
+
+function loadCheckpoint(checkpointPath) {
+  try {
+    const value = JSON.parse(readFileSync(checkpointPath, "utf8"));
+    if (
+      value?.version !== CHECKPOINT_VERSION ||
+      !/^[a-f0-9]{64}$/.test(value.sourceId) ||
+      !/^[a-f0-9]{64}$/.test(value.fileId) ||
+      !Number.isSafeInteger(value.offset) ||
+      value.offset < 0 ||
+      (value.anchor !== null && !/^[a-f0-9]{64}$/.test(value.anchor))
+    ) {
+      return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
+
+function isCheckpointCurrent(checkpoint, fileMetadata, file) {
+  if (!checkpoint) return false;
+  if (
+    checkpoint.sourceId !== fileMetadata.sourceId ||
+    checkpoint.fileId !== fileMetadata.fileId ||
+    checkpoint.offset > fileMetadata.fileSize
+  ) {
+    return false;
+  }
+
+  try {
+    return checkpoint.anchor === readAnchor(file, checkpoint.offset);
+  } catch {
+    return false;
+  }
+}
+
+function readAnchor(file, offset) {
+  if (offset === 0) return null;
+  const length = Math.min(CHECKPOINT_ANCHOR_BYTES, offset);
+  const bytes = Buffer.allocUnsafe(length);
+  const bytesRead = readSync(file, bytes, 0, length, offset - length);
+  if (bytesRead !== length) {
+    throw new Error("Could not verify transcript checkpoint anchor.");
+  }
+  return sha256(bytes);
+}
+
+async function commitCheckpoint(
+  checkpointPath,
+  value,
+  { canonicalPath, transcriptPath },
+) {
+  return withCheckpointLock(checkpointPath, () => {
+    const stillCurrent = () =>
+      isTranscriptCommitCurrent(transcriptPath, canonicalPath, value);
+    if (!stillCurrent()) return false;
+
+    const current = loadCheckpoint(checkpointPath);
+    if (
+      current?.sourceId === value.sourceId &&
+      current.fileId === value.fileId &&
+      current.offset >= value.offset &&
+      isTranscriptCommitCurrent(transcriptPath, canonicalPath, current)
+    ) {
+      return false;
+    }
+
+    return saveCheckpoint(checkpointPath, value, stillCurrent);
+  });
+}
+
+async function withCheckpointLock(checkpointPath, operation) {
+  const lockPath = `${checkpointPath}.lock`;
+  let lock;
+
+  for (let attempt = 0; attempt < CHECKPOINT_LOCK_ATTEMPTS; attempt += 1) {
+    try {
+      lock = openSync(lockPath, "wx", 0o600);
+      break;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      removeStaleCheckpointLock(lockPath);
+      await new Promise((resolve) =>
+        setTimeout(resolve, CHECKPOINT_LOCK_RETRY_MS),
+      );
+    }
+  }
+
+  if (lock === undefined) {
+    throw new Error("Could not acquire the transcript checkpoint lock.");
+  }
+
+  try {
+    return operation();
+  } finally {
+    try {
+      closeSync(lock);
+    } finally {
+      try {
+        unlinkSync(lockPath);
+      } catch {
+        // Another process can only create the next lock after this unlink.
+      }
+    }
+  }
+}
+
+function removeStaleCheckpointLock(lockPath) {
+  try {
+    if (Date.now() - statSync(lockPath).mtimeMs > CHECKPOINT_LOCK_STALE_MS) {
+      unlinkSync(lockPath);
+    }
+  } catch {
+    // The owner may have released the lock between the failed open and stat.
+  }
+}
+
+function isTranscriptCommitCurrent(transcriptPath, canonicalPath, value) {
+  let currentFile;
+  try {
+    if (realpathSync.native(transcriptPath) !== canonicalPath) return false;
+    currentFile = openSync(transcriptPath, "r");
+    const stat = fstatSync(currentFile);
+    if (getFileId(stat) !== value.fileId || stat.size < value.offset) {
+      return false;
+    }
+    return readAnchor(currentFile, value.offset) === value.anchor;
+  } catch {
+    return false;
+  } finally {
+    if (currentFile !== undefined) closeSync(currentFile);
+  }
+}
+
+function getFileId(stat) {
+  return sha256(
+    `${String(stat.dev)}:${String(stat.ino)}:${String(stat.birthtimeMs)}`,
+  );
+}
+
+function saveCheckpoint(checkpointPath, value, stillCurrent) {
+  const temporaryPath = `${checkpointPath}.${process.pid}.${randomBytes(12).toString("hex")}.tmp`;
+  let renamed = false;
+  try {
+    writeFileSync(temporaryPath, `${JSON.stringify(value)}\n`, {
+      encoding: "utf8",
+      flag: "w",
+      mode: 0o600,
+    });
+    if (!stillCurrent()) return false;
+    renameSync(temporaryPath, checkpointPath);
+    renamed = true;
+    return true;
+  } finally {
+    if (!renamed) {
+      try {
+        unlinkSync(temporaryPath);
+      } catch {
+        // Best-effort cleanup; the temporary file contains metadata only.
+      }
+    }
+  }
+}
+
+function materializeLine(chunks, length) {
+  if (chunks.length === 0) return Buffer.alloc(0);
+  if (chunks.length === 1) return chunks[0];
+  return Buffer.concat(chunks, length);
+}
+
+function stripTrailingCarriageReturn(bytes) {
+  return bytes.at(-1) === 0x0d ? bytes.subarray(0, -1) : bytes;
+}
+
+function sha256(value) {
+  return createHash("sha256").update(value).digest("hex");
 }
 
 /**

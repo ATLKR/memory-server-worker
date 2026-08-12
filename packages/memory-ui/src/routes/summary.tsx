@@ -4,6 +4,7 @@ import { api, type SummaryResponse } from "~/lib/api";
 import { useAuthSession } from "~/lib/use-auth-session";
 
 export const Route = createFileRoute("/summary")({
+  head: () => ({ meta: [{ title: "Memory summary — Allen Labs" }] }),
   component: SummaryComponent,
 });
 
@@ -11,6 +12,7 @@ function SummaryComponent() {
   const [summary, setSummary] = useState<SummaryResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [revision, setRevision] = useState(0);
   const { ready, loggedIn } = useAuthSession();
   const requestGeneration = useRef(0);
 
@@ -49,7 +51,7 @@ function SummaryComponent() {
       controller.abort();
       if (generation === requestGeneration.current) requestGeneration.current += 1;
     };
-  }, [loggedIn]);
+  }, [loggedIn, revision]);
 
   if (!ready) return <div className="loading" role="status">Checking session…</div>;
 
@@ -70,7 +72,18 @@ function SummaryComponent() {
       </div>
 
       {loading && <div className="loading" role="status">Loading…</div>}
-      {error && <div className="error" role="alert">{error}</div>}
+      {error && (
+        <div className="error" role="alert">
+          <p>{error}</p>
+          <button
+            type="button"
+            className="btn btn-sm btn-secondary"
+            onClick={() => setRevision((value) => value + 1)}
+          >
+            Try again
+          </button>
+        </div>
+      )}
       {summary && (
         <div className="memory-detail-content">
           <pre>{summary.summary}</pre>

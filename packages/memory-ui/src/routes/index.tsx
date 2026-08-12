@@ -5,11 +5,13 @@ import {
   type MemoryListItem,
   type MemoryType,
   type StatsResponse,
-  type SearchResponse,
 } from "~/lib/api";
+import { useDebouncedSearch } from "~/lib/use-debounced-search";
 import { useAuthSession } from "~/lib/use-auth-session";
+import { MAX_SEARCH_QUERY_BYTES, utf8ByteLength } from "~/lib/validation";
 
 export const Route = createFileRoute("/")({
+  head: () => ({ meta: [{ title: "Memories — Allen Labs" }] }),
   component: HomeComponent,
 });
 
@@ -20,19 +22,11 @@ const TYPE_COLORS: Record<MemoryType, string> = {
   task: "type-task",
 };
 
-const MAX_SEARCH_QUERY_BYTES = 1024;
-
-function utf8ByteLength(value: string): number {
-  return new TextEncoder().encode(value).byteLength;
-}
-
 function HomeComponent() {
   const [memories, setMemories] = useState<MemoryListItem[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
-  const [searchResult, setSearchResult] = useState<SearchResponse | null>(null);
   const [listLoading, setListLoading] = useState(false);
-  const [searching, setSearching] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const { ready, loggedIn } = useAuthSession();
@@ -43,23 +37,22 @@ function HomeComponent() {
   const typeFilterRef = useRef(typeFilter);
   const listRequestId = useRef(0);
   const listAbortController = useRef<AbortController | null>(null);
-  const searchRequestId = useRef(0);
-  const searchAbortController = useRef<AbortController | null>(null);
   const statsRequestId = useRef(0);
-  const loading = listLoading || searching;
   const queryBytes = utf8ByteLength(query);
   const queryTooLarge = queryBytes > MAX_SEARCH_QUERY_BYTES;
+  const {
+    result: searchResult,
+    searching,
+    error: searchError,
+    retry: retrySearch,
+  } = useDebouncedSearch(query, loggedIn && !queryTooLarge);
+  const loading = listLoading || searching;
+  const visibleError = searchError ?? error;
 
   const invalidateListRequest = useCallback(() => {
     listRequestId.current += 1;
     listAbortController.current?.abort();
     listAbortController.current = null;
-  }, []);
-
-  const invalidateSearchRequest = useCallback(() => {
-    searchRequestId.current += 1;
-    searchAbortController.current?.abort();
-    searchAbortController.current = null;
   }, []);
 
   const loadMemories = useCallback(async () => {
@@ -144,46 +137,6 @@ function HomeComponent() {
     }
   }, [cursor, loading, loadingMore, typeFilter]);
 
-  const doSearch = useCallback(async (q: string) => {
-    searchAbortController.current?.abort();
-    const controller = new AbortController();
-    searchAbortController.current = controller;
-    const requestId = ++searchRequestId.current;
-    if (!q.trim()) {
-      searchAbortController.current = null;
-      if (mountedRef.current) {
-        setSearchResult(null);
-        setSearching(false);
-      }
-      return;
-    }
-    setSearching(true);
-    setError(null);
-    try {
-      const data = await api.search(q, undefined, controller.signal);
-      if (
-        mountedRef.current &&
-        !controller.signal.aborted &&
-        requestId === searchRequestId.current &&
-        q === queryRef.current
-      ) {
-        setSearchResult(data);
-      }
-    } catch (err) {
-      if (controller.signal.aborted || (err instanceof Error && err.name === "AbortError")) {
-        return;
-      }
-      if (mountedRef.current && requestId === searchRequestId.current) {
-        setError(err instanceof Error ? err.message : "Search failed");
-      }
-    } finally {
-      if (requestId === searchRequestId.current) {
-        searchAbortController.current = null;
-        if (mountedRef.current) setSearching(false);
-      }
-    }
-  }, []);
-
   const refreshStats = useCallback(async () => {
     const requestId = ++statsRequestId.current;
     try {
@@ -201,10 +154,9 @@ function HomeComponent() {
     return () => {
       mountedRef.current = false;
       invalidateListRequest();
-      invalidateSearchRequest();
       statsRequestId.current += 1;
     };
-  }, [invalidateListRequest, invalidateSearchRequest]);
+  }, [invalidateListRequest]);
 
   useEffect(() => {
     if (!loggedIn) return;
@@ -222,22 +174,6 @@ function HomeComponent() {
     return invalidateListRequest;
   }, [loggedIn, loadMemories, query, invalidateListRequest]);
 
-  useEffect(() => {
-    if (!loggedIn || !query.trim() || queryTooLarge) {
-      invalidateSearchRequest();
-      setSearchResult(null);
-      setSearching(false);
-      return;
-    }
-    const timer = setTimeout(() => {
-      void doSearch(query);
-    }, 400);
-    return () => {
-      clearTimeout(timer);
-      invalidateSearchRequest();
-    };
-  }, [query, queryTooLarge, loggedIn, doSearch, invalidateSearchRequest]);
-
   const handleDelete = async (id: string) => {
     if (!confirm(`Delete this memory?`)) return;
     try {
@@ -245,7 +181,7 @@ function HomeComponent() {
       if (!mountedRef.current) return;
       setMemories((prev) => prev.filter((m) => m.id !== id));
       const currentQuery = queryRef.current;
-      if (currentQuery.trim()) void doSearch(currentQuery);
+      if (currentQuery.trim()) retrySearch();
       void refreshStats();
     } catch (err) {
       if (mountedRef.current) {
@@ -341,8 +277,8 @@ function HomeComponent() {
             const nextQuery = e.target.value;
             if (nextQuery === queryRef.current) return;
             queryRef.current = nextQuery;
-            invalidateSearchRequest();
             if (nextQuery.trim()) invalidateListRequest();
+            setError(null);
             setQuery(nextQuery);
           }}
           className="search-input"
@@ -372,7 +308,18 @@ function HomeComponent() {
         </div>
       )}
 
-      {error && <div className="error" role="alert">{error}</div>}
+      {visibleError && (
+        <div className="error" role="alert">
+          <p>{visibleError}</p>
+          <button
+            type="button"
+            className="btn btn-sm btn-secondary"
+            onClick={() => query.trim() ? retrySearch() : void loadMemories()}
+          >
+            Try again
+          </button>
+        </div>
+      )}
       {loading && <div className="loading" role="status" aria-live="polite">Loading…</div>}
 
       {!loading && displayItems.length === 0 && (

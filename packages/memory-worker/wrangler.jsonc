@@ -1,6 +1,7 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "memory-server",
+  "account_id": "9f9fdfcfb6371183304908c2de94513d",
   "compatibility_date": "2026-08-10",
   // nodejs_compat is required by the Agents SDK (Durable Object durability +
   // node:async_hooks for Cloudflare AsyncLocalStorage context) and by jose
@@ -10,7 +11,14 @@
   "main": "src/index.ts",
   "observability": {
     "enabled": true,
-    "head_sampling_rate": 1
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 0.01
+    }
   },
 
   // Keep the workers.dev subdomain active — the UI worker proxies to this.
@@ -35,6 +43,14 @@
   // supersession, hybrid search (keyword + semantic), and synthesis.
   // The namespace "memory" was created via:
   //   npx wrangler agent-memory namespace create memory
+  // API-key authentication reads the MEMORY_API_KEY_REGISTRY Worker secret.
+  // `secrets.required` exposes only its name to typegen/local validation;
+  // provision its value interactively and never add that value here:
+  //   npx wrangler secret put MEMORY_API_KEY_REGISTRY
+  "secrets": {
+    "required": ["MEMORY_API_KEY_REGISTRY"]
+  },
+
   "agent_memory": [
     {
       "binding": "MEMORY",

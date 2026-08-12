@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import { describe, it } from "node:test";
 import {
   CLIENT_CAPABILITIES_META_KEY,
@@ -31,12 +32,30 @@ import {
   handleSkillsList,
   hasSkills,
 } from "./skills.ts";
+import { resolveProfileName } from "./security.ts";
 
 const MCP_URL = "https://memory.allenlim.net/mcp";
 const LEGACY_PROTOCOL_VERSION = "2025-11-25";
 const MODERN_PROTOCOL_VERSION = "2026-07-28";
 const TEST_AUTHORIZATION = "Bearer plugin-regression-token";
 const TEST_SCOPE = "codex-plugin-regression";
+
+// Node 24 lacks the Workers-only SubtleCrypto extension used in production.
+if (typeof crypto.subtle.timingSafeEqual !== "function") {
+  Object.defineProperty(crypto.subtle, "timingSafeEqual", {
+    configurable: true,
+    value: (left: ArrayBuffer | ArrayBufferView, right: ArrayBuffer | ArrayBufferView) => {
+      const leftBytes = ArrayBuffer.isView(left)
+        ? new Uint8Array(left.buffer, left.byteOffset, left.byteLength)
+        : new Uint8Array(left);
+      const rightBytes = ArrayBuffer.isView(right)
+        ? new Uint8Array(right.buffer, right.byteOffset, right.byteLength)
+        : new Uint8Array(right);
+      return leftBytes.byteLength === rightBytes.byteLength &&
+        nodeTimingSafeEqual(leftBytes, rightBytes);
+    },
+  });
+}
 
 type JsonRpcResponse = {
   jsonrpc: "2.0";
@@ -233,6 +252,42 @@ async function sha256(text: string): Promise<string> {
   return `sha256:${Array.from(bytes, (byte) =>
     byte.toString(16).padStart(2, "0"),
   ).join("")}`;
+}
+
+async function apiKeyRegistry(
+  key: string,
+  options: { userId?: string; logicalScope?: string } = {},
+): Promise<string> {
+  return JSON.stringify({
+    version: 1,
+    keys: [{
+      id: "worker-test",
+      digest: await sha256(key),
+      userId: options.userId ?? "worker-api-user",
+      ...(options.logicalScope
+        ? { logicalScope: options.logicalScope }
+        : {}),
+    }],
+  });
+}
+
+function apiKeyEnv(
+  registry: string,
+  resolvedProfiles: string[],
+  profile: Record<string, unknown> = {},
+): Env {
+  return {
+    AUTH_API_URL: "https://auth.example.test",
+    AUTH_WEB_URL: "https://auth.example.test",
+    DEFAULT_SCOPE: "jwt-default-scope",
+    MEMORY_API_KEY_REGISTRY: registry,
+    MEMORY: {
+      getProfile(profileName: string) {
+        resolvedProfiles.push(profileName);
+        return profile;
+      },
+    },
+  } as Env;
 }
 
 describe("MCP v2 runtime", () => {
@@ -511,6 +566,7 @@ describe("MCP CORS contract", () => {
           "access-control-request-headers": [
             "authorization",
             "content-type",
+            "x-memory-api-key",
             "x-memory-scope",
             "mcp-protocol-version",
             "mcp-method",
@@ -531,6 +587,7 @@ describe("MCP CORS contract", () => {
       "authorization",
       "content-type",
       "accept",
+      "x-memory-api-key",
       "x-memory-scope",
       "mcp-protocol-version",
       "mcp-method",
@@ -544,6 +601,7 @@ describe("MCP CORS contract", () => {
     assert.ok(exposed.has("mcp-session-id"));
     assert.ok(exposed.has("mcp-protocol-version"));
     assert.ok(exposed.has("www-authenticate"));
+    assert.ok(exposed.has("x-request-id"));
   });
 
   it("rejects an unapproved browser Origin in the v2 wrapper", async () => {
@@ -586,5 +644,124 @@ describe("MCP CORS contract", () => {
       /Bearer resource_metadata=/,
     );
     assert.equal(response.headers.get("access-control-allow-origin"), "*");
+  });
+});
+
+describe("Worker API key authentication", () => {
+  const apiUrl = "https://memory.allenlim.net/api/not-found";
+  const validKey = "memory_worker_test_0123456789abcdef";
+
+  it("accepts either API-key header and uses only the registry-fixed scope", async () => {
+    const registry = await apiKeyRegistry(validKey, {
+      userId: "service-user",
+      logicalScope: "automation",
+    });
+    const expectedProfile = await resolveProfileName("service-user", "automation");
+
+    for (const headers of [
+      { "x-memory-api-key": validKey },
+      { authorization: `ApiKey ${validKey}` },
+    ]) {
+      const profiles: string[] = [];
+      const response = await worker.fetch(
+        new Request(apiUrl, { headers }),
+        apiKeyEnv(registry, profiles),
+        {} as ExecutionContext,
+      );
+
+      assert.equal(response.status, 404);
+      assert.deepEqual(profiles, [expectedProfile]);
+    }
+  });
+
+  it("uses the personal profile when the registry has no logical scope", async () => {
+    const userId = "2ce0b53f-f7c0-4cee-a150-dd2616213d8f";
+    const registry = await apiKeyRegistry(validKey, { userId });
+    const profiles: string[] = [];
+    const response = await worker.fetch(
+      new Request(apiUrl, { headers: { "x-memory-api-key": validKey } }),
+      apiKeyEnv(registry, profiles),
+      {} as ExecutionContext,
+    );
+
+    assert.equal(response.status, 404);
+    assert.deepEqual(profiles, [await resolveProfileName(userId, null)]);
+  });
+
+  it("authorizes a real REST operation with the resolved profile", async () => {
+    const registry = await apiKeyRegistry(validKey, {
+      userId: "service-user",
+      logicalScope: "reporting",
+    });
+    const profiles: string[] = [];
+    const profile = {
+      async list() {
+        return {
+          memories: [
+            { type: "fact" },
+            { type: "fact" },
+            { type: "task" },
+          ],
+          cursor: null,
+        };
+      },
+    };
+    const response = await worker.fetch(
+      new Request("https://memory.allenlim.net/api/stats", {
+        headers: { "x-memory-api-key": validKey },
+      }),
+      apiKeyEnv(registry, profiles, profile),
+      {} as ExecutionContext,
+    );
+
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), {
+      total: 3,
+      byType: { fact: 2, task: 1 },
+      truncated: false,
+    });
+    assert.deepEqual(profiles, [
+      await resolveProfileName("service-user", "reporting"),
+    ]);
+  });
+
+  it("rejects wrong and malformed API keys", async () => {
+    const registry = await apiKeyRegistry(validKey);
+    for (const key of [
+      "memory_worker_wrong_0123456789abcdef",
+      "short",
+      `${validKey} invalid`,
+    ]) {
+      const profiles: string[] = [];
+      const response = await worker.fetch(
+        new Request(apiUrl, { headers: { "x-memory-api-key": key } }),
+        apiKeyEnv(registry, profiles),
+        {} as ExecutionContext,
+      );
+
+      assert.equal(response.status, 401);
+      assert.deepEqual(profiles, []);
+    }
+  });
+
+  it("rejects API-key scope overrides and API-key/JWT ambiguity", async () => {
+    const registry = await apiKeyRegistry(validKey, { logicalScope: "fixed" });
+    for (const headers of [
+      { "x-memory-api-key": validKey, "x-memory-scope": "fixed" },
+      {
+        "x-memory-api-key": validKey,
+        authorization: "Bearer should-not-take-precedence",
+      },
+    ]) {
+      const profiles: string[] = [];
+      const response = await worker.fetch(
+        new Request(apiUrl, { headers }),
+        apiKeyEnv(registry, profiles),
+        {} as ExecutionContext,
+      );
+
+      assert.equal(response.status, 401);
+      assert.deepEqual(profiles, []);
+    }
   });
 });
