@@ -39,8 +39,8 @@ assert.equal(
   "Claude marketplace plugin name drift",
 );
 assert.equal(
-  marketplace.plugins[0]?.source?.subpath,
-  "plugins/allenlim-memory-server",
+  marketplace.plugins[0]?.source,
+  "./plugins/allenlim-memory-server",
   "Claude marketplace plugin path drift",
 );
 assert.equal(
