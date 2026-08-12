@@ -22,6 +22,7 @@ const TYPE_COLORS: Record<MemoryType, string> = {
 
 function HomeComponent() {
   const [memories, setMemories] = useState<MemoryListItem[]>([]);
+  const [cursor, setCursor] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [searchResult, setSearchResult] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
@@ -39,12 +40,28 @@ function HomeComponent() {
         type: typeFilter || undefined,
       });
       setMemories(data.memories);
+      setCursor(data.cursor);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
     } finally {
       setLoading(false);
     }
   }, [typeFilter]);
+
+  const loadMore = useCallback(async () => {
+    if (!cursor) return;
+    try {
+      const data = await api.list({
+        limit: 100,
+        type: typeFilter || undefined,
+        cursor,
+      });
+      setMemories((prev) => [...prev, ...data.memories]);
+      setCursor(data.cursor);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Failed to load more");
+    }
+  }, [cursor, typeFilter]);
 
   const doSearch = useCallback(async (q: string) => {
     if (!q.trim()) {
@@ -181,8 +198,8 @@ function HomeComponent() {
           <div key={m.id} className="memory-card">
             <div className="memory-card-header">
               <Link
-                to="/memory/$key"
-                params={{ key: m.id }}
+                to="/memory/$id"
+                params={{ id: m.id }}
                 className="memory-key"
               >
                 {m.summary}
@@ -210,6 +227,14 @@ function HomeComponent() {
           </div>
         ))}
       </div>
+
+      {!searchResult && cursor && (
+        <div className="load-more">
+          <button className="btn btn-secondary" onClick={loadMore}>
+            Load More
+          </button>
+        </div>
+      )}
     </div>
   );
 }

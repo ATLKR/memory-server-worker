@@ -2,12 +2,12 @@ import { createFileRoute, useNavigate, useParams } from "@tanstack/react-router"
 import { useState, useEffect, useCallback } from "react";
 import { api, isLoggedIn, type MemoryEntry } from "~/lib/api";
 
-export const Route = createFileRoute("/memory/$key")({
+export const Route = createFileRoute("/memory/$id")({
   component: MemoryDetailComponent,
 });
 
 function MemoryDetailComponent() {
-  const { key } = useParams({ from: "/memory/$key" });
+  const { id } = useParams({ from: "/memory/$id" });
   const navigate = useNavigate();
   const [memory, setMemory] = useState<MemoryEntry | null>(null);
   const [loading, setLoading] = useState(true);
@@ -18,14 +18,14 @@ function MemoryDetailComponent() {
     setLoading(true);
     setError(null);
     try {
-      const entry = await api.get(key);
+      const entry = await api.get(id);
       setMemory(entry);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load");
     } finally {
       setLoading(false);
     }
-  }, [key]);
+  }, [id]);
 
   useEffect(() => {
     if (loggedIn) loadMemory();

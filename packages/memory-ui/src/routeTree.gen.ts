@@ -12,7 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as NewRouteImport } from './routes/new'
 import { Route as SummaryRouteImport } from './routes/summary'
-import { Route as MemoryKeyRouteImport } from './routes/memory.$key'
+import { Route as MemoryIdRouteImport } from './routes/memory.$id'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -29,9 +29,9 @@ const SummaryRoute = SummaryRouteImport.update({
   path: '/summary',
   getParentRoute: () => rootRouteImport,
 } as any)
-const MemoryKeyRoute = MemoryKeyRouteImport.update({
-  id: '/memory/$key',
-  path: '/memory/$key',
+const MemoryIdRoute = MemoryIdRouteImport.update({
+  id: '/memory/$id',
+  path: '/memory/$id',
   getParentRoute: () => rootRouteImport,
 } as any)
 
@@ -39,34 +39,34 @@ export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/new': typeof NewRoute
   '/summary': typeof SummaryRoute
-  '/memory/$key': typeof MemoryKeyRoute
+  '/memory/$id': typeof MemoryIdRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/new': typeof NewRoute
   '/summary': typeof SummaryRoute
-  '/memory/$key': typeof MemoryKeyRoute
+  '/memory/$id': typeof MemoryIdRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/new': typeof NewRoute
   '/summary': typeof SummaryRoute
-  '/memory/$key': typeof MemoryKeyRoute
+  '/memory/$id': typeof MemoryIdRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/new' | '/summary' | '/memory/$key'
+  fullPaths: '/' | '/new' | '/summary' | '/memory/$id'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/new' | '/summary' | '/memory/$key'
-  id: '__root__' | '/' | '/new' | '/summary' | '/memory/$key'
+  to: '/' | '/new' | '/summary' | '/memory/$id'
+  id: '__root__' | '/' | '/new' | '/summary' | '/memory/$id'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   NewRoute: typeof NewRoute
   SummaryRoute: typeof SummaryRoute
-  MemoryKeyRoute: typeof MemoryKeyRoute
+  MemoryIdRoute: typeof MemoryIdRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -92,11 +92,11 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SummaryRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/memory/$key': {
-      id: '/memory/$key'
-      path: '/memory/$key'
-      fullPath: '/memory/$key'
-      preLoaderRoute: typeof MemoryKeyRouteImport
+    '/memory/$id': {
+      id: '/memory/$id'
+      path: '/memory/$id'
+      fullPath: '/memory/$id'
+      preLoaderRoute: typeof MemoryIdRouteImport
       parentRoute: typeof rootRouteImport
     }
   }
@@ -106,7 +106,7 @@ const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   NewRoute: NewRoute,
   SummaryRoute: SummaryRoute,
-  MemoryKeyRoute: MemoryKeyRoute,
+  MemoryIdRoute: MemoryIdRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

@@ -380,8 +380,8 @@ function createServer(env: Env, scope: string): McpServer {
       outputSchema: memoryEntryOutputShape,
     },
     async (params) => {
-      const profile = await getProfile(env, scope);
       try {
+        const profile = await getProfile(env, scope);
         const memory = await profile.get(params.id);
         const entry: MemoryEntry = {
           id: memory.id,
@@ -416,8 +416,8 @@ function createServer(env: Env, scope: string): McpServer {
       outputSchema: deleteOutputShape,
     },
     async (params) => {
-      const profile = await getProfile(env, scope);
       try {
+        const profile = await getProfile(env, scope);
         await profile.delete(params.id);
         const result = { deleted: true };
         return {

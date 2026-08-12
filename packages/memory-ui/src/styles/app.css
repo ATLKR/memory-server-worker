@@ -297,14 +297,6 @@ a:hover {
   text-decoration: none;
 }
 
-.memory-namespace {
-  font-size: 0.8rem;
-  color: var(--text-muted);
-  background: var(--bg);
-  padding: 0.15rem 0.5rem;
-  border-radius: var(--radius);
-}
-
 .memory-content {
   color: var(--text);
   white-space: pre-wrap;
@@ -458,15 +450,13 @@ a:hover {
   line-height: 1.5;
 }
 
-.detail-tags {
-  display: flex;
-  gap: 0.4rem;
-  flex-wrap: wrap;
+.detail-metadata {
   margin-bottom: 1rem;
 }
 
-.detail-metadata {
-  margin-bottom: 1rem;
+.load-more {
+  text-align: center;
+  padding: 1rem;
 }
 
 .detail-metadata h3 {

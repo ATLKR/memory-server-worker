@@ -5,7 +5,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "node scripts/cli.mjs hook pre-prompt",
+          "command": "npx mem hook pre-prompt",
           "timeout": 15
         }
       ]
@@ -17,7 +17,7 @@
       "hooks": [
         {
           "type": "command",
-          "command": "node scripts/cli.mjs hook post-turn",
+          "command": "npx mem hook post-turn",
           "timeout": 15
         }
       ]

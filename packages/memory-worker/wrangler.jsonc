@@ -35,21 +35,6 @@
       "binding": "MEMORY",
       "namespace": "memory"
     }
-  ],
-
-  // Migration: delete the old MemoryAgent Durable Object class.
-  // The system has migrated from DO-backed SQLite to Cloudflare Agent Memory.
-  // This removes the DO class; existing DO data (1 entry) will be orphaned
-  // but can be re-added via memory_add.
-  "migrations": [
-    {
-      "tag": "v1",
-      "new_sqlite_classes": ["MemoryAgent"]
-    },
-    {
-      "tag": "v2",
-      "deleted_classes": ["MemoryAgent"]
-    }
   ]
 
   // No custom domain — the UI worker (memory.allenlim.net) proxies API
