@@ -280,6 +280,30 @@ async function apiKeyRegistry(
   });
 }
 
+async function credentialRegistry(
+  entries: Array<{
+    id: string;
+    credential: string;
+    kind: "api-key" | "pat";
+    userId?: string;
+    logicalScope?: string;
+    permissions?: Array<"read" | "write" | "delete">;
+    expiresAt?: string;
+    disabledAt?: string;
+  }>,
+): Promise<string> {
+  return JSON.stringify({
+    version: 3,
+    keys: await Promise.all(entries.map(async ({ credential, ...entry }) => ({
+      ...entry,
+      digest: await sha256(credential),
+      userId: entry.userId ?? "worker-credential-user",
+      permissions: entry.permissions ?? ["read", "write", "delete"],
+      expiresAt: entry.expiresAt ?? "2099-01-01T00:00:00Z",
+    }))),
+  });
+}
+
 function apiKeyEnv(
   registry: string,
   resolvedProfiles: string[],
@@ -811,6 +835,185 @@ describe("Worker API key authentication", () => {
         }),
       }),
       apiKeyEnv(registry, profiles),
+      {} as ExecutionContext,
+    );
+    assert.equal(mcp.status, 200);
+    assert.match(JSON.stringify(await parseJsonRpc(mcp)), /delete permission/);
+    assert.deepEqual(profiles, []);
+  });
+});
+
+describe("Worker personal access token authentication", () => {
+  const pat = `memory_pat_${"A".repeat(43)}`;
+  const apiKey = "memory_worker_v3_api_key_0123456789abcdef";
+
+  it("uses a version-3 Bearer PAT for real REST and MCP operations", async () => {
+    const registry = await credentialRegistry([{
+      id: "headless-pat",
+      credential: pat,
+      kind: "pat",
+      userId: "pat-user",
+      logicalScope: "headless",
+      permissions: ["read"],
+    }]);
+    const profiles: string[] = [];
+    let listCalls = 0;
+    const env = apiKeyEnv(registry, profiles, {
+      async list() {
+        listCalls += 1;
+        return {
+          memories: [{ type: "fact" }, { type: "task" }],
+          cursor: null,
+        };
+      },
+    });
+    // PAT authentication is registry-local and must remain available for
+    // approval-free/headless use even when the OAuth issuer is unavailable.
+    env.AUTH_API_URL = "";
+
+    const rest = await worker.fetch(
+      new Request("https://memory.allenlim.net/api/stats", {
+        headers: { authorization: `Bearer ${pat}` },
+      }),
+      env,
+      {} as ExecutionContext,
+    );
+    assert.equal(rest.status, 200);
+    assert.deepEqual(await rest.json(), {
+      total: 2,
+      byType: { fact: 1, task: 1 },
+      truncated: false,
+    });
+
+    const mcp = await worker.fetch(
+      new Request("https://memory.allenlim.net/mcp", {
+        method: "POST",
+        headers: {
+          host: "memory.allenlim.net",
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${pat}`,
+          "content-type": "application/json",
+          "mcp-protocol-version": LEGACY_PROTOCOL_VERSION,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "memory_stats", arguments: {} },
+        }),
+      }),
+      env,
+      {} as ExecutionContext,
+    );
+    assert.equal(mcp.status, 200);
+    const rpc = await parseJsonRpc(mcp);
+    assert.equal(rpc.error, undefined);
+    assert.match(JSON.stringify(rpc), /"total":2/);
+    assert.equal(listCalls, 2);
+    assert.deepEqual(profiles, [
+      await resolveProfileName("pat-user", "headless"),
+      await resolveProfileName("pat-user", "headless"),
+    ]);
+
+    const session = await worker.fetch(
+      new Request("https://memory.allenlim.net/api/session", {
+        headers: { authorization: `Bearer ${pat}` },
+      }),
+      env,
+      {} as ExecutionContext,
+    );
+    assert.equal(session.status, 200);
+    assert.deepEqual(await session.json(), {
+      authenticated: true,
+      authMode: "pat",
+      user: { id: "headless-pat", email: null, name: null },
+      expiresAt: null,
+      permissions: ["read"],
+      refreshable: false,
+    });
+  });
+
+  it("rejects cross-scheme, mixed, malformed, and scope-overridden credentials", async (t) => {
+    t.mock.method(console, "error", () => undefined);
+    const registry = await credentialRegistry([
+      {
+        id: "pat",
+        credential: pat,
+        kind: "pat",
+        permissions: ["read"],
+      },
+      {
+        id: "api-key",
+        credential: apiKey,
+        kind: "api-key",
+        permissions: ["read"],
+      },
+    ]);
+
+    for (const headers of [
+      { "x-memory-api-key": pat },
+      { authorization: `ApiKey ${pat}` },
+      { authorization: `Bearer ${apiKey}` },
+      { authorization: "Bearer memory_pat_too-short" },
+      { authorization: `Bearer ${pat}`, "x-memory-scope": "override" },
+      { authorization: `Bearer ${pat}`, "x-memory-api-key": apiKey },
+    ]) {
+      const profiles: string[] = [];
+      const env = apiKeyEnv(registry, profiles);
+      env.AUTH_API_URL = "";
+      const response = await worker.fetch(
+        new Request("https://memory.allenlim.net/api/stats", { headers }),
+        env,
+        {} as ExecutionContext,
+      );
+      assert.equal(response.status, 401);
+      assert.deepEqual(profiles, []);
+    }
+  });
+
+  it("enforces PAT permissions before REST or MCP profile access", async () => {
+    const registry = await credentialRegistry([{
+      id: "read-only-pat",
+      credential: pat,
+      kind: "pat",
+      permissions: ["read"],
+    }]);
+    const profiles: string[] = [];
+    const env = apiKeyEnv(registry, profiles);
+
+    const rest = await worker.fetch(
+      new Request("https://memory.allenlim.net/api/memories", {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${pat}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ content: "must not be written" }),
+      }),
+      env,
+      {} as ExecutionContext,
+    );
+    assert.equal(rest.status, 403);
+    assert.match(rest.headers.get("www-authenticate") ?? "", /memory:write/);
+
+    const mcp = await worker.fetch(
+      new Request("https://memory.allenlim.net/mcp", {
+        method: "POST",
+        headers: {
+          host: "memory.allenlim.net",
+          accept: "application/json, text/event-stream",
+          authorization: `Bearer ${pat}`,
+          "content-type": "application/json",
+          "mcp-protocol-version": LEGACY_PROTOCOL_VERSION,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "memory_delete", arguments: { id: "memory-id" } },
+        }),
+      }),
+      env,
       {} as ExecutionContext,
     );
     assert.equal(mcp.status, 200);

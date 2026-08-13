@@ -21,7 +21,7 @@ import {
 } from "./hook-runner.mjs";
 
 const originalMemoryApiKey = process.env.MEMORY_API_KEY;
-process.env.MEMORY_API_KEY = "hook-runner-test-api-key";
+process.env.MEMORY_API_KEY = "hook-runner-test-api-key-0123456789";
 after(() => {
   if (originalMemoryApiKey === undefined) delete process.env.MEMORY_API_KEY;
   else process.env.MEMORY_API_KEY = originalMemoryApiKey;

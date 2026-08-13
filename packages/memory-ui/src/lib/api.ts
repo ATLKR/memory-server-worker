@@ -62,7 +62,7 @@ export interface SessionUser {
   name: string | null;
 }
 
-export type AuthMode = "session" | "jwt" | "api-key";
+export type AuthMode = "session" | "jwt" | "api-key" | "pat";
 
 export interface AuthenticatedSession {
   authenticated: true;
@@ -130,7 +130,7 @@ export function parseSessionResponse(value: unknown): AuthenticatedSession | nul
   const session = value as Record<string, unknown>;
   if (
     session.authenticated !== true ||
-    !["session", "jwt", "api-key"].includes(String(session.authMode)) ||
+    !["session", "jwt", "api-key", "pat"].includes(String(session.authMode)) ||
     !isSessionUser(session.user) ||
     !(
       session.expiresAt === undefined ||

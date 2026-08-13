@@ -25,10 +25,10 @@ Plus integration packages:
 - **`distributions/chatgpt/allenlim-memory-server`** — ChatGPT-compatible
   alternate distribution.
 
-Current release: **3.0.1**. The 3.0 release line binds OAuth access tokens to
-the Memory resource, adds rotating 30-day refresh sessions, introduces
-least-privilege API-key registry v2, and hardens every browser and plugin
-credential path.
+Current release: **3.1.0**. This release adds approval-free API-key and PAT
+authentication for command-line clients, a Proton Pass-backed stdio bridge,
+and scheme-bound credential registry v3 while retaining the resource-bound
+OAuth and rotating 30-day session model from 3.0.
 
 ## Architecture
 
@@ -49,18 +49,20 @@ memory.allenlim.net (UI Worker — TanStack Start)
     Cloudflare Agent Memory (namespace: "memory")
 ```
 
-Auth supports Allen Labs SSO and operator-provisioned API keys. CLI/MCP clients
-send a short-lived, resource-bound RS256 JWT as `Authorization: Bearer <jwt>`
-or a high-entropy key as `x-memory-api-key`. Browser SSO keeps the 15-minute
+Auth supports Allen Labs SSO, operator-provisioned API keys, and personal
+access tokens (PATs). CLI/MCP clients send a short-lived, resource-bound RS256
+JWT or a `memory_pat_...` PAT as `Authorization: Bearer <credential>`, or a
+high-entropy API key as `x-memory-api-key`. Browser SSO keeps the 15-minute
 access token and rotating refresh token in separate Secure, HttpOnly,
 host-bound cookies. The UI refreshes proactively and after an eligible 401;
 the renewable session has a 30-day absolute lifetime. Browser cookies are
 accepted only on same-origin `/api/*` requests and never on `/mcp`.
 
-API-key plaintext belongs in a secret manager such as Proton Pass. The Worker
+API-key and PAT plaintext credentials belong in a secret manager such as
+Proton Pass. The Worker
 receives only a SHA-256 digest registry in the `MEMORY_API_KEY_REGISTRY` secret;
-each entry maps a key to one fixed user identity and optional logical scope.
-Callers cannot override an API key's scope.
+each entry maps one credential to a fixed user identity, permissions, and
+optional logical scope. Callers cannot override an API key's or PAT's scope.
 
 Every profile is isolated by the authenticated JWT subject. An optional
 `x-memory-scope` value creates a logical sub-scope that is SHA-256-bound to
@@ -174,7 +176,20 @@ token are written atomically to `~/.memory/credentials.json` with owner-only
 permissions.
 
 ```bash
-# Login (opens browser for SSO)
+# Browser-free one-shot use: pass-cli resolves the URI only in the child env.
+MEMORY_PAT='pass://Development/Memory Server PAT - personal CLI - 2026-08-13/password' \
+MEMORY_SERVER_URL='https://memory.allenlim.net' pass-cli run -- mem stats
+
+# Optional persistent setup: pipe exactly one secret line from a secret manager.
+# The secret is read from stdin, never argv, and stored owner-only.
+secret-manager-command | mem auth set --api-key-stdin
+secret-manager-command | mem auth set --pat-stdin
+
+# Inspect or clear local authentication without printing the secret
+mem auth status
+mem auth unset
+
+# Optional SSO login (opens browser)
 mem login
 
 # Store a memory
@@ -203,6 +218,7 @@ mem stats
 
 # Headless/automation use (resolve this from a secret manager)
 MEMORY_API_KEY="..." mem stats
+MEMORY_PAT="memory_pat_..." mem stats
 ```
 
 ## Configuration
@@ -213,9 +229,10 @@ MEMORY_API_KEY="..." mem stats
 |----------|-------------|---------|
 | `MEMORY_SERVER_URL` | Worker URL; HTTPS required except for loopback development | `https://memory.allenlim.net` |
 | `MEMORY_AUTH_API_URL` | OAuth issuer URL; HTTPS required except for loopback development | `https://auth-api.allen.company` |
-| `MEMORY_API_KEY` | API key for headless automation; takes precedence over JWT auth | — |
+| `MEMORY_API_KEY` | API key for headless automation; mutually exclusive with `MEMORY_PAT` and overrides stored/OAuth auth | — |
+| `MEMORY_PAT` | PAT for browser-free personal CLI auth; mutually exclusive with `MEMORY_API_KEY` and overrides stored/OAuth auth | — |
 | `MEMORY_TOKEN` | JWT bearer token (overrides credential file) | — |
-| `MEMORY_SCOPE` | Optional JWT logical sub-scope; ignored for API-key auth | — |
+| `MEMORY_SCOPE` | Optional JWT logical sub-scope; ignored for API-key and PAT auth | — |
 | `MEMORY_REQUEST_TIMEOUT_MS` | Plugin request timeout, clamped to 100–60000 ms | `10000` |
 
 ### Client behavior
@@ -224,18 +241,26 @@ MEMORY_API_KEY="..." mem stats
   plugin supplies recall/capture skills. There is no local Claude-style hook.
 - **Claude Code:** `hooks/hooks.json` runs `UserPromptSubmit` recall and `Stop`
   capture. The hooks fail open if Memory is temporarily unavailable.
-- **Devin:** the `.devin-plugin` package supplies reusable skills only. Add and
-  authenticate the remote MCP explicitly:
+- **Devin:** configure the bundled authenticated stdio bridge. Store only the
+  Proton Pass URI in Devin's MCP configuration; `pass-cli run` resolves the PAT
+  in the child process environment, so browser approval and `devin mcp login`
+  are unnecessary:
 
-  ```sh
-  devin mcp add --scope user allenlim-memory-server https://memory.allenlim.net/mcp --oauth-resource https://memory.allenlim.net
-  devin mcp login allenlim-memory-server --scopes openid,profile,email,offline_access,memory:read,memory:write,memory:delete --oauth-resource https://memory.allenlim.net
+  ```json
+  {
+    "command": "pass-cli",
+    "args": ["run", "--", "memory-mcp-stdio"],
+    "env": {
+      "MEMORY_PAT": "pass://Development/Memory Server PAT - personal CLI - 2026-08-13/password",
+      "MEMORY_SERVER_URL": "https://memory.allenlim.net",
+      "PROTON_PASS_AGENT_REASON": "Use personal Memory MCP without browser approval"
+    }
+  }
   ```
 
-  OAuth is preferred for a personal session and supports automatic refresh.
-  For shared/headless use, keep an API key in Devin Secrets and send it as
-  `x-memory-api-key`; do not paste it into the plugin manifest or a shell
-  command. Devin does not consume this bundle's Claude hooks.
+  The PAT exists only in `memory-mcp-stdio`'s child environment and is never
+  printed. The same bridge also supports `MEMORY_API_KEY`. Devin does not
+  consume this bundle's Claude hooks.
 
 ### Wrangler bindings (backend)
 
@@ -253,19 +278,20 @@ MEMORY_API_KEY="..." mem stats
 ```
 
 Provision `MEMORY_API_KEY_REGISTRY` with `wrangler secret put`; never place the
-registry or API-key plaintext in `wrangler.jsonc`, `.dev.vars`, source control,
+registry or credential plaintext in `wrangler.jsonc`, `.dev.vars`, source control,
 shell history, or command arguments. The registry is versioned JSON containing
 digest-only entries:
 
 ```json
-{"version":2,"keys":[{"id":"automation","digest":"sha256:<64-lowercase-hex>","userId":"<stable-user-id>","permissions":["read","write","delete"],"expiresAt":"2027-08-13T00:00:00Z"}]}
+{"version":3,"keys":[{"id":"personal-cli","kind":"pat","digest":"sha256:<64-lowercase-hex>","userId":"<stable-user-id>","permissions":["read","write","delete"],"expiresAt":"2027-08-13T00:00:00Z"}]}
 ```
 
-Version 2 requires an explicit non-empty subset of `read`, `write`, and
-`delete`, plus an RFC 3339 expiry for every key. An optional `disabledAt`
-timestamp schedules revocation. The legacy version-1 shape is accepted
-temporarily with historical full access so production can migrate without
-downtime; do not create new version-1 registries.
+Version 3 additionally requires `kind: "api-key"` or `kind: "pat"`, preventing
+cross-scheme replay. It also requires an explicit non-empty subset of `read`,
+`write`, and `delete`, plus an RFC 3339 expiry. PAT plaintext must be
+`memory_pat_` followed by 43 base64url characters (32 random bytes). An
+optional `disabledAt` schedules revocation. Versions 1 and 2 remain accepted
+as API-key-only migration formats; do not create new registries in those forms.
 
 ## Development
 

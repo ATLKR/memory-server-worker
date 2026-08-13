@@ -15,6 +15,7 @@ const packageJson = JSON.parse(
 const originalFetch = globalThis.fetch;
 const managedEnvironment = [
   "MEMORY_API_KEY",
+  "MEMORY_PAT",
   "MEMORY_AUTH_API_URL",
   "MEMORY_REQUEST_TIMEOUT_MS",
   "MEMORY_SCOPE",
@@ -138,7 +139,7 @@ test("callTool parses an SSE tools/call response without another request", async
 });
 
 test("MEMORY_API_KEY takes precedence and omits JWT and scope headers", async () => {
-  process.env.MEMORY_API_KEY = "  api-secret  ";
+  process.env.MEMORY_API_KEY = "  api-secret-0123456789abcdef012345  ";
   process.env.MEMORY_SCOPE = "must-not-leak";
   const requests = captureSingleRequest(
     new Response(
@@ -154,9 +155,40 @@ test("MEMORY_API_KEY takes precedence and omits JWT and scope headers", async ()
   assert.equal(await callTool("memory_stats"), "ok");
 
   const requestHeaders = new Headers(requests[0].init.headers);
-  assert.equal(requestHeaders.get("x-memory-api-key"), "api-secret");
+  assert.equal(requestHeaders.get("x-memory-api-key"), "api-secret-0123456789abcdef012345");
   assert.equal(requestHeaders.get("authorization"), null);
   assert.equal(requestHeaders.get("x-memory-scope"), null);
+});
+
+test("MEMORY_PAT uses Bearer without JWT scope or API-key headers", async () => {
+  delete process.env.MEMORY_TOKEN;
+  process.env.MEMORY_PAT = `memory_pat_${"A".repeat(43)}`;
+  process.env.MEMORY_SCOPE = "must-not-leak";
+  const requests = captureSingleRequest(
+    new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { content: [{ type: "text", text: "ok" }] },
+      }),
+      { headers: { "content-type": "application/json" } },
+    ),
+  );
+
+  assert.equal(await callTool("memory_stats"), "ok");
+  const requestHeaders = new Headers(requests[0].init.headers);
+  assert.equal(
+    requestHeaders.get("authorization"),
+    `Bearer ${process.env.MEMORY_PAT}`,
+  );
+  assert.equal(requestHeaders.get("x-memory-api-key"), null);
+  assert.equal(requestHeaders.get("x-memory-scope"), null);
+});
+
+test("conflicting API-key and PAT environment credentials fail closed", async () => {
+  process.env.MEMORY_API_KEY = "a".repeat(43);
+  process.env.MEMORY_PAT = `memory_pat_${"B".repeat(43)}`;
+  await assert.rejects(callTool("memory_stats"), /Set only one/);
 });
 
 test("JWT auth sends a dynamic optional memory scope", async () => {
@@ -274,7 +306,7 @@ test("cross-origin redirects never receive API-key or JWT credentials", async ()
       process.env.MEMORY_TOKEN = jwtFor("redirect-user", "redirect-test-jwt");
       process.env.MEMORY_SCOPE = "private-scope";
       if (authMode === "api-key") {
-        process.env.MEMORY_API_KEY = "redirect-test-api-key";
+        process.env.MEMORY_API_KEY = "redirect-test-api-key-0123456789abcdef";
       } else {
         delete process.env.MEMORY_API_KEY;
       }
@@ -304,7 +336,7 @@ test("cross-origin redirects never receive API-key or JWT credentials", async ()
       if (authMode === "api-key") {
         assert.equal(
           requestHeaders.get("x-memory-api-key"),
-          "redirect-test-api-key",
+          "redirect-test-api-key-0123456789abcdef",
         );
         assert.equal(requestHeaders.get("authorization"), null);
         assert.equal(requestHeaders.get("x-memory-scope"), null);
@@ -430,16 +462,22 @@ test("destination fingerprints partition server, auth identity, and JWT scope", 
   assert.notEqual(getMemoryDestinationFingerprint(), first);
 
   process.env.MEMORY_SERVER_URL = "https://memory.allenlim.net";
-  process.env.MEMORY_API_KEY = "api-key-a";
+  process.env.MEMORY_API_KEY = "api-key-a-0123456789abcdef01234567";
   const apiKeyA = getMemoryDestinationFingerprint();
   assert.equal(getMemoryDestinationFingerprint(), apiKeyA);
   assert.equal(apiKeyA.includes("api-key-a"), false);
   process.env.MEMORY_SCOPE = "ignored-for-api-key";
   assert.equal(getMemoryDestinationFingerprint(), apiKeyA);
-  process.env.MEMORY_API_KEY = "api-key-b";
+  process.env.MEMORY_API_KEY = "api-key-b-0123456789abcdef01234567";
   assert.notEqual(getMemoryDestinationFingerprint(), apiKeyA);
 
   delete process.env.MEMORY_API_KEY;
+  process.env.MEMORY_PAT = `memory_pat_${"C".repeat(43)}`;
+  const pat = getMemoryDestinationFingerprint();
+  assert.notEqual(pat, apiKeyA);
+  assert.equal(pat.includes("memory_pat_"), false);
+
+  delete process.env.MEMORY_PAT;
   delete process.env.MEMORY_SCOPE;
   process.env.MEMORY_TOKEN = jwtFor("another-user", "credential-a");
   assert.notEqual(getMemoryDestinationFingerprint(), first);
@@ -457,7 +495,7 @@ test("successful JSON and SSE responses are bounded", async () => {
 });
 
 test("service URLs require HTTPS except for loopback development", async () => {
-  process.env.MEMORY_API_KEY = "test-key";
+  process.env.MEMORY_API_KEY = "test-key-0123456789abcdef012345678";
   process.env.MEMORY_SERVER_URL = "http://example.com";
   await assert.rejects(callTool("memory_stats"), /must use HTTPS/);
 

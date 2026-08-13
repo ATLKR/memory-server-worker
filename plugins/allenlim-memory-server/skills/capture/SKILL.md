@@ -79,6 +79,7 @@ memory_add({
 - Claude Stop hooks capture only complete, previously unacknowledged JSONL
   records. A checkpoint advances after each successful ingest batch, so a
   timeout or server failure is retried without skipping later messages.
-- Configure `MEMORY_API_KEY` for API-key auth, or use the plugin CLI login for
-  a renewable 30-day OAuth session. `MEMORY_TOKEN` is a non-renewable JWT
-  override. API-key auth takes precedence and does not send JWT scope.
+- Configure `MEMORY_API_KEY` for service auth or `MEMORY_PAT` for browser-free
+  personal auth. `mem auth set --api-key-stdin|--pat-stdin` can store either
+  without argv exposure. OAuth remains available for a renewable 30-day
+  session; `MEMORY_TOKEN` is a non-renewable JWT override.

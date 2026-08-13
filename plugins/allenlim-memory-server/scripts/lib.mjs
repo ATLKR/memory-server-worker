@@ -5,13 +5,14 @@
  * All requests go over HTTP to the deployed (or local) Worker's /mcp route
  * using the MCP "tools/call" JSON-RPC method.
  *
- * Auth: an API key from MEMORY_API_KEY, or an RS256 JWT obtained through the
- * Allen Labs auth server SSO flow. API-key auth takes precedence and is sent
- * only as x-memory-api-key. JWT auth uses Authorization: Bearer <jwt>.
+ * Auth: an API key, a personal access token (PAT), or an RS256 JWT obtained
+ * through the Allen Labs auth server SSO flow. API keys are sent only as
+ * x-memory-api-key. PATs and JWTs use Authorization: Bearer <credential>.
  *
  * Configuration via environment variables:
  *   MEMORY_SERVER_URL  — base URL of the worker (defaults to https://memory.allenlim.net)
- *   MEMORY_API_KEY     — API key (takes precedence over JWT credentials)
+ *   MEMORY_API_KEY     — API key (mutually exclusive with MEMORY_PAT)
+ *   MEMORY_PAT         — personal access token (mutually exclusive with API key)
  *   MEMORY_TOKEN       — JWT bearer token (overrides credential file; for CI/headless)
  *   MEMORY_SCOPE       — optional logical sub-scope within the authenticated user
  *   MEMORY_AUTH_API_URL — auth API URL for login (defaults to https://auth-api.allen.company)
@@ -40,10 +41,11 @@ import { dirname, join } from "node:path";
 import { homedir } from "node:os";
 
 const CREDENTIALS_PATH = join(homedir(), ".memory", "credentials.json");
+const SERVICE_CREDENTIAL_PATH = join(homedir(), ".memory", "service-credential.json");
 const CREDENTIALS_LOCK_PATH = join(homedir(), ".memory", "credentials.lock");
 const OAUTH_CLIENT_PATH = join(homedir(), ".memory", "oauth-client.json");
 
-const PLUGIN_VERSION = "3.0.1";
+const PLUGIN_VERSION = "3.1.0";
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const MIN_REQUEST_TIMEOUT_MS = 100;
 const MAX_REQUEST_TIMEOUT_MS = 60_000;
@@ -56,6 +58,8 @@ const MAX_CREDENTIALS_BYTES = 64 * 1024;
 const MAX_OAUTH_CLIENT_RECORD_BYTES = 8 * 1024;
 const MAX_OAUTH_CLIENT_ID_BYTES = 1024;
 const MAX_REFRESH_TOKEN_BYTES = 16 * 1024;
+const MAX_SERVICE_CREDENTIAL_RECORD_BYTES = 4 * 1024;
+const MAX_SERVICE_CREDENTIAL_BYTES = 512;
 const MAX_RESULT_TEXT_BYTES = MAX_SUCCESS_RESPONSE_BYTES;
 const TOKEN_REFRESH_BUFFER_MS = 5 * 60 * 1000;
 const OAUTH_CLIENT_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -79,6 +83,41 @@ const DESTINATION_FINGERPRINT_SCRYPT_OPTIONS = Object.freeze({
  */
 let TOKEN_EXPIRED = false;
 let refreshInFlight = null;
+
+function loadStoredServiceCredential() {
+  if (!existsSync(SERVICE_CREDENTIAL_PATH)) return null;
+  try {
+    const raw = readFileSync(SERVICE_CREDENTIAL_PATH, "utf8");
+    if (Buffer.byteLength(raw, "utf8") > MAX_SERVICE_CREDENTIAL_RECORD_BYTES) {
+      throw new Error("invalid service credential record");
+    }
+    const data = JSON.parse(raw);
+    if (
+      data?.version !== 1 ||
+      !["api-key", "pat"].includes(data.kind) ||
+      typeof data.credential !== "string" ||
+      typeof data.server !== "string" ||
+      Object.keys(data).some((key) =>
+        !["version", "kind", "credential", "server", "createdAt"].includes(key))
+    ) {
+      throw new Error("invalid service credential record");
+    }
+    const credential = validateServiceCredential(data.kind, data.credential);
+    if (data.server !== getCanonicalServerUrl()) {
+      throw new Error(
+        "Stored Memory service credential targets a different memory server. Clear or replace it before continuing.",
+      );
+    }
+    return { kind: data.kind, credential };
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("targets a different memory server")) {
+      throw error;
+    }
+    throw new Error(
+      "Stored Memory service credential is unreadable or invalid. Run `mem auth unset` and configure it again.",
+    );
+  }
+}
 
 function loadStoredCredentials() {
   try {
@@ -232,6 +271,68 @@ export async function saveCredentialsWithLock(token, expiresIn, user, refresh = 
   }
 }
 
+/**
+ * Persist one non-OAuth credential without placing it in argv or shell
+ * history. Callers should obtain the plaintext from stdin or a secret manager.
+ */
+export async function saveServiceCredentialWithLock(kind, credential) {
+  const normalized = validateServiceCredential(kind, credential);
+  const releaseLock = await acquireCredentialRefreshLock();
+  try {
+    const dir = dirname(SERVICE_CREDENTIAL_PATH);
+    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    restrictCredentialDirectoryPermissions(dir);
+    writePrivateJsonAtomically(
+      SERVICE_CREDENTIAL_PATH,
+      {
+        version: 1,
+        kind,
+        credential: normalized,
+        server: getCanonicalServerUrl(),
+        createdAt: new Date().toISOString(),
+      },
+      MAX_SERVICE_CREDENTIAL_RECORD_BYTES,
+      "Memory service credential",
+    );
+  } finally {
+    releaseLock();
+  }
+}
+
+/** Remove a locally stored API key or PAT. Environment variables are untouched. */
+export async function clearServiceCredentialWithLock() {
+  const releaseLock = await acquireCredentialRefreshLock();
+  try {
+    if (existsSync(SERVICE_CREDENTIAL_PATH)) unlinkSync(SERVICE_CREDENTIAL_PATH);
+  } finally {
+    releaseLock();
+  }
+}
+
+function validateServiceCredential(kind, credential) {
+  if (!["api-key", "pat"].includes(kind)) {
+    throw new Error("Memory credential kind must be api-key or pat.");
+  }
+  if (typeof credential !== "string") {
+    throw new Error("Memory credential is invalid.");
+  }
+  const normalized = credential.trim();
+  const byteLength = Buffer.byteLength(normalized, "utf8");
+  if (
+    byteLength < 32 ||
+    byteLength > MAX_SERVICE_CREDENTIAL_BYTES ||
+    !/^[\x21-\x7e]+$/.test(normalized)
+  ) {
+    throw new Error(
+      `Memory ${kind === "pat" ? "PAT" : "API key"} must be 32-${MAX_SERVICE_CREDENTIAL_BYTES} bytes of visible ASCII.`,
+    );
+  }
+  if (kind === "pat" && !/^memory_pat_[A-Za-z0-9_-]{43}$/.test(normalized)) {
+    throw new Error("Memory PAT must use the memory_pat_ prefix followed by 43 base64url characters.");
+  }
+  return normalized;
+}
+
 function restrictCredentialDirectoryPermissions(dir) {
   chmodSync(dir, 0o700);
   if (process.platform !== "win32") return;
@@ -305,7 +406,7 @@ export function getCurrentUser() {
  * Check if we have a valid (non-expired) token.
  */
 export function isLoggedIn() {
-  if (getApiKey()) {
+  if (getServiceAuthentication()) {
     TOKEN_EXPIRED = false;
     return true;
   }
@@ -315,9 +416,10 @@ export function isLoggedIn() {
 
 /** Return the active auth mode without exposing the credential itself. */
 export function getAuthenticationMode() {
-  if (getApiKey()) {
+  const serviceAuthentication = getServiceAuthentication();
+  if (serviceAuthentication) {
     TOKEN_EXPIRED = false;
-    return "api-key";
+    return serviceAuthentication.kind;
   }
   return loadStoredToken() || hasUsableRefreshToken(loadStoredCredentials())
     ? "jwt"
@@ -408,12 +510,29 @@ function missingToken() {
     );
   }
   throw new Error(
-    "Not authenticated. Set MEMORY_API_KEY or sign in with the plugin CLI.",
+    "Not authenticated. Set MEMORY_API_KEY or MEMORY_PAT, configure `mem auth set`, or sign in with the plugin CLI.",
   );
 }
 
-function getApiKey() {
-  return process.env.MEMORY_API_KEY?.trim() || null;
+function getServiceAuthentication() {
+  const environmentApiKey = process.env.MEMORY_API_KEY;
+  const environmentPat = process.env.MEMORY_PAT;
+  if (environmentApiKey && environmentPat) {
+    throw new Error("Set only one of MEMORY_API_KEY or MEMORY_PAT.");
+  }
+  if (environmentApiKey) {
+    return {
+      kind: "api-key",
+      credential: validateServiceCredential("api-key", environmentApiKey),
+    };
+  }
+  if (environmentPat) {
+    return {
+      kind: "pat",
+      credential: validateServiceCredential("pat", environmentPat),
+    };
+  }
+  return loadStoredServiceCredential();
 }
 
 function getServerUrl() {
@@ -726,14 +845,14 @@ async function performLockedTokenRefresh(credentials) {
  * preferred so refreshing the same user's token does not replay transcripts.
  */
 export function getMemoryDestinationFingerprint() {
-  const apiKey = getApiKey();
+  const serviceAuthentication = getServiceAuthentication();
   let authKind;
   let identity;
   let logicalScope = null;
 
-  if (apiKey) {
-    authKind = "api-key";
-    identity = apiKey;
+  if (serviceAuthentication) {
+    authKind = serviceAuthentication.kind;
+    identity = serviceAuthentication.credential;
   } else {
     const environmentToken = process.env.MEMORY_TOKEN;
     const credentials = environmentToken ? null : loadStoredCredentials();
@@ -794,10 +913,14 @@ async function headers() {
     "user-agent": `allenlim-memory-server/${PLUGIN_VERSION}`,
   };
 
-  const apiKey = getApiKey();
-  if (apiKey) {
+  const serviceAuthentication = getServiceAuthentication();
+  if (serviceAuthentication) {
     TOKEN_EXPIRED = false;
-    h["x-memory-api-key"] = apiKey;
+    if (serviceAuthentication.kind === "api-key") {
+      h["x-memory-api-key"] = serviceAuthentication.credential;
+    } else {
+      h.authorization = `Bearer ${serviceAuthentication.credential}`;
+    }
     return h;
   }
 
@@ -871,6 +994,126 @@ export async function callTool(name, args = {}) {
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+/**
+ * Forward one JSON-RPC message to the remote MCP endpoint. This is used by
+ * stdio-only clients while retaining the same credential, redirect, timeout,
+ * and response-size protections as the CLI and hooks.
+ */
+export async function proxyMcpRequest(message) {
+  if (!isJsonRpcRequestPayload(message)) {
+    throw new Error("Expected a JSON-RPC 2.0 request or notification object.");
+  }
+  const timeoutMs = getRequestTimeoutMs();
+  const timeoutController = new AbortController();
+  const timeoutId = setTimeout(() => {
+    const error = new Error(`Memory request timed out after ${timeoutMs} ms.`);
+    error.name = "TimeoutError";
+    timeoutController.abort(error);
+  }, timeoutMs);
+  try {
+    const response = await fetchWithSameOriginRedirects(
+      `${getCanonicalServerUrl()}/mcp`,
+      {
+        body: JSON.stringify(message),
+        headers: await headers(),
+        signal: timeoutController.signal,
+      },
+    );
+    if (response.status === 202 || response.status === 204) {
+      await response.body?.cancel().catch(() => {});
+      return null;
+    }
+    if (!response.ok) {
+      await readBoundedErrorText(response).catch(() => "");
+      throw new Error(`Remote MCP request failed (${response.status}).`);
+    }
+    return await parseRawMcpResponse(response, message);
+  } catch (error) {
+    if (
+      timeoutController.signal.aborted ||
+      error?.name === "AbortError" ||
+      error?.name === "TimeoutError"
+    ) {
+      throw new Error(`Memory request timed out after ${timeoutMs} ms.`);
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function isJsonRpcRequestPayload(value) {
+  return Array.isArray(value)
+    ? value.length > 0 && value.every(isJsonRpcRequest)
+    : isJsonRpcRequest(value);
+}
+
+function isJsonRpcRequest(value) {
+  return Boolean(
+    value &&
+    !Array.isArray(value) &&
+    typeof value === "object" &&
+    value.jsonrpc === "2.0" &&
+    typeof value.method === "string" &&
+    value.method.length > 0 &&
+    (value.id === undefined ||
+      typeof value.id === "string" ||
+      typeof value.id === "number" ||
+      value.id === null),
+  );
+}
+
+async function parseRawMcpResponse(response, request) {
+  const contentType = response.headers.get("content-type") ?? "";
+  const text = await readBoundedResponseText(response, MAX_SUCCESS_RESPONSE_BYTES);
+  let value;
+  if (contentType.includes("text/event-stream")) {
+    for (const line of text.split("\n")) {
+      if (!line.startsWith("data:")) continue;
+      try {
+        value = JSON.parse(line.slice(5).trimStart());
+        break;
+      } catch {
+        // Ignore keepalive or malformed events and continue to the next event.
+      }
+    }
+  } else {
+    try {
+      value = JSON.parse(text);
+    } catch {
+      // Handled by the common validation error below.
+    }
+  }
+  const requests = Array.isArray(request) ? request : [request];
+  const expectedIds = requests
+    .filter((entry) => Object.hasOwn(entry, "id"))
+    .map((entry) => entry.id);
+  const responses = Array.isArray(value) ? value : [value];
+  const validShape = responses.length > 0 && responses.every((entry) =>
+    entry &&
+    typeof entry === "object" &&
+    !Array.isArray(entry) &&
+    entry.jsonrpc === "2.0" &&
+    Object.hasOwn(entry, "id") &&
+    expectedIds.some((id) => Object.is(id, entry.id)) &&
+    ((entry.result !== undefined) !== (entry.error !== undefined)) &&
+    (entry.error === undefined ||
+      (entry.error &&
+        typeof entry.error === "object" &&
+        Number.isInteger(entry.error.code) &&
+        typeof entry.error.message === "string"))
+  );
+  const returnedIds = responses.map((entry) => entry?.id);
+  const idsMatch =
+    returnedIds.length === expectedIds.length &&
+    expectedIds.every((id) => returnedIds.some((returnedId) => Object.is(id, returnedId)));
+  const containerMatches = Array.isArray(request) === Array.isArray(value);
+  if (!validShape || !idsMatch || !containerMatches) {
+    throw new Error("Malformed MCP response: invalid JSON-RPC response.");
+  }
+  return value;
 }
 
 async function fetchWithSameOriginRedirects(initialUrl, { body, headers, signal }) {

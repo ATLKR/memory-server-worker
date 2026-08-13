@@ -69,7 +69,7 @@ Returns:
 
 ## Authentication
 
-The plugin accepts `MEMORY_API_KEY` for service/headless use or renewable OAuth
-credentials from the plugin CLI login. `MEMORY_TOKEN` is a non-renewable JWT
-override. API-key auth takes precedence; when it is active, the client omits
-JWT and `x-memory-scope` headers.
+The plugin accepts `MEMORY_API_KEY` for service/headless use, `MEMORY_PAT` for
+browser-free personal use, or renewable OAuth credentials from the plugin CLI
+login. `mem auth set --api-key-stdin|--pat-stdin` stores a credential locally
+without exposing it in argv. `MEMORY_TOKEN` is a non-renewable JWT override.

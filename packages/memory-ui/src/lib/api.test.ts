@@ -4,6 +4,7 @@ import {
   api,
   fetchSession,
   logout,
+  parseSessionResponse,
   refreshSession,
 } from "./api";
 
@@ -68,6 +69,24 @@ describe("cookie-based API client", () => {
     expect(path).toBe("/api/session");
     expect(init.credentials).toBe("same-origin");
     expect(new Headers(init.headers).has("authorization")).toBe(false);
+  });
+
+  it("accepts the public PAT session projection without exposing its owner", () => {
+    expect(parseSessionResponse({
+      authenticated: true,
+      authMode: "pat",
+      user: { id: "headless-pat", email: null, name: null },
+      expiresAt: null,
+      permissions: ["read", "write"],
+      refreshable: false,
+    })).toEqual({
+      authenticated: true,
+      authMode: "pat",
+      user: { id: "headless-pat", email: null, name: null },
+      expiresAt: null,
+      permissions: ["read", "write"],
+      refreshable: false,
+    });
   });
 
   it("logs out without bearer auth and removes legacy browser credentials", async () => {

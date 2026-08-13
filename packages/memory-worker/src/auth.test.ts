@@ -6,10 +6,13 @@ import {
   API_KEY_MAX_BYTES,
   API_KEY_PERMISSIONS,
   API_KEY_REGISTRY_MAX_BYTES,
+  PERSONAL_ACCESS_TOKEN_PREFIX,
   type ApiKeyPermission,
+  type RegistryCredentialKind,
   extractAuthorizationApiKey,
   verifyApiKey,
   verifyJwt,
+  verifyPersonalAccessToken,
 } from "./auth.ts";
 
 // Node 24 does not yet expose the Workers-only SubtleCrypto extension. Keep
@@ -49,22 +52,24 @@ async function registry(
     permissions?: ApiKeyPermission[];
     expiresAt?: string;
     disabledAt?: string;
+    kind?: RegistryCredentialKind;
   }>,
-  version: 1 | 2 = 2,
+  version: 1 | 2 | 3 = 2,
 ): Promise<string> {
   return JSON.stringify({
     version,
     keys: await Promise.all(
-      entries.map(async ({ key, permissions, expiresAt, disabledAt, ...entry }) => ({
+      entries.map(async ({ key, permissions, expiresAt, disabledAt, kind, ...entry }) => ({
         ...entry,
         digest: await digest(key),
-        ...(version === 2
+        ...(version >= 2
           ? {
               permissions: permissions ?? [...API_KEY_PERMISSIONS],
               expiresAt: expiresAt ?? "2099-01-01T00:00:00Z",
               ...(disabledAt ? { disabledAt } : {}),
             }
           : {}),
+        ...(version === 3 ? { kind: kind ?? "api-key" } : {}),
       })),
     ),
   });
@@ -294,6 +299,85 @@ describe("API key authentication", () => {
     }
   });
 
+  it("supports scheme-bound PATs only through explicit version-3 entries", async () => {
+    const pat = `${PERSONAL_ACCESS_TOKEN_PREFIX}${"A".repeat(43)}`;
+    const apiKey = "memory_test_v3_api_key_0123456789abcdef";
+    const value = await registry([
+      {
+        id: "pat",
+        key: pat,
+        kind: "pat",
+        userId: "user-pat",
+        logicalScope: "headless",
+        permissions: ["read", "write"],
+      },
+      {
+        id: "api-key",
+        key: apiKey,
+        kind: "api-key",
+        userId: "user-api-key",
+        permissions: ["read"],
+      },
+    ], 3);
+
+    assert.deepEqual(await verifyPersonalAccessToken(value, pat), {
+      keyId: "pat",
+      userId: "user-pat",
+      logicalScope: "headless",
+      permissions: ["read", "write"],
+    });
+    assert.deepEqual(await verifyApiKey(value, apiKey), {
+      keyId: "api-key",
+      userId: "user-api-key",
+      logicalScope: null,
+      permissions: ["read"],
+    });
+    assert.equal(await verifyApiKey(value, pat), null);
+    assert.equal(await verifyPersonalAccessToken(value, apiKey), null);
+
+    const version2 = await registry([
+      { id: "legacy-shape", key: pat, userId: "user-pat" },
+    ], 2);
+    assert.equal(await verifyPersonalAccessToken(version2, pat), null);
+    assert.equal(await verifyApiKey(version2, pat), null);
+  });
+
+  it("requires exact PAT syntax and applies expiry and disable policy", async () => {
+    const activePat = `${PERSONAL_ACCESS_TOKEN_PREFIX}${"B".repeat(43)}`;
+    const expiredPat = `${PERSONAL_ACCESS_TOKEN_PREFIX}${"C".repeat(43)}`;
+    const disabledPat = `${PERSONAL_ACCESS_TOKEN_PREFIX}${"D".repeat(43)}`;
+    const value = await registry([
+      { id: "active", key: activePat, kind: "pat", userId: "user-a" },
+      {
+        id: "expired",
+        key: expiredPat,
+        kind: "pat",
+        userId: "user-a",
+        expiresAt: "2026-08-12T23:59:59Z",
+      },
+      {
+        id: "disabled",
+        key: disabledPat,
+        kind: "pat",
+        userId: "user-a",
+        disabledAt: "2026-08-13T00:00:00Z",
+      },
+    ], 3);
+    const now = new Date("2026-08-13T00:00:00Z");
+
+    assert.equal((await verifyPersonalAccessToken(value, activePat, now))?.keyId, "active");
+    assert.equal(await verifyPersonalAccessToken(value, expiredPat, now), null);
+    assert.equal(await verifyPersonalAccessToken(value, disabledPat, now), null);
+    for (const malformed of [
+      `${PERSONAL_ACCESS_TOKEN_PREFIX}${"A".repeat(42)}`,
+      `${PERSONAL_ACCESS_TOKEN_PREFIX}${"A".repeat(44)}`,
+      `${PERSONAL_ACCESS_TOKEN_PREFIX}${"A".repeat(42)}.`,
+      ` ${activePat}`,
+    ]) {
+      assert.equal(await verifyPersonalAccessToken(value, malformed, now), null);
+    }
+  });
+
   it("rejects expired or disabled keys while allowing scheduled revocation", async () => {
     const expiredKey = "memory_test_expired_0123456789abcdef";
     const disabledKey = "memory_test_disabled_0123456789abcdef";
@@ -400,6 +484,38 @@ describe("API key authentication", () => {
         expiresAt: "tomorrow",
       }],
     });
+    const missingKindRegistry = JSON.stringify({
+      version: 3,
+      keys: [{
+        id: "missing-kind",
+        digest: keyDigest,
+        userId: "user-a",
+        permissions: ["read"],
+        expiresAt: "2099-01-01T00:00:00Z",
+      }],
+    });
+    const kindInVersion2Registry = JSON.stringify({
+      version: 2,
+      keys: [{
+        id: "wrong-version-kind",
+        digest: keyDigest,
+        userId: "user-a",
+        kind: "pat",
+        permissions: ["read"],
+        expiresAt: "2099-01-01T00:00:00Z",
+      }],
+    });
+    const invalidKindRegistry = JSON.stringify({
+      version: 3,
+      keys: [{
+        id: "invalid-kind",
+        digest: keyDigest,
+        userId: "user-a",
+        kind: "jwt",
+        permissions: ["read"],
+        expiresAt: "2099-01-01T00:00:00Z",
+      }],
+    });
 
     assert.equal(await verifyApiKey(plaintextRegistry, key), null);
     assert.equal(await verifyApiKey(duplicateRegistry, key), null);
@@ -408,6 +524,9 @@ describe("API key authentication", () => {
     assert.equal(await verifyApiKey(badDigestRegistry, key), null);
     assert.equal(await verifyApiKey(duplicatePermissionRegistry, key), null);
     assert.equal(await verifyApiKey(invalidTimestampRegistry, key), null);
+    assert.equal(await verifyApiKey(missingKindRegistry, key), null);
+    assert.equal(await verifyApiKey(kindInVersion2Registry, key), null);
+    assert.equal(await verifyApiKey(invalidKindRegistry, key), null);
     assert.equal(
       await verifyApiKey("x".repeat(API_KEY_REGISTRY_MAX_BYTES + 1), key),
       null,

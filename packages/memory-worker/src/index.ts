@@ -6,8 +6,9 @@
  * provides automatic extraction, classification, supersession, and hybrid
  * search (keyword + semantic + topic key).
  *
- * Auth: either SSO via the Allen Labs central auth server or a provisioned API
- * key. JWTs use `Authorization: Bearer <jwt>`. API keys use
+ * Auth: either SSO via the Allen Labs central auth server or a provisioned
+ * digest-backed credential. JWTs use `Authorization: Bearer <jwt>`. Personal
+ * access tokens use `Authorization: Bearer memory_pat_<opaque>`. API keys use
  * `x-memory-api-key` or `Authorization: ApiKey <key>` and are verified against
  * SHA-256 digests stored in the MEMORY_API_KEY_REGISTRY Worker secret.
  *
@@ -40,10 +41,12 @@ import { z } from "zod";
 import { createMcpHandler } from "agents/mcp/server";
 import {
   API_KEY_PERMISSIONS,
+  PERSONAL_ACCESS_TOKEN_PREFIX,
   extractAuthorizationApiKey,
   extractBearerToken,
   verifyApiKey,
   verifyJwt,
+  verifyPersonalAccessToken,
   type ApiKeyPermission,
   type SessionPayload,
 } from "./auth";
@@ -227,6 +230,13 @@ type AuthenticatedRequest =
       permissions: readonly ApiKeyPermission[];
     }
   | {
+      method: "pat";
+      profileName: string;
+      keyId: string;
+      userId: string;
+      permissions: readonly ApiKeyPermission[];
+    }
+  | {
       method: "session";
       profileName: string;
       session: SessionPayload;
@@ -344,8 +354,8 @@ function isAllowedCookieRequest(request: Request, requestUrl: URL): boolean {
 /**
  * Authenticate the request with exactly one credential source. JWTs continue
  * to support caller-selected logical sub-scopes that remain bound to `sub`.
- * API keys cannot accept `x-memory-scope`; their registry entry chooses a
- * fixed scope, or the user's personal profile when no scope is present.
+ * API keys and PATs cannot accept `x-memory-scope`; their registry entry
+ * chooses a fixed scope, or the user's personal profile when none is present.
  *
  * The authenticated user id is always the profile boundary. Any logical scope
  * is hashed together with that id before an Agent Memory profile is used.
@@ -387,13 +397,37 @@ async function authenticate(
     };
   }
 
+  const bearerToken = extractBearerToken(authorization);
+  if (bearerToken?.startsWith(PERSONAL_ACCESS_TOKEN_PREFIX)) {
+    // The PAT namespace is reserved: malformed or unregistered prefixed
+    // Bearer values fail here and never fall through to JWT/JWKS verification.
+    // Like an API key, a PAT's identity and scope are provisioned server-side.
+    if (request.headers.get("x-memory-scope") !== null) return null;
+    const identity = await verifyPersonalAccessToken(
+      env.MEMORY_API_KEY_REGISTRY,
+      bearerToken,
+    );
+    if (!identity) return null;
+
+    const profileName = await resolveProfileName(
+      identity.userId,
+      identity.logicalScope,
+    );
+    return {
+      method: "pat",
+      profileName,
+      keyId: identity.keyId,
+      userId: identity.userId,
+      permissions: identity.permissions,
+    };
+  }
+
   const authApiUrl = env.AUTH_API_URL;
   if (!authApiUrl) {
     logOperationError(requestId, "authenticate", { name: "AuthConfigError" });
     return null;
   }
 
-  const bearerToken = extractBearerToken(authorization);
   let token = bearerToken;
   let method: "jwt" | "session" = "jwt";
 
@@ -452,7 +486,7 @@ function createServer(
   const permissionError = (permission: ApiKeyPermission) =>
     toolError(`Credential lacks the ${permission} permission.`, requestId);
   const server = new McpServer(
-    { name: "memory-server", version: "3.0.1" },
+    { name: "memory-server", version: "3.1.0" },
     {
       // Server-level instructions — ChatGPT/Codex read these on initialize.
       instructions:
@@ -1577,7 +1611,7 @@ function safeSessionResponse(
   auth: AuthenticatedRequest,
   refreshable = false,
 ): Response {
-  if (auth.method === "api-key") {
+  if (auth.method === "api-key" || auth.method === "pat") {
     return Response.json({
       authenticated: true,
       authMode: auth.method,
