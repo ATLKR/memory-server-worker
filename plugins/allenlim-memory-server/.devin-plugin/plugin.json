@@ -1,6 +1,6 @@
 {
   "name": "allenlim-memory-server",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "Reusable personal-memory skills and an approval-free Proton Pass-backed stdio bridge for Devin. Devin does not install this bundle's Claude hooks.",
   "author": {
     "name": "Allen Lim",

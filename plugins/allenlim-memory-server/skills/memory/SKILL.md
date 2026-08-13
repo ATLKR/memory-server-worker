@@ -31,8 +31,13 @@ suitable for browser-free personal CLI access.
 
   ```json
   {
-    "command": "pass-cli",
-    "args": ["run", "--", "memory-mcp-stdio"],
+    "command": "C:\\Users\\YOUR_NAME\\AppData\\Local\\Programs\\ProtonPass\\pass-cli.exe",
+    "args": [
+      "run",
+      "--",
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\YOUR_NAME\\AppData\\Roaming\\npm\\node_modules\\allenlim-memory-server\\scripts\\mcp-stdio.mjs"
+    ],
     "env": {
       "MEMORY_PAT": "pass://Development/Memory Server PAT - personal CLI - 2026-08-13/password",
       "MEMORY_SERVER_URL": "https://memory.allenlim.net",
@@ -42,7 +47,12 @@ suitable for browser-free personal CLI access.
   ```
 
   `pass-cli run` resolves the PAT only in the bridge's child environment.
-  `devin mcp login` is not required. Claude hooks remain unsupported by Devin.
+  Resolve and store absolute paths for Proton Pass CLI, Node, and the bridge
+  (`Get-Command pass-cli.exe`, `Get-Command node.exe`, and `npm root -g` on
+  Windows). Relative executable names can be shadowed by an untrusted working
+  directory after credential injection. Use equivalent absolute paths on
+  macOS and Linux. `devin mcp login` is not required. Claude hooks remain
+  unsupported by Devin.
 
 ## Manual memory operations
 

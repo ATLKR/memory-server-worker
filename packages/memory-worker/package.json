@@ -1,6 +1,6 @@
 {
   "name": "memory-worker",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "private": true,
   "description": "Memory server worker backed by Cloudflare Agent Memory.",
   "license": "MIT",

@@ -1,13 +1,28 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import test, { afterEach, beforeEach } from "node:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import test, { after, afterEach, beforeEach } from "node:test";
 
-import {
+// Import the library with an isolated home so a developer's real stored PAT,
+// API key, or OAuth session can never influence the unit tests.
+const testHome = mkdtempSync(join(tmpdir(), "memory-lib-test-"));
+const originalHome = process.env.HOME;
+const originalUserProfile = process.env.USERPROFILE;
+process.env.HOME = testHome;
+process.env.USERPROFILE = testHome;
+const {
   callTool,
   getMemoryDestinationFingerprint,
   getRequestTimeoutMs,
   validateAccessToken,
-} from "./lib.mjs";
+} = await import("./lib.mjs");
+if (originalHome === undefined) delete process.env.HOME;
+else process.env.HOME = originalHome;
+if (originalUserProfile === undefined) delete process.env.USERPROFILE;
+else process.env.USERPROFILE = originalUserProfile;
+
+after(() => rmSync(testHome, { recursive: true, force: true }));
 
 const packageJson = JSON.parse(
   readFileSync(new URL("../package.json", import.meta.url), "utf8"),
