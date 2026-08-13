@@ -1,6 +1,6 @@
 {
   "name": "allenlim-memory-server",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "description": "Reusable personal-memory skills for Devin. Connect the remote Memory MCP separately with devin mcp add/login to enable tools; Devin does not install this bundle's Claude hooks.",
   "author": {
     "name": "Allen Lim",

@@ -3,6 +3,13 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.0.1] - 2026-08-13
+
+### Fixed
+
+- `mem --help` now prints usage to standard output and exits successfully;
+  missing and invalid commands remain usage errors.
+
 ## [3.0.0] - 2026-08-13
 
 ### Breaking changes
@@ -88,6 +95,7 @@ All notable changes to this project are documented here. This project follows
 - Bound memory profiles to authenticated user identities and migrated the
   known production profile without deleting the legacy source.
 
+[3.0.1]: https://github.com/ATLKR/memory-server-worker/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/ATLKR/memory-server-worker/compare/v2.1.0...v3.0.0
 [2.1.0]: https://github.com/ATLKR/memory-server-worker/compare/v2.0.0...v2.1.0
 [2.0.0]: https://github.com/ATLKR/memory-server-worker/releases/tag/v2.0.0
