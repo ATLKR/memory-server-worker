@@ -9,6 +9,7 @@ import type { UiRequestContext } from "./lib/request-context";
 
 export interface UiEnv {
   MEMORY_API: Fetcher;
+  CF_VERSION_METADATA: WorkerVersionMetadata;
   AUTH_WEB_URL: string;
   AUTH_API_URL: string;
 }
@@ -131,6 +132,7 @@ export default {
   ): Promise<Response> {
     const url = new URL(request.url);
     const currentRequestId = requestId(request);
+    const version = env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id;
 
     if (shouldProxy(url.pathname)) {
       if (!env.MEMORY_API) {
@@ -142,13 +144,18 @@ export default {
         }));
         return withHeaders(
           Response.json({ error: "Service temporarily unavailable" }, { status: 503 }),
-          { "cache-control": "no-store", "x-request-id": currentRequestId },
+          {
+            "cache-control": "no-store",
+            "x-request-id": currentRequestId,
+            ...(version ? { "x-worker-version": version } : {}),
+          },
         );
       }
 
       const response = await env.MEMORY_API.fetch(request);
       return withHeaders(response, {
         "x-request-id": response.headers.get("x-request-id") ?? currentRequestId,
+        ...(version ? { "x-worker-version": version } : {}),
       });
     }
 
@@ -163,6 +170,7 @@ export default {
 
     const secured = withHeaders(rendered, {
       "x-request-id": currentRequestId,
+      ...(version ? { "x-worker-version": version } : {}),
       ...(isFingerprintAsset
         ? { "cache-control": "public, max-age=31536000, immutable" }
         : {}),

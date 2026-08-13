@@ -1,6 +1,6 @@
 {
   "name": "memory-ui",
-  "version": "2.1.0",
+  "version": "3.0.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -14,13 +14,13 @@
     "cf-typegen": "wrangler types"
   },
   "dependencies": {
-    "@tanstack/react-router": "^1.170.25",
-    "@tanstack/react-start": "^1.168.42",
+    "@tanstack/react-router": "^1.170.27",
+    "@tanstack/react-start": "^1.168.44",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@cloudflare/vite-plugin": "^1.51.3",
+    "@cloudflare/vite-plugin": "^1.52.0",
     "@tanstack/react-router-devtools": "^1.167.1",
     "@types/react": "^19.0.8",
     "@types/react-dom": "^19.0.3",
@@ -32,6 +32,6 @@
     "typescript": "^7.0.2",
     "vite": "^8.0.14",
     "vitest": "^4.1.10",
-    "wrangler": "^4.121.0"
+    "wrangler": "^4.122.0"
   }
 }

@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { readBoundedBody, readJsonRequestBody } from "./body.ts";
+import {
+  readBoundedBody,
+  readJsonRequestBody,
+  readJsonResponseBody,
+} from "./body.ts";
 
 const URL = "https://memory.example.test/mcp";
 
@@ -48,6 +52,32 @@ describe("readBoundedBody", () => {
       reason: "too_large",
     });
   });
+
+  it("coalesces many tiny chunks into an exact bounded result", async () => {
+    let emitted = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (emitted === 1024) {
+          controller.close();
+          return;
+        }
+        controller.enqueue(new Uint8Array([emitted % 251]));
+        emitted += 1;
+      },
+    });
+    const request = new Request(URL, {
+      method: "POST",
+      body: stream,
+      duplex: "half",
+    } as RequestInit & { duplex: "half" });
+
+    const result = await readBoundedBody(request, 1024);
+    assert.equal(result.ok, true);
+    if (result.ok) {
+      assert.equal(result.bytes.byteLength, 1024);
+      assert.equal(result.bytes[1000], 1000 % 251);
+    }
+  });
 });
 
 describe("readJsonRequestBody", () => {
@@ -80,5 +110,21 @@ describe("readJsonRequestBody", () => {
       status: 400,
       error: "invalid JSON request body",
     });
+  });
+});
+
+describe("readJsonResponseBody", () => {
+  it("parses bounded upstream JSON and rejects oversized responses", async () => {
+    assert.deepEqual(
+      await readJsonResponseBody(Response.json({ ok: true }), 64),
+      { ok: true },
+    );
+    assert.equal(
+      await readJsonResponseBody(
+        new Response(JSON.stringify({ value: "x".repeat(100) })),
+        32,
+      ),
+      null,
+    );
   });
 });

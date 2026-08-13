@@ -256,10 +256,16 @@ async function sha256(text: string): Promise<string> {
 
 async function apiKeyRegistry(
   key: string,
-  options: { userId?: string; logicalScope?: string } = {},
+  options: {
+    userId?: string;
+    logicalScope?: string;
+    permissions?: Array<"read" | "write" | "delete">;
+    expiresAt?: string;
+    disabledAt?: string;
+  } = {},
 ): Promise<string> {
   return JSON.stringify({
-    version: 1,
+    version: 2,
     keys: [{
       id: "worker-test",
       digest: await sha256(key),
@@ -267,6 +273,9 @@ async function apiKeyRegistry(
       ...(options.logicalScope
         ? { logicalScope: options.logicalScope }
         : {}),
+      permissions: options.permissions ?? ["read", "write", "delete"],
+      expiresAt: options.expiresAt ?? "2099-01-01T00:00:00Z",
+      ...(options.disabledAt ? { disabledAt: options.disabledAt } : {}),
     }],
   });
 }
@@ -763,5 +772,49 @@ describe("Worker API key authentication", () => {
       assert.equal(response.status, 401);
       assert.deepEqual(profiles, []);
     }
+  });
+
+  it("enforces least-privilege API-key permissions before profile access", async () => {
+    const registry = await apiKeyRegistry(validKey, { permissions: ["read"] });
+    const profiles: string[] = [];
+    const rest = await worker.fetch(
+      new Request("https://memory.allenlim.net/api/memories", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-memory-api-key": validKey,
+        },
+        body: JSON.stringify({ content: "must not be written" }),
+      }),
+      apiKeyEnv(registry, profiles),
+      {} as ExecutionContext,
+    );
+    assert.equal(rest.status, 403);
+    assert.match(await rest.text(), /write permission/);
+    assert.deepEqual(profiles, []);
+
+    const mcp = await worker.fetch(
+      new Request("https://memory.allenlim.net/mcp", {
+        method: "POST",
+        headers: {
+          host: "memory.allenlim.net",
+          accept: "application/json, text/event-stream",
+          "content-type": "application/json",
+          "mcp-protocol-version": LEGACY_PROTOCOL_VERSION,
+          "x-memory-api-key": validKey,
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: { name: "memory_delete", arguments: { id: "memory-id" } },
+        }),
+      }),
+      apiKeyEnv(registry, profiles),
+      {} as ExecutionContext,
+    );
+    assert.equal(mcp.status, 200);
+    assert.match(JSON.stringify(await parseJsonRpc(mcp)), /delete permission/);
+    assert.deepEqual(profiles, []);
   });
 });

@@ -1,7 +1,7 @@
 {
   "name": "allenlim-memory-server",
-  "version": "2.1.0",
-  "description": "Personal persistent memory plugin for Devin CLI, Claude Code, and Codex. Auto-recalls and captures memories via the memory-server-worker MCP endpoint.",
+  "version": "3.0.0",
+  "description": "Personal persistent memory tools for Codex and Claude Code, plus reusable Devin skills. Uses the remote memory-server-worker MCP endpoint.",
   "license": "MIT",
   "private": true,
   "type": "module",

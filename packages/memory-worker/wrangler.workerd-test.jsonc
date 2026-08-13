@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "memory-server-workerd-test",
+  "compatibility_date": "2026-08-10",
+  "compatibility_flags": ["nodejs_compat"],
+  "main": "src/index.ts",
+  "vars": {
+    "AUTH_API_URL": "https://auth-api.allen.company",
+    "AUTH_WEB_URL": "https://auth.allen.company",
+    "MEMORY_RESOURCE_URL": "https://memory.allenlim.net",
+    "LEGACY_AUTH_AUDIENCE_CUTOFF": "",
+    "DEFAULT_SCOPE": "",
+    "MEMORY_API_KEY_REGISTRY": ""
+  }
+}

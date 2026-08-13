@@ -6,9 +6,12 @@ export type JsonBodyResult =
   | { ok: true; value: unknown }
   | { ok: false; status: 400 | 413; error: string };
 
+type BodySource = Pick<Request | Response, "headers" | "body">;
+const INITIAL_BODY_BUFFER_BYTES = 16 * 1024;
+
 /** Read a request body without trusting Content-Length or buffering past the limit. */
 export async function readBoundedBody(
-  request: Request,
+  request: BodySource,
   maxBytes: number,
 ): Promise<BoundedBodyResult> {
   const contentLengthHeader = request.headers.get("content-length");
@@ -22,15 +25,15 @@ export async function readBoundedBody(
   if (!request.body) return { ok: false, reason: "missing" };
 
   const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
+  let bytes = new Uint8Array(Math.min(maxBytes, INITIAL_BODY_BUFFER_BYTES));
   let totalBytes = 0;
 
   try {
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
-      totalBytes += value.byteLength;
-      if (totalBytes > maxBytes) {
+      const nextTotalBytes = totalBytes + value.byteLength;
+      if (nextTotalBytes > maxBytes) {
         try {
           await reader.cancel("request body too large");
         } catch {
@@ -38,19 +41,44 @@ export async function readBoundedBody(
         }
         return { ok: false, reason: "too_large" };
       }
-      chunks.push(value);
+      if (nextTotalBytes > bytes.byteLength) {
+        const nextCapacity = Math.min(
+          maxBytes,
+          Math.max(nextTotalBytes, Math.max(1, bytes.byteLength * 2)),
+        );
+        const expanded = new Uint8Array(nextCapacity);
+        expanded.set(bytes.subarray(0, totalBytes));
+        bytes = expanded;
+      }
+      bytes.set(value, totalBytes);
+      totalBytes = nextTotalBytes;
     }
   } catch {
     return { ok: false, reason: "unreadable" };
   }
 
-  const bytes = new Uint8Array(totalBytes);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
+  return {
+    ok: true,
+    bytes: totalBytes === bytes.byteLength ? bytes : bytes.slice(0, totalBytes),
+  };
+}
+
+/** Read and decode a bounded JSON response from a trusted upstream. */
+export async function readJsonResponseBody(
+  response: Response,
+  maxBytes: number,
+): Promise<unknown | null> {
+  const body = await readBoundedBody(response, maxBytes);
+  if (!body.ok) return null;
+  try {
+    const text = new TextDecoder("utf-8", {
+      fatal: true,
+      ignoreBOM: false,
+    }).decode(body.bytes);
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
   }
-  return { ok: true, bytes };
 }
 
 /** Read and decode a bounded UTF-8 JSON body. */

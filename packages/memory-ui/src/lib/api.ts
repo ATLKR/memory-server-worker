@@ -48,6 +48,8 @@ export interface StatsResponse {
 
 interface ApiErrorBody {
   error?: string;
+  error_code?: string;
+  retry_after?: number;
 }
 
 export interface SummaryResponse {
@@ -66,6 +68,9 @@ export interface AuthenticatedSession {
   authenticated: true;
   authMode: AuthMode;
   user: SessionUser;
+  expiresAt: string | null;
+  refreshable: boolean;
+  permissions?: Array<"read" | "write" | "delete">;
 }
 
 export interface AnonymousSession {
@@ -126,7 +131,21 @@ export function parseSessionResponse(value: unknown): AuthenticatedSession | nul
   if (
     session.authenticated !== true ||
     !["session", "jwt", "api-key"].includes(String(session.authMode)) ||
-    !isSessionUser(session.user)
+    !isSessionUser(session.user) ||
+    !(
+      session.expiresAt === undefined ||
+      session.expiresAt === null ||
+      (typeof session.expiresAt === "string" &&
+        Number.isFinite(Date.parse(session.expiresAt)))
+    ) ||
+    !(
+      session.permissions === undefined ||
+      (Array.isArray(session.permissions) &&
+        session.permissions.every((permission) =>
+          ["read", "write", "delete"].includes(String(permission))
+        ))
+    ) ||
+    !(session.refreshable === undefined || typeof session.refreshable === "boolean")
   ) {
     return null;
   }
@@ -134,6 +153,11 @@ export function parseSessionResponse(value: unknown): AuthenticatedSession | nul
     authenticated: true,
     authMode: session.authMode as AuthMode,
     user: session.user,
+    expiresAt: typeof session.expiresAt === "string" ? session.expiresAt : null,
+    refreshable: session.refreshable === true,
+    ...(Array.isArray(session.permissions)
+      ? { permissions: session.permissions as Array<"read" | "write" | "delete"> }
+      : {}),
   };
 }
 
@@ -160,11 +184,17 @@ async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
   if (init?.body !== undefined && !headers.has("content-type")) {
     headers.set("content-type", "application/json");
   }
-  const resp = await fetch(path, {
-    ...init,
-    headers,
-    credentials: "same-origin",
-  });
+  const send = () => fetch(path, {
+      ...init,
+      headers,
+      credentials: "same-origin",
+    });
+  let resp = await send();
+  if (resp.status === 401 && path.startsWith("/api/")) {
+    const refreshed = await refreshSession();
+    if (!refreshed.authenticated) return resp;
+    resp = await send();
+  }
   if (resp.status === 401) {
     notifyAuthInvalidated();
   }
@@ -216,8 +246,84 @@ export async function fetchSession(signal?: AbortSignal): Promise<AuthSession> {
   return session;
 }
 
+let sharedRefreshRequest: Promise<AuthSession> | null = null;
+
+function refreshRetryDelay(response: Response, body: unknown): number | null {
+  if (response.status !== 409 || !body || typeof body !== "object") return null;
+  const error = body as ApiErrorBody;
+  if (
+    error.error !== "temporarily_unavailable" ||
+    error.error_code !== "refresh_in_progress"
+  ) {
+    return null;
+  }
+  const headerSeconds = Number(response.headers.get("retry-after"));
+  const bodySeconds = error.retry_after;
+  const seconds = Number.isInteger(headerSeconds) && headerSeconds >= 1
+    ? headerSeconds
+    : Number.isInteger(bodySeconds) && Number(bodySeconds) >= 1
+      ? Number(bodySeconds)
+      : 1;
+  return Math.min(seconds, 10) * 1000;
+}
+
+async function requestSessionRefresh(): Promise<AuthSession> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch("/auth/refresh", {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+    });
+    if (response.status === 401) {
+      notifyAuthInvalidated();
+      return ANONYMOUS_SESSION;
+    }
+
+    const body: unknown = await response.json().catch(() => null);
+    const retryDelay = refreshRetryDelay(response, body);
+    if (retryDelay !== null && attempt === 0) {
+      // A concurrent tab won rotation. Its Set-Cookie response updates the
+      // browser's shared cookie jar; a fresh request re-reads that successor.
+      await new Promise((resolve) => globalThis.setTimeout(resolve, retryDelay));
+      continue;
+    }
+    if (!response.ok) {
+      const error = body && typeof body === "object"
+        ? (body as ApiErrorBody).error
+        : null;
+      throw new ApiError(
+        error || "Unable to refresh the session",
+        response.status,
+        response.headers.get("x-request-id"),
+      );
+    }
+
+    const session = parseSessionResponse(body);
+    if (!session) {
+      throw new ApiError(
+        "The server returned an invalid refreshed session",
+        502,
+        response.headers.get("x-request-id"),
+      );
+    }
+    return session;
+  }
+  throw new ApiError("Unable to refresh the session", 409);
+}
+
+export function refreshSession(_signal?: AbortSignal): Promise<AuthSession> {
+  if (sharedRefreshRequest) return sharedRefreshRequest;
+  sharedRefreshRequest = requestSessionRefresh().finally(() => {
+    sharedRefreshRequest = null;
+  });
+  return sharedRefreshRequest;
+}
+
 export async function logout(): Promise<void> {
   clearLegacyClientCredentials();
+  // A 401-triggered refresh may have rotated the HttpOnly cookie outside the
+  // React session provider. Let it settle so logout revokes the newest token.
+  await sharedRefreshRequest?.catch(() => undefined);
   const response = await apiFetch("/auth/logout", { method: "POST" });
   if (!response.ok) {
     const body = (await response.json().catch(() => null)) as ApiErrorBody | null;
