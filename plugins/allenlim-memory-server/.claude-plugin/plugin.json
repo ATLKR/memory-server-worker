@@ -1,6 +1,6 @@
 {
   "name": "allenlim-memory-server",
-  "version": "3.1.0",
+  "version": "3.1.1",
   "description": "Personal persistent memory for Claude Code with UserPromptSubmit and Stop hooks. Backed by Cloudflare Agent Memory with API-key or renewable Allen Labs SSO authentication.",
   "author": {
     "name": "Allen Lim",

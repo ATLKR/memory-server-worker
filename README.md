@@ -25,7 +25,7 @@ Plus integration packages:
 - **`distributions/chatgpt/allenlim-memory-server`** — ChatGPT-compatible
   alternate distribution.
 
-Current release: **3.1.0**. This release adds approval-free API-key and PAT
+Current release: **3.1.1**. This release adds approval-free API-key and PAT
 authentication for command-line clients, a Proton Pass-backed stdio bridge,
 and scheme-bound credential registry v3 while retaining the resource-bound
 OAuth and rotating 30-day session model from 3.0.
@@ -248,8 +248,13 @@ MEMORY_PAT="memory_pat_..." mem stats
 
   ```json
   {
-    "command": "pass-cli",
-    "args": ["run", "--", "memory-mcp-stdio"],
+    "command": "C:\\Users\\YOUR_NAME\\AppData\\Local\\Programs\\ProtonPass\\pass-cli.exe",
+    "args": [
+      "run",
+      "--",
+      "C:\\Program Files\\nodejs\\node.exe",
+      "C:\\Users\\YOUR_NAME\\AppData\\Roaming\\npm\\node_modules\\allenlim-memory-server\\scripts\\mcp-stdio.mjs"
+    ],
     "env": {
       "MEMORY_PAT": "pass://Development/Memory Server PAT - personal CLI - 2026-08-13/password",
       "MEMORY_SERVER_URL": "https://memory.allenlim.net",
@@ -260,7 +265,12 @@ MEMORY_PAT="memory_pat_..." mem stats
 
   The PAT exists only in `memory-mcp-stdio`'s child environment and is never
   printed. The same bridge also supports `MEMORY_API_KEY`. Devin does not
-  consume this bundle's Claude hooks.
+  consume this bundle's Claude hooks. Resolve and store absolute paths for
+  Proton Pass CLI, Node, and the bridge (`Get-Command pass-cli.exe`,
+  `Get-Command node.exe`, and `npm root -g` on Windows). Do not use relative
+  executable names after injecting a credential: an untrusted working
+  directory could otherwise shadow them. Use the equivalent absolute paths on
+  macOS and Linux.
 
 ### Wrangler bindings (backend)
 

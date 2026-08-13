@@ -45,7 +45,7 @@ const SERVICE_CREDENTIAL_PATH = join(homedir(), ".memory", "service-credential.j
 const CREDENTIALS_LOCK_PATH = join(homedir(), ".memory", "credentials.lock");
 const OAUTH_CLIENT_PATH = join(homedir(), ".memory", "oauth-client.json");
 
-const PLUGIN_VERSION = "3.1.0";
+const PLUGIN_VERSION = "3.1.1";
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const MIN_REQUEST_TIMEOUT_MS = 100;
 const MAX_REQUEST_TIMEOUT_MS = 60_000;
