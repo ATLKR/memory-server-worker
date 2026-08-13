@@ -1,6 +1,6 @@
 {
   "name": "memory-server-worker",
-  "version": "3.0.0",
+  "version": "3.0.1",
   "private": true,
   "description": "Personal persistent memory MCP server backed by Cloudflare Agent Memory.",
   "license": "MIT",

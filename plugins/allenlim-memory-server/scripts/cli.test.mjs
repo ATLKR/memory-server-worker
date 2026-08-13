@@ -8,6 +8,24 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
+test("CLI --help prints usage and exits successfully", async () => {
+  const result = await runCli(["--help"], {});
+
+  assert.equal(result.code, 0, result.stderr);
+  assert.match(result.stdout, /^Usage: mem </);
+  assert.equal(result.stderr, "");
+});
+
+test("CLI missing and invalid commands remain usage errors", async () => {
+  for (const arguments_ of [[], ["not-a-command"]]) {
+    const result = await runCli(arguments_, {});
+
+    assert.equal(result.code, 1, `arguments: ${JSON.stringify(arguments_)}`);
+    assert.equal(result.stdout, "");
+    assert.match(result.stderr, /^Usage: mem </);
+  }
+});
+
 test("CLI exits nonzero when an MCP result reports isError", async (context) => {
   const server = createServer((request, response) => {
     assert.equal(request.headers["x-memory-api-key"], "test-api-key");

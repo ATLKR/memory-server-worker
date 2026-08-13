@@ -452,7 +452,7 @@ function createServer(
   const permissionError = (permission: ApiKeyPermission) =>
     toolError(`Credential lacks the ${permission} permission.`, requestId);
   const server = new McpServer(
-    { name: "memory-server", version: "3.0.0" },
+    { name: "memory-server", version: "3.0.1" },
     {
       // Server-level instructions — ChatGPT/Codex read these on initialize.
       instructions:

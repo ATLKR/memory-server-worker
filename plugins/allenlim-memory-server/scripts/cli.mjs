@@ -42,6 +42,9 @@ import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { createInterface } from "node:readline/promises";
 
+const USAGE =
+  "Usage: mem <login|logout|whoami|add|search|ingest|get|list|delete|delete-session|summary|stats|hook> [args] [flags]";
+
 function parseArgs(argv) {
   const args = argv.slice(2);
   const cmd = args[0];
@@ -232,6 +235,11 @@ async function main() {
   const { cmd, positional, flags } = parseArgs(process.argv);
 
   try {
+    if (cmd === "--help") {
+      console.log(USAGE);
+      return;
+    }
+
     switch (cmd) {
       case "login":
         await handleLogin(flags);
@@ -367,9 +375,7 @@ async function main() {
         break;
       }
       default:
-        console.error(
-          "Usage: mem <login|logout|whoami|add|search|ingest|get|list|delete|delete-session|summary|stats|hook> [args] [flags]",
-        );
+        console.error(USAGE);
         process.exit(1);
     }
   } catch (err) {

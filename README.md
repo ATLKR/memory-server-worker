@@ -25,7 +25,7 @@ Plus integration packages:
 - **`distributions/chatgpt/allenlim-memory-server`** — ChatGPT-compatible
   alternate distribution.
 
-Current release: **3.0.0**. This breaking release binds OAuth access tokens to
+Current release: **3.0.1**. The 3.0 release line binds OAuth access tokens to
 the Memory resource, adds rotating 30-day refresh sessions, introduces
 least-privilege API-key registry v2, and hardens every browser and plugin
 credential path.
