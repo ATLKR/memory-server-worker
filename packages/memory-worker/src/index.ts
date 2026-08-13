@@ -39,10 +39,12 @@ import {
 import { z } from "zod";
 import { createMcpHandler } from "agents/mcp/server";
 import {
+  API_KEY_PERMISSIONS,
   extractAuthorizationApiKey,
   extractBearerToken,
   verifyApiKey,
   verifyJwt,
+  type ApiKeyPermission,
   type SessionPayload,
 } from "./auth";
 import type { MemoryEntry, MemoryType, RecallResult, StatsResponse } from "./schema";
@@ -71,7 +73,11 @@ import {
   hasSkills,
 } from "./skills";
 import { isValidSsoState, resolveProfileName } from "./security";
-import { readBoundedBody, readJsonRequestBody } from "./body";
+import {
+  readBoundedBody,
+  readJsonRequestBody,
+  readJsonResponseBody,
+} from "./body";
 
 const addMemoryInputSchema = z.object(addMemoryShape);
 const searchMemoryInputSchema = z.object(searchMemoryShape);
@@ -128,6 +134,8 @@ function getProfile(env: Env, profileName: string) {
 type LogOperation =
   | "authenticate"
   | "sso_exchange"
+  | "oauth_refresh"
+  | "oauth_revoke"
   | "memory_add"
   | "memory_search"
   | "memory_ingest"
@@ -209,23 +217,99 @@ type AuthenticatedRequest =
       method: "jwt";
       profileName: string;
       session: SessionPayload;
+      permissions: readonly ApiKeyPermission[];
     }
   | {
       method: "api-key";
       profileName: string;
       keyId: string;
       userId: string;
+      permissions: readonly ApiKeyPermission[];
     }
   | {
       method: "session";
       profileName: string;
       session: SessionPayload;
+      permissions: readonly ApiKeyPermission[];
     };
 
 type AuthenticationResult =
   | AuthenticatedRequest
   | { method: "forbidden-cookie" }
   | null;
+
+const MEMORY_RESOURCE_URL_DEFAULT = "https://memory.allenlim.net";
+
+function memoryResourceUrl(env: Env): string {
+  const configured = env.MEMORY_RESOURCE_URL?.trim() || MEMORY_RESOURCE_URL_DEFAULT;
+  try {
+    const parsed = new URL(configured);
+    if (parsed.protocol !== "https:" || parsed.pathname !== "/" || parsed.search || parsed.hash) {
+      return MEMORY_RESOURCE_URL_DEFAULT;
+    }
+    return parsed.origin;
+  } catch {
+    return MEMORY_RESOURCE_URL_DEFAULT;
+  }
+}
+
+function legacyAuthAudienceCutoff(env: Env): string | undefined {
+  const value = env.LEGACY_AUTH_AUDIENCE_CUTOFF?.trim();
+  return value || undefined;
+}
+
+function hasPermission(
+  auth: AuthenticatedRequest,
+  permission: ApiKeyPermission,
+): boolean {
+  return auth.permissions.includes(permission);
+}
+
+const MEMORY_OAUTH_SCOPES: Record<ApiKeyPermission, string> = {
+  read: "memory:read",
+  write: "memory:write",
+  delete: "memory:delete",
+};
+
+function permissionsFromSession(
+  session: SessionPayload,
+  env: Env,
+): readonly ApiKeyPermission[] | null {
+  const scopes = new Set(
+    typeof session.scope === "string"
+      ? session.scope.split(/\s+/).filter(Boolean)
+      : [],
+  );
+  const permissions = API_KEY_PERMISSIONS.filter((permission) =>
+    scopes.has(MEMORY_OAUTH_SCOPES[permission])
+  );
+  if (permissions.length > 0) return permissions;
+
+  const cutoff = legacyAuthAudienceCutoff(env);
+  const cutoffMs = cutoff ? Date.parse(cutoff) : Number.NaN;
+  const issuedAtMs = typeof session.iat === "number"
+    ? session.iat * 1000
+    : Number.NaN;
+  const resource = memoryResourceUrl(env);
+  const audience = session.aud;
+  if (
+    audience === resource &&
+    Number.isFinite(cutoffMs) &&
+    Number.isFinite(issuedAtMs) &&
+    issuedAtMs < cutoffMs &&
+    Date.now() <= cutoffMs + (ACCESS_TOKEN_MAX_AGE + 5 * 60) * 1000
+  ) {
+    // Resource-bound tokens minted immediately before the scope deployment
+    // retain historical full access only through their 15-minute lifetime.
+    return API_KEY_PERMISSIONS;
+  }
+  if (audience === (env.AUTH_API_URL ?? "").replace(/\/$/, "")) {
+    // verifyJwt already bounded generic legacy tokens to the explicit 8-hour
+    // migration window and tokens issued before its cutoff.
+    return API_KEY_PERMISSIONS;
+  }
+  return null;
+}
 
 function matchesRequestOrigin(value: string | null, requestUrl: URL): boolean {
   if (!value) return false;
@@ -299,6 +383,7 @@ async function authenticate(
       profileName,
       keyId: identity.keyId,
       userId: identity.userId,
+      permissions: identity.permissions,
     };
   }
 
@@ -333,10 +418,15 @@ async function authenticate(
 
   if (!token) return null;
 
-  const session = await verifyJwt(authApiUrl, token, requestId);
+  const session = await verifyJwt(authApiUrl, token, requestId, {
+    resourceAudience: memoryResourceUrl(env),
+    legacyAudienceCutoff: legacyAuthAudienceCutoff(env),
+  });
   if (!session || !session.sub.trim() || session.banned === true || session.banned === 1) {
     return null;
   }
+  const permissions = permissionsFromSession(session, env);
+  if (!permissions) return null;
 
   // A caller may choose a logical sub-scope, but resolveProfileName binds it
   // cryptographically to the authenticated subject. It can never select
@@ -347,19 +437,22 @@ async function authenticate(
   // Never fall back to the old caller-selected profile name. Legacy scoped
   // data is copied offline only after an operator verifies exclusive ownership.
   const profileName = await resolveProfileName(session.sub, logicalScope);
-  return { method, profileName, session };
+  return { method, profileName, session, permissions };
 }
 
 // ---------- MCP server factory ----------
 
 function createServer(
   env: Env,
-  profileName: string,
+  auth: AuthenticatedRequest,
   era: "legacy" | "modern",
   requestId: string,
 ): McpServer {
+  const profileName = auth.profileName;
+  const permissionError = (permission: ApiKeyPermission) =>
+    toolError(`Credential lacks the ${permission} permission.`, requestId);
   const server = new McpServer(
-    { name: "memory-server", version: "2.1.0" },
+    { name: "memory-server", version: "3.0.0" },
     {
       // Server-level instructions — ChatGPT/Codex read these on initialize.
       instructions:
@@ -456,6 +549,7 @@ function createServer(
       outputSchema: memoryEntrySchema,
     },
     async (params) => {
+      if (!hasPermission(auth, "write")) return permissionError("write");
       try {
         const profile = await getProfile(env, profileName);
         const memory = await profile.remember({
@@ -496,6 +590,7 @@ function createServer(
       outputSchema: searchResultSchema,
     },
     async (params) => {
+      if (!hasPermission(auth, "read")) return permissionError("read");
       try {
         const profile = await getProfile(env, profileName);
         const result: RecallResult = await profile.recall(params.query, {
@@ -533,6 +628,7 @@ function createServer(
       outputSchema: ingestResultSchema,
     },
     async (params) => {
+      if (!hasPermission(auth, "write")) return permissionError("write");
       try {
         const profile = await getProfile(env, profileName);
         await profile.ingest(
@@ -566,6 +662,7 @@ function createServer(
       outputSchema: listResultSchema,
     },
     async (params) => {
+      if (!hasPermission(auth, "read")) return permissionError("read");
       try {
         const profile = await getProfile(env, profileName);
         const result = await profile.list({
@@ -610,6 +707,7 @@ function createServer(
       outputSchema: memoryEntrySchema,
     },
     async (params) => {
+      if (!hasPermission(auth, "read")) return permissionError("read");
       try {
         const profile = await getProfile(env, profileName);
         const memory = await profile.get(params.id);
@@ -645,6 +743,7 @@ function createServer(
       outputSchema: deleteResultSchema,
     },
     async (params) => {
+      if (!hasPermission(auth, "delete")) return permissionError("delete");
       try {
         const profile = await getProfile(env, profileName);
         await profile.delete(params.id);
@@ -674,6 +773,7 @@ function createServer(
       outputSchema: deleteSessionResultSchema,
     },
     async (params) => {
+      if (!hasPermission(auth, "delete")) return permissionError("delete");
       try {
         const profile = await getProfile(env, profileName);
         await profile.deleteSession(params.sessionId);
@@ -701,6 +801,7 @@ function createServer(
       outputSchema: summaryResultSchema,
     },
     async (params) => {
+      if (!hasPermission(auth, "read")) return permissionError("read");
       try {
         const profile = await getProfile(env, profileName);
         const result = await profile.getSummary({
@@ -732,6 +833,7 @@ function createServer(
       outputSchema: statsResultSchema,
     },
     async () => {
+      if (!hasPermission(auth, "read")) return permissionError("read");
       try {
         const profile = await getProfile(env, profileName);
         // Agent Memory doesn't have a direct stats endpoint, so we
@@ -773,8 +875,10 @@ function createServer(
 //   3. The user signs in on auth.allen.company
 //   4. auth-web mints a code and redirects back to /auth/callback?code=...&state=...
 //   5. The worker validates the state cookie (CSRF protection), exchanges
-//      the code at {AUTH_API_URL}/sso/exchange, and either returns the JWT to
-//      the CLI or stores it in an HttpOnly, host-bound browser session cookie.
+//      the code at {AUTH_API_URL}/sso/exchange with the canonical resource.
+//      CLI callers receive the access/refresh pair. UI sessions store the
+//      15-minute access token and rotating 30-day refresh token in separate
+//      HttpOnly, host-bound cookies.
 //
 // The state cookie proves the callback originated from a legitimate
 // /auth/sso flow on this worker. Its __Host- prefix also prevents a sibling
@@ -783,27 +887,55 @@ function createServer(
 // The worker needs AUTH_WEB_URL (the auth UI origin) configured as a var.
 
 const AUTH_WEB_URL_DEFAULT = "https://auth.allen.company";
+const MEMORY_FULL_OAUTH_SCOPE =
+  "openid profile email offline_access memory:read memory:write memory:delete";
 const SSO_STATE_COOKIE = "__Host-memory_sso_state";
 const SSO_UI_FLOW_COOKIE = "__Host-memory_sso_ui";
 const SESSION_COOKIE = "__Host-memory_session";
+const REFRESH_TOKEN_COOKIE = "__Host-memory_refresh";
+const REFRESH_CLIENT_COOKIE = "__Host-memory_refresh_client";
 const LEGACY_SSO_STATE_COOKIE = "memory_sso_state";
 const LEGACY_SSO_UI_FLOW_COOKIE = "memory_sso_ui";
 const LEGACY_SESSION_COOKIE = "memory_session";
 const LEGACY_UI_TOKEN_COOKIE = "memory_token";
 const SSO_STATE_MAX_AGE = 600; // 10 minutes
-const SESSION_MAX_AGE = 8 * 60 * 60;
+const ACCESS_TOKEN_MAX_AGE = 15 * 60;
+const LEGACY_SESSION_MAX_AGE = 8 * 60 * 60;
+const REFRESH_TOKEN_MAX_AGE = 30 * 24 * 60 * 60;
+const MAX_AUTH_RESPONSE_BYTES = 64 * 1024;
+const jwtTokenSchema = z
+  .string()
+  .min(1)
+  .max(16 * 1024)
+  .regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/);
+const opaqueRefreshTokenSchema = z.string().regex(/^[A-Za-z0-9_-]{43}$/);
 const ssoExchangeSchema = z.object({
-  token: z
-    .string()
-    .min(1)
-    .max(16 * 1024)
-    .regex(/^[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/),
+  token: jwtTokenSchema,
   expires_in: z.number().int().nonnegative().optional(),
+  refresh_token: opaqueRefreshTokenSchema.optional(),
+  refresh_token_expires_in: z.number().int().positive().optional(),
+  client_id: z.string().min(1).max(512).optional(),
+  resource: z.string().min(1).max(2048).optional(),
+  scope: z.string().min(1).max(2048).optional(),
   user: z.object({
     id: z.string().max(256).optional(),
     email: z.string().max(320).optional(),
     name: z.string().max(256).nullable().optional(),
   }).optional(),
+});
+const oauthRefreshSchema = z.object({
+  access_token: jwtTokenSchema,
+  token_type: z.string().regex(/^Bearer$/i),
+  expires_in: z.number().int().positive(),
+  refresh_token: opaqueRefreshTokenSchema,
+  refresh_token_expires_in: z.number().int().positive(),
+  scope: z.string().max(2048).optional(),
+  resource: z.string().min(1).max(2048),
+});
+const oauthRefreshInProgressSchema = z.object({
+  error: z.literal("temporarily_unavailable"),
+  error_code: z.literal("refresh_in_progress"),
+  retry_after: z.number().int().min(1).max(10),
 });
 
 function sessionCookie(token: string, maxAge: number): string {
@@ -812,6 +944,14 @@ function sessionCookie(token: string, maxAge: number): string {
   // the UI Worker validate the session during SSR; the backend still accepts
   // it only on same-origin /api/* requests and ignores it completely for MCP.
   return `${SESSION_COOKIE}=${token}; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}; Path=/`;
+}
+
+function refreshTokenCookie(token: string, maxAge: number): string {
+  return `${REFRESH_TOKEN_COOKIE}=${token}; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}; Path=/`;
+}
+
+function refreshClientCookie(clientId: string, maxAge: number): string {
+  return `${REFRESH_CLIENT_COOKIE}=${encodeURIComponent(clientId)}; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}; Path=/`;
 }
 
 function clearLegacySessionCookies(): string[] {
@@ -825,6 +965,8 @@ function clearLegacySessionCookies(): string[] {
 function clearSessionCookies(): string[] {
   return [
     `${SESSION_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/`,
+    `${REFRESH_TOKEN_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/`,
+    `${REFRESH_CLIENT_COOKIE}=; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Path=/`,
     ...clearLegacySessionCookies(),
   ];
 }
@@ -859,11 +1001,12 @@ function generateState(): string {
 
 async function handleSsoStart(env: Env, requestUrl: URL): Promise<Response> {
   const authWebUrl = (env.AUTH_WEB_URL || AUTH_WEB_URL_DEFAULT).replace(/\/$/, "");
+  const resource = memoryResourceUrl(env);
   const state = generateState();
 
   const isUiFlow = requestUrl.searchParams.get("ui") === "1";
 
-  const callbackUrl = `${requestUrl.origin}/auth/callback?state=${encodeURIComponent(state)}`;
+  const callbackUrl = `${resource}/auth/callback?state=${encodeURIComponent(state)}`;
   const signInUrl = `${authWebUrl}/sign-in?return_to=${encodeURIComponent(callbackUrl)}`;
 
   const redirect = Response.redirect(signInUrl, 302);
@@ -886,6 +1029,9 @@ async function handleSsoStart(env: Env, requestUrl: URL): Promise<Response> {
   }
   for (const cookie of [
     ...clearLegacySsoCookies(),
+    // Starting a new SSO flow must not discard the only plaintext refresh
+    // credential for the current 30-day family. UI callbacks revoke that
+    // family before replacing it; CLI flows leave the browser session alone.
     ...clearLegacySessionCookies(),
   ]) {
     headers.append("Set-Cookie", cookie);
@@ -947,14 +1093,24 @@ async function handleSsoCallback(
     return errorResponse("SSO is unavailable", 500);
   }
 
-  const clientId = requestUrl.origin;
+  const clientId = memoryResourceUrl(env);
+
+  const previousRefreshToken = isUiFlow
+    ? parseCookie(cookieHeader, REFRESH_TOKEN_COOKIE)
+    : undefined;
 
   let exchangeRes: Response;
   try {
     exchangeRes = await fetch(`${authApiUrl}/sso/exchange`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ code, client_id: clientId, include_token: true }),
+      body: JSON.stringify({
+        code,
+        client_id: clientId,
+        include_token: true,
+        resource: clientId,
+        scope: MEMORY_FULL_OAUTH_SCOPE,
+      }),
       signal: AbortSignal.timeout(5000),
     });
   } catch (err) {
@@ -962,7 +1118,10 @@ async function handleSsoCallback(
     return errorResponse("SSO exchange unavailable", 502);
   }
 
-  const exchangeBody: unknown = await exchangeRes.json().catch(() => null);
+  const exchangeBody = await readJsonResponseBody(
+    exchangeRes,
+    MAX_AUTH_RESPONSE_BYTES,
+  );
   const exchange = ssoExchangeSchema.safeParse(exchangeBody);
 
   if (!exchangeRes.ok || !exchange.success) {
@@ -977,15 +1136,94 @@ async function handleSsoCallback(
   }
 
   const token = exchange.data.token;
-  const expiresIn = typeof exchange.data.expires_in === "number"
-    ? Math.min(exchange.data.expires_in, SESSION_MAX_AGE)
-    : SESSION_MAX_AGE;
+  const reportedExpiresIn = typeof exchange.data.expires_in === "number"
+    ? Math.min(exchange.data.expires_in, ACCESS_TOKEN_MAX_AGE)
+    : LEGACY_SESSION_MAX_AGE;
+  const refreshFields = [
+    exchange.data.refresh_token,
+    exchange.data.refresh_token_expires_in,
+    exchange.data.client_id,
+    exchange.data.resource,
+    exchange.data.scope,
+  ];
+  const hasAnyRefreshField = refreshFields.some((value) => value !== undefined);
+  const hasRefreshSession =
+    typeof exchange.data.refresh_token === "string" &&
+    typeof exchange.data.refresh_token_expires_in === "number" &&
+    exchange.data.client_id === clientId &&
+    exchange.data.resource === clientId &&
+    exchange.data.scope === MEMORY_FULL_OAUTH_SCOPE;
+
+  if (hasAnyRefreshField && !hasRefreshSession) {
+    logOperationError(requestId, "sso_exchange", {
+      name: "InvalidRefreshContractError",
+    });
+    return errorResponse("SSO exchange failed", 502);
+  }
+
+  const verifiedSession = await verifyJwt(authApiUrl, token, requestId, {
+    resourceAudience: clientId,
+    ...(hasRefreshSession
+      ? {}
+      : { legacyAudienceCutoff: legacyAuthAudienceCutoff(env) }),
+  });
+  if (
+    !verifiedSession ||
+    !verifiedSession.sub.trim() ||
+    verifiedSession.banned === true ||
+    verifiedSession.banned === 1 ||
+    (exchange.data.user?.id !== undefined &&
+      exchange.data.user.id !== verifiedSession.sub)
+  ) {
+    logOperationError(requestId, "sso_exchange", {
+      name: "InvalidAccessTokenError",
+    });
+    return errorResponse("SSO exchange failed", 502);
+  }
+  if (!permissionsFromSession(verifiedSession, env)) {
+    logOperationError(requestId, "sso_exchange", {
+      name: "InsufficientScopeError",
+    });
+    return errorResponse("SSO exchange failed", 502);
+  }
+  const expiresIn = Math.min(
+    reportedExpiresIn,
+    Math.max(0, verifiedSession.exp! - Math.floor(Date.now() / 1000)),
+  );
 
   if (isUiFlow) {
+    if (
+      previousRefreshToken &&
+      opaqueRefreshTokenSchema.safeParse(previousRefreshToken).success
+    ) {
+      // Revoke only after the replacement exchange and access-token
+      // verification succeed. A temporary auth outage must not destroy an
+      // otherwise valid 30-day browser session before a replacement exists.
+      await revokeRefreshFamily(
+        authApiUrl,
+        previousRefreshToken,
+        clientId,
+        requestId,
+      );
+    }
     const headers = new Headers();
     headers.set("Location", "/");
     headers.set("Cache-Control", "no-store");
     headers.append("Set-Cookie", sessionCookie(token, expiresIn));
+    if (hasRefreshSession) {
+      const refreshMaxAge = Math.min(
+        exchange.data.refresh_token_expires_in!,
+        REFRESH_TOKEN_MAX_AGE,
+      );
+      headers.append(
+        "Set-Cookie",
+        refreshTokenCookie(exchange.data.refresh_token!, refreshMaxAge),
+      );
+      headers.append(
+        "Set-Cookie",
+        refreshClientCookie(exchange.data.client_id!, refreshMaxAge),
+      );
+    }
     for (const cookie of [
       ...clearLegacySessionCookies(),
       ...clearSsoCookies(),
@@ -1006,7 +1244,31 @@ async function handleSsoCallback(
     headers.append("Set-Cookie", cookie);
   }
   return new Response(
-    JSON.stringify({ token, expires_in: expiresIn, user: exchange.data.user }),
+    JSON.stringify({
+      token,
+      expires_in: expiresIn,
+      ...(hasRefreshSession
+        ? {
+            refresh_token: exchange.data.refresh_token,
+            refresh_token_expires_in: Math.min(
+              exchange.data.refresh_token_expires_in!,
+              REFRESH_TOKEN_MAX_AGE,
+            ),
+            client_id: exchange.data.client_id,
+            resource: exchange.data.resource,
+            scope: exchange.data.scope,
+          }
+        : {}),
+      user: {
+        id: verifiedSession.sub,
+        email: typeof verifiedSession.email === "string"
+          ? verifiedSession.email
+          : undefined,
+        name: typeof verifiedSession.name === "string"
+          ? verifiedSession.name
+          : undefined,
+      },
+    }),
     { status: 200, headers },
   );
 }
@@ -1026,12 +1288,237 @@ function parseCookie(cookieHeader: string, name: string): string | null {
   return null;
 }
 
-function handleLogout(request: Request, requestUrl: URL, requestId: string): Response {
+function clearSessionResponse(error: string, requestId: string): Response {
+  const headers = new Headers({
+    "content-type": "application/json",
+    "cache-control": "no-store",
+  });
+  for (const cookie of clearSessionCookies()) {
+    headers.append("Set-Cookie", cookie);
+  }
+  return new Response(JSON.stringify({ error, requestId }), {
+    status: 401,
+    headers,
+  });
+}
+
+async function revokeRefreshFamily(
+  authApiUrl: string,
+  refreshToken: string,
+  resource: string,
+  requestId: string,
+): Promise<boolean> {
+  try {
+    const revokeResponse = await fetch(`${authApiUrl}/oauth/revoke`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        token: refreshToken,
+        token_type_hint: "refresh_token",
+        client_id: resource,
+        resource,
+      }),
+      signal: AbortSignal.timeout(5000),
+    });
+    if (!revokeResponse.ok) {
+      logOperationError(requestId, "oauth_revoke", {
+        name: "UpstreamResponseError",
+        status: revokeResponse.status,
+      });
+      return false;
+    }
+    return true;
+  } catch (err) {
+    logOperationError(requestId, "oauth_revoke", err);
+    return false;
+  }
+}
+
+async function handleSessionRefresh(
+  env: Env,
+  request: Request,
+  requestUrl: URL,
+  requestId: string,
+): Promise<Response> {
   if (!isAllowedCookieRequest(request, requestUrl)) {
     return Response.json(
       { error: "forbidden", requestId },
       { status: 403 },
     );
+  }
+
+  const cookieHeader = request.headers.get("cookie") ?? "";
+  const refreshToken = parseCookie(cookieHeader, REFRESH_TOKEN_COOKIE);
+  const encodedClientId = parseCookie(cookieHeader, REFRESH_CLIENT_COOKIE);
+  let storedClientId: string | null = null;
+  if (encodedClientId) {
+    try {
+      storedClientId = decodeURIComponent(encodedClientId);
+    } catch {
+      return clearSessionResponse("session refresh is invalid", requestId);
+    }
+  }
+
+  const resource = memoryResourceUrl(env);
+  const clientId = storedClientId ?? resource;
+  if (!refreshToken || clientId !== resource) {
+    return clearSessionResponse("session refresh is unavailable", requestId);
+  }
+
+  const authApiUrl = (env.AUTH_API_URL ?? "").replace(/\/$/, "");
+  if (!authApiUrl) {
+    logOperationError(requestId, "oauth_refresh", { name: "AuthConfigError" });
+    return Response.json(
+      { error: "session refresh is unavailable", requestId },
+      { status: 503 },
+    );
+  }
+
+  const form = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: refreshToken,
+    client_id: clientId,
+    resource,
+  });
+  let refreshResponse: Response;
+  try {
+    refreshResponse = await fetch(`${authApiUrl}/oauth/token`, {
+      method: "POST",
+      headers: {
+        accept: "application/json",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: form,
+      signal: AbortSignal.timeout(5000),
+    });
+  } catch (err) {
+    logOperationError(requestId, "oauth_refresh", err);
+    return Response.json(
+      { error: "session refresh is temporarily unavailable", requestId },
+      { status: 502 },
+    );
+  }
+
+  const refreshBody = await readJsonResponseBody(
+    refreshResponse,
+    MAX_AUTH_RESPONSE_BYTES,
+  );
+  const refreshInProgress = oauthRefreshInProgressSchema.safeParse(refreshBody);
+  if (refreshResponse.status === 409 && refreshInProgress.success) {
+    // Another browser tab consumed the old cookie within the issuer's reuse
+    // grace window. Do not clear cookies: the winning response will install
+    // the successor in the shared cookie jar, and the client can retry once.
+    return Response.json(refreshInProgress.data, {
+      status: 409,
+      headers: {
+        "cache-control": "no-store",
+        "retry-after": String(refreshInProgress.data.retry_after),
+      },
+    });
+  }
+  const refreshed = oauthRefreshSchema.safeParse(refreshBody);
+  if (!refreshResponse.ok || !refreshed.success) {
+    logOperationError(requestId, "oauth_refresh", {
+      name: "UpstreamResponseError",
+      status: refreshResponse.status,
+    });
+    if (refreshResponse.status >= 400 && refreshResponse.status < 500) {
+      return clearSessionResponse("session refresh was rejected", requestId);
+    }
+    return Response.json(
+      { error: "session refresh is temporarily unavailable", requestId },
+      { status: 502 },
+    );
+  }
+
+  if (refreshed.data.resource !== resource) {
+    logOperationError(requestId, "oauth_refresh", {
+      name: "ResourceMismatchError",
+    });
+    return clearSessionResponse("session refresh is invalid", requestId);
+  }
+
+  const session = await verifyJwt(
+    authApiUrl,
+    refreshed.data.access_token,
+    requestId,
+    { resourceAudience: resource },
+  );
+  if (!session || !session.sub.trim() || session.banned === true || session.banned === 1) {
+    return clearSessionResponse("session refresh is invalid", requestId);
+  }
+  const permissions = permissionsFromSession(session, env);
+  if (!permissions) {
+    return clearSessionResponse("session refresh is invalid", requestId);
+  }
+
+  const accessMaxAge = Math.min(
+    refreshed.data.expires_in,
+    ACCESS_TOKEN_MAX_AGE,
+    Math.max(0, session.exp! - Math.floor(Date.now() / 1000)),
+  );
+  const refreshMaxAge = Math.min(
+    refreshed.data.refresh_token_expires_in,
+    REFRESH_TOKEN_MAX_AGE,
+  );
+  const profileName = await resolveProfileName(
+    session.sub,
+    env.DEFAULT_SCOPE?.trim() || null,
+  );
+  const response = safeSessionResponse(
+    { method: "session", profileName, session, permissions },
+    true,
+  );
+  const headers = new Headers(response.headers);
+  headers.set("cache-control", "private, no-store");
+  headers.append(
+    "Set-Cookie",
+    sessionCookie(refreshed.data.access_token, accessMaxAge),
+  );
+  headers.append(
+    "Set-Cookie",
+    refreshTokenCookie(refreshed.data.refresh_token, refreshMaxAge),
+  );
+  headers.append(
+    "Set-Cookie",
+    refreshClientCookie(clientId, refreshMaxAge),
+  );
+  for (const cookie of clearLegacySessionCookies()) {
+    headers.append("Set-Cookie", cookie);
+  }
+  return new Response(response.body, { status: response.status, headers });
+}
+
+async function handleLogout(
+  request: Request,
+  env: Env,
+  requestUrl: URL,
+  requestId: string,
+): Promise<Response> {
+  if (!isAllowedCookieRequest(request, requestUrl)) {
+    return Response.json(
+      { error: "forbidden", requestId },
+      { status: 403 },
+    );
+  }
+
+  const cookieHeader = request.headers.get("cookie") ?? "";
+  const refreshToken = parseCookie(cookieHeader, REFRESH_TOKEN_COOKIE);
+  const resource = memoryResourceUrl(env);
+  if (
+    refreshToken &&
+    opaqueRefreshTokenSchema.safeParse(refreshToken).success
+  ) {
+    const authApiUrl = (env.AUTH_API_URL ?? "").replace(/\/$/, "");
+    if (!authApiUrl) {
+      logOperationError(requestId, "oauth_revoke", { name: "AuthConfigError" });
+    } else {
+      // Logout is local-first for user safety and availability. Revocation is
+      // best effort; even if auth is down, clearing host-only HttpOnly cookies
+      // ensures this browser is signed out. The remote family remains bounded
+      // by its 30-day absolute expiry and cannot be read back from the browser.
+      await revokeRefreshFamily(authApiUrl, refreshToken, resource, requestId);
+    }
   }
 
   const headers = new Headers({
@@ -1086,12 +1573,20 @@ function decodePathPart(value: string): string | null {
   }
 }
 
-function safeSessionResponse(auth: AuthenticatedRequest): Response {
+function safeSessionResponse(
+  auth: AuthenticatedRequest,
+  refreshable = false,
+): Response {
   if (auth.method === "api-key") {
     return Response.json({
       authenticated: true,
       authMode: auth.method,
-      user: { id: auth.userId, email: null, name: null },
+      // Do not disclose the registry's internal user/profile boundary to a
+      // service credential. The key id is sufficient for diagnostics.
+      user: { id: auth.keyId, email: null, name: null },
+      expiresAt: null,
+      permissions: auth.permissions,
+      refreshable: false,
     });
   }
 
@@ -1108,7 +1603,21 @@ function safeSessionResponse(auth: AuthenticatedRequest): Response {
       email: typeof session.email === "string" ? session.email : null,
       name,
     },
+    expiresAt: typeof session.exp === "number"
+      ? new Date(session.exp * 1000).toISOString()
+      : null,
+    permissions: auth.permissions,
+    refreshable,
   });
+}
+
+function restPermission(path: string, method: string): ApiKeyPermission | null {
+  if (path === "session" && method === "GET") return null;
+  if (method === "DELETE") return "delete";
+  if (path === "memories" && method === "POST") return "write";
+  if (path === "search" && method === "POST") return "read";
+  if (method === "GET") return "read";
+  return null;
 }
 
 async function handleRestApi(
@@ -1123,7 +1632,37 @@ async function handleRestApi(
 
   try {
     if (path === "session" && method === "GET") {
-      return safeSessionResponse(auth);
+      const cookieHeader = request.headers.get("cookie") ?? "";
+      const refreshToken = parseCookie(cookieHeader, REFRESH_TOKEN_COOKIE);
+      const encodedClientId = parseCookie(cookieHeader, REFRESH_CLIENT_COOKIE);
+      const expectedClientId = memoryResourceUrl(env);
+      let refreshClientId: string | null = null;
+      if (encodedClientId) {
+        try {
+          refreshClientId = decodeURIComponent(encodedClientId);
+        } catch {
+          refreshClientId = null;
+        }
+      }
+      const refreshable = auth.method === "session" &&
+        opaqueRefreshTokenSchema.safeParse(refreshToken).success &&
+        refreshClientId === expectedClientId;
+      return safeSessionResponse(auth, refreshable);
+    }
+
+    const requiredPermission = restPermission(path, method);
+    if (requiredPermission && !hasPermission(auth, requiredPermission)) {
+      const headers = new Headers();
+      if (auth.method !== "api-key") {
+        headers.set(
+          "www-authenticate",
+          `Bearer error="insufficient_scope", scope="${MEMORY_OAUTH_SCOPES[requiredPermission]}"`,
+        );
+      }
+      return Response.json(
+        { error: `Credential lacks the ${requiredPermission} permission`, requestId },
+        { status: 403, headers },
+      );
     }
 
     const profile = await getProfile(env, auth.profileName);
@@ -1371,17 +1910,30 @@ async function handleRequest(
     }
 
     if (url.pathname === "/healthz") {
-      return Response.json({ ok: true, service: "memory-server" });
+      return Response.json({
+        ok: true,
+        service: "memory-server",
+        version: env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id || null,
+      });
     }
 
     if (url.pathname === "/.well-known/oauth-protected-resource") {
       const authApiUrl = (env.AUTH_API_URL ?? "").replace(/\/$/, "");
+      const resource = memoryResourceUrl(env);
       return Response.json({
-        resource: url.origin,
+        resource,
         authorization_servers: [authApiUrl],
-        scopes_supported: ["openid", "profile", "email"],
+        scopes_supported: [
+          "openid",
+          "profile",
+          "email",
+          "offline_access",
+          "memory:read",
+          "memory:write",
+          "memory:delete",
+        ],
         bearer_methods_supported: ["header"],
-        resource_documentation: `${url.origin}/healthz`,
+        resource_documentation: `${resource}/healthz`,
       });
     }
 
@@ -1393,9 +1945,13 @@ async function handleRequest(
       if (request.method !== "GET") return methodNotAllowed("GET");
       return handleSsoCallback(env, url, request, requestId);
     }
+    if (url.pathname === "/auth/refresh") {
+      if (request.method !== "POST") return methodNotAllowed("POST");
+      return handleSessionRefresh(env, request, url, requestId);
+    }
     if (url.pathname === "/auth/logout") {
       if (request.method !== "POST") return methodNotAllowed("POST");
-      return handleLogout(request, url, requestId);
+      return handleLogout(request, env, url, requestId);
     }
 
     const auth = await authenticate(request, env, url, requestId);
@@ -1409,7 +1965,7 @@ async function handleRequest(
       const headers = new Headers({
         "content-type": "application/json",
         "www-authenticate":
-          `Bearer resource_metadata="${url.origin}/.well-known/oauth-protected-resource"`,
+          `Bearer resource_metadata="${memoryResourceUrl(env)}/.well-known/oauth-protected-resource"`,
       });
       if (url.pathname === "/mcp") {
         for (const [name, value] of mcpCorsHeaders()) headers.set(name, value);
@@ -1447,7 +2003,7 @@ async function handleRequest(
     }
 
     const handler = createMcpHandler(
-      ({ era }) => createServer(env, auth.profileName, era, requestId),
+      ({ era }) => createServer(env, auth, era, requestId),
       {
         route: "/mcp",
         corsOptions: {

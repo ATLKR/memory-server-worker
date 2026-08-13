@@ -69,6 +69,7 @@ Returns:
 
 ## Authentication
 
-The plugin accepts `MEMORY_API_KEY` for service/headless use or SSO JWT
-credentials from `MEMORY_TOKEN`/`mem login`. API-key auth takes precedence;
-when it is active, the client omits JWT and `x-memory-scope` headers.
+The plugin accepts `MEMORY_API_KEY` for service/headless use or renewable OAuth
+credentials from the plugin CLI login. `MEMORY_TOKEN` is a non-renewable JWT
+override. API-key auth takes precedence; when it is active, the client omits
+JWT and `x-memory-scope` headers.

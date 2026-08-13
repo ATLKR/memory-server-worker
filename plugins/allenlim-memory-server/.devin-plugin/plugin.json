@@ -1,7 +1,7 @@
 {
   "name": "allenlim-memory-server",
-  "version": "2.1.0",
-  "description": "Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn. Backed by Cloudflare Agent Memory with API-key or Allen Labs SSO authentication.",
+  "version": "3.0.0",
+  "description": "Reusable personal-memory skills for Devin. Connect the remote Memory MCP separately with devin mcp add/login to enable tools; Devin does not install this bundle's Claude hooks.",
   "author": {
     "name": "Allen Lim",
     "email": "allenlim@allenlabs.org"

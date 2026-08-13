@@ -10,7 +10,9 @@
  *      the auth server at `{AUTH_API_URL}/.well-known/jwks.json`.
  *   3. `createRemoteJWKSet` from `jose` caches the key set in-process with
  *      a 5-minute TTL and auto-refetches on key rotation.
- *   4. Issuer + audience must match `AUTH_API_URL`.
+ *   4. Issuer must match `AUTH_API_URL`; the audience is the protected
+ *      Memory resource origin (with an explicit, temporary legacy-audience
+ *      compatibility switch for staged migrations).
  *
  * The JWT payload (SessionPayload) carries the user's identity:
  *   - `sub`    — Better Auth user id (UUID string)
@@ -20,9 +22,10 @@
  *   - `memberships` — org memberships
  *
  * JWT verification itself needs no shared secret. API-key authentication is
- * handled separately below through a digest-only Worker secret. The JWT is
- * valid for 8h (per auth-api config), after which the client must
- * re-authenticate.
+ * handled separately below through a digest-only Worker secret. The JWT
+ * access token is valid for 15 minutes. Browser/CLI clients can use the
+ * auth server's one-time rotating refresh token for up to the family's
+ * absolute 30-day lifetime.
  */
 
 import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
@@ -37,6 +40,7 @@ export interface SessionPayload extends JWTPayload {
   role?: string | null; // platform role: 'admin' | 'user'
   banned?: boolean | number | null;
   site?: string | null;
+  scope?: string;
 }
 
 // ---------- JWKS cache ----------
@@ -49,6 +53,9 @@ let jwksGetKey: JWTVerifyGetKey | null = null;
 let jwksSourceUrl = "";
 const JWKS_CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 const JWKS_FETCH_TIMEOUT = 5000; // 5 seconds
+const ACCESS_TOKEN_MAX_LIFETIME_SECONDS = 15 * 60;
+const LEGACY_TOKEN_MAX_LIFETIME_SECONDS = 8 * 60 * 60;
+const JWT_CLOCK_TOLERANCE_SECONDS = 60;
 
 /**
  * Verify a JWT bearer token against the auth server's JWKS.
@@ -62,6 +69,11 @@ export async function verifyJwt(
   authApiUrl: string,
   token: string,
   requestId?: string,
+  options?: {
+    resourceAudience?: string;
+    legacyAudienceCutoff?: string;
+    now?: Date;
+  },
 ): Promise<SessionPayload | null> {
   if (!token) return null;
   try {
@@ -79,12 +91,68 @@ export async function verifyJwt(
       jwksSourceUrl = jwksUrl;
     }
 
+    const resourceAudience = options?.resourceAudience?.replace(/\/$/, "");
+    const nowMs = (options?.now ?? new Date()).getTime();
+    const legacyCutoffMs = options?.legacyAudienceCutoff
+      ? Date.parse(options.legacyAudienceCutoff)
+      : Number.NaN;
+    const legacyWindowOpen =
+      Number.isFinite(legacyCutoffMs) &&
+      Number.isFinite(nowMs) &&
+      nowMs <= legacyCutoffMs + (8 * 60 + 5) * 60 * 1000;
+    const audiences = resourceAudience
+      ? [
+          resourceAudience,
+          ...(legacyWindowOpen ? [normalizedAuthApiUrl] : []),
+        ]
+      : [normalizedAuthApiUrl];
+
     const { payload } = await jwtVerify(token, jwksGetKey, {
       issuer: normalizedAuthApiUrl,
-      audience: normalizedAuthApiUrl,
+      audience: audiences,
       algorithms: ["RS256"],
+      requiredClaims: ["sub", "iat", "exp"],
+      currentDate: options?.now,
+      clockTolerance: JWT_CLOCK_TOLERANCE_SECONDS,
     });
-    if (typeof payload.sub !== "string") return null;
+    if (
+      typeof payload.sub !== "string" ||
+      typeof payload.iat !== "number" ||
+      typeof payload.exp !== "number" ||
+      !Number.isSafeInteger(payload.iat) ||
+      !Number.isSafeInteger(payload.exp) ||
+      payload.exp <= payload.iat ||
+      payload.iat * 1000 > nowMs + JWT_CLOCK_TOLERANCE_SECONDS * 1000
+    ) {
+      return null;
+    }
+
+    const resourceBound = Boolean(resourceAudience && payload.aud === resourceAudience);
+    const lifetimeSeconds = payload.exp - payload.iat;
+    if (resourceBound) {
+      if (
+        lifetimeSeconds > ACCESS_TOKEN_MAX_LIFETIME_SECONDS ||
+        payload.token_use !== "access" ||
+        typeof payload.client_id !== "string" ||
+        !payload.client_id.trim() ||
+        payload.azp !== payload.client_id ||
+        typeof payload.jti !== "string" ||
+        !payload.jti.trim()
+      ) {
+        return null;
+      }
+    } else if (resourceAudience) {
+      const issuedAtMs = payload.iat * 1000;
+      if (
+        payload.aud !== normalizedAuthApiUrl ||
+        !legacyWindowOpen ||
+        !Number.isFinite(issuedAtMs) ||
+        issuedAtMs >= legacyCutoffMs ||
+        lifetimeSeconds > LEGACY_TOKEN_MAX_LIFETIME_SECONDS
+      ) {
+        return null;
+      }
+    }
     return payload as SessionPayload;
   } catch (err) {
     const rawErrorType = err instanceof Error ? err.name : typeof err;
@@ -120,46 +188,93 @@ export function extractBearerToken(authHeader: string | null): string | null {
  * MEMORY_API_KEY_REGISTRY. The secret uses this versioned JSON shape:
  *
  * {
- *   "version": 1,
+ *   "version": 2,
  *   "keys": [{
  *     "id": "automation",
  *     "digest": "sha256:<64 lowercase hex characters>",
  *     "userId": "stable-user-id",
- *     "logicalScope": "optional-fixed-scope"
+ *     "logicalScope": "optional-fixed-scope",
+ *     "permissions": ["read", "write"],
+ *     "expiresAt": "2026-09-12T00:00:00Z",
+ *     "disabledAt": "2026-08-20T00:00:00Z"
  *   }]
  * }
  *
- * Plaintext API keys must never be placed in the registry. `strict()` also
- * rejects accidental fields such as `key` or `token`.
+ * Version 1 remains accepted only for the legacy digest/user/scope shape and
+ * retains the historical read/write/delete access. Version 2 requires every
+ * key to declare both the narrowest required permission set and an expiry.
+ * `expiresAt` rejects the key at and after that instant. `disabledAt` can
+ * revoke immediately or schedule revocation. Plaintext API keys must never be
+ * placed in the registry. `strict()` also rejects accidental fields such as
+ * `key` or `token`, and prevents new policy fields from being smuggled into a
+ * version-1 registry where they would otherwise look enforced.
  */
+export const API_KEY_PERMISSIONS = ["read", "write", "delete"] as const;
+export type ApiKeyPermission = typeof API_KEY_PERMISSIONS[number];
+
+const apiKeyTimestampSchema = z
+  .string()
+  .min(20)
+  .max(64)
+  .refine(
+    (value) =>
+      /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+      Number.isFinite(Date.parse(value)),
+    { message: "must be an RFC 3339 timestamp with a timezone" },
+  );
+
+const apiKeyRegistryBaseEntryShape = {
+  id: z.string().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+  digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
+  userId: z
+    .string()
+    .min(1)
+    .max(256)
+    .refine((value) => value === value.trim(), {
+      message: "userId must not have surrounding whitespace",
+    }),
+  logicalScope: z
+    .string()
+    .min(1)
+    .max(128)
+    .refine((value) => value === value.trim(), {
+      message: "logicalScope must not have surrounding whitespace",
+    })
+    .optional(),
+} as const;
+
+const apiKeyPermissionsSchema = z
+  .array(z.enum(API_KEY_PERMISSIONS))
+  .min(1)
+  .max(API_KEY_PERMISSIONS.length)
+  .refine((permissions) => new Set(permissions).size === permissions.length, {
+    message: "permissions must be unique",
+  });
+
+const legacyApiKeyRegistryEntrySchema = z
+  .object(apiKeyRegistryBaseEntryShape)
+  .strict();
+
 const apiKeyRegistryEntrySchema = z
   .object({
-    id: z.string().min(1).max(64).regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
-    digest: z.string().regex(/^sha256:[0-9a-f]{64}$/),
-    userId: z
-      .string()
-      .min(1)
-      .max(256)
-      .refine((value) => value === value.trim(), {
-        message: "userId must not have surrounding whitespace",
-      }),
-    logicalScope: z
-      .string()
-      .min(1)
-      .max(128)
-      .refine((value) => value === value.trim(), {
-        message: "logicalScope must not have surrounding whitespace",
-      })
-      .optional(),
+    ...apiKeyRegistryBaseEntryShape,
+    permissions: apiKeyPermissionsSchema,
+    expiresAt: apiKeyTimestampSchema,
+    disabledAt: apiKeyTimestampSchema.optional(),
   })
   .strict();
 
 const apiKeyRegistrySchema = z
-  .object({
-    version: z.literal(1),
-    keys: z.array(apiKeyRegistryEntrySchema).min(1).max(20),
-  })
-  .strict()
+  .discriminatedUnion("version", [
+    z.object({
+      version: z.literal(1),
+      keys: z.array(legacyApiKeyRegistryEntrySchema).min(1).max(20),
+    }).strict(),
+    z.object({
+      version: z.literal(2),
+      keys: z.array(apiKeyRegistryEntrySchema).min(1).max(20),
+    }).strict(),
+  ])
   .superRefine((registry, context) => {
     const ids = new Set<string>();
     const digests = new Set<string>();
@@ -197,6 +312,7 @@ export interface ApiKeyIdentity {
   keyId: string;
   userId: string;
   logicalScope: string | null;
+  permissions: readonly ApiKeyPermission[];
 }
 
 /** Extract an API key from `Authorization: ApiKey <key>`. */
@@ -242,6 +358,7 @@ function parseApiKeyRegistry(registryJson: string): z.infer<typeof apiKeyRegistr
 export async function verifyApiKey(
   registryJson: string | undefined,
   providedKey: string,
+  now: Date = new Date(),
 ): Promise<ApiKeyIdentity | null> {
   if (!registryJson || providedKey !== providedKey.trim()) return null;
   if (!VISIBLE_ASCII_PATTERN.test(providedKey)) return null;
@@ -256,6 +373,8 @@ export async function verifyApiKey(
 
   const registry = parseApiKeyRegistry(registryJson);
   if (!registry) return null;
+  const nowMs = now.getTime();
+  if (!Number.isFinite(nowMs)) return null;
 
   const providedDigest = new Uint8Array(
     await crypto.subtle.digest("SHA-256", keyBytes),
@@ -264,10 +383,18 @@ export async function verifyApiKey(
   for (const entry of registry.keys) {
     const expectedDigest = decodeSha256Digest(entry.digest);
     if (crypto.subtle.timingSafeEqual(providedDigest, expectedDigest)) {
+      const expiresAt = "expiresAt" in entry ? entry.expiresAt : undefined;
+      const disabledAt = "disabledAt" in entry ? entry.disabledAt : undefined;
+      const expired = expiresAt !== undefined && Date.parse(expiresAt) <= nowMs;
+      const disabled = disabledAt !== undefined && Date.parse(disabledAt) <= nowMs;
+      if (expired || disabled) continue;
       identity = {
         keyId: entry.id,
         userId: entry.userId,
         logicalScope: entry.logicalScope ?? null,
+        permissions: "permissions" in entry
+          ? entry.permissions
+          : API_KEY_PERMISSIONS,
       };
     }
   }

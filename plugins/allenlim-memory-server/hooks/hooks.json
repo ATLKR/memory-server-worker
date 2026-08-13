@@ -11,7 +11,7 @@
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/scripts/pre-prompt.mjs"
             ],
-            "timeout": 15
+            "timeout": 35
           }
         ]
       }
@@ -26,7 +26,7 @@
             "args": [
               "${CLAUDE_PLUGIN_ROOT}/scripts/post-turn.mjs"
             ],
-            "timeout": 15
+            "timeout": 35
           }
         ]
       }

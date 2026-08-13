@@ -21,6 +21,7 @@ jobs:
           node-version-file: .nvmrc
           cache: npm
       - run: npm ci
+      - run: npm audit --omit=dev --audit-level=moderate
       - run: npm run types
       - run: git diff --exit-code -- packages/memory-worker/env.d.ts
       - run: npm run check

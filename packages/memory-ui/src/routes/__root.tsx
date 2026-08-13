@@ -31,7 +31,10 @@ export const Route = createRootRoute({
         content: "Search and manage your private Agent Memory collection.",
       },
     ],
-    links: [{ rel: "stylesheet", href: appCss }],
+    links: [
+      { rel: "stylesheet", href: appCss },
+      { rel: "icon", href: "/favicon.svg", type: "image/svg+xml" },
+    ],
   }),
   component: RootComponent,
   errorComponent: RootErrorComponent,

@@ -9,6 +9,10 @@
   "compatibility_flags": ["nodejs_compat"],
 
   "main": "src/index.ts",
+  "upload_source_maps": true,
+  "version_metadata": {
+    "binding": "CF_VERSION_METADATA"
+  },
   "observability": {
     "enabled": true,
     "logs": {
@@ -27,10 +31,18 @@
   "vars": {
     // Allen Labs central auth API. The worker verifies RS256 JWTs minted by
     // this server via its JWKS endpoint ({AUTH_API_URL}/.well-known/jwks.json).
-    // JWT issuer + audience must match this URL.
+    // JWT issuer must match this URL; audience must match MEMORY_RESOURCE_URL.
     "AUTH_API_URL": "https://auth-api.allen.company",
     // Auth web UI origin (where the browser sign-in form lives).
     "AUTH_WEB_URL": "https://auth.allen.company",
+    // Canonical RFC 8707 protected-resource identifier and JWT audience.
+    "MEMORY_RESOURCE_URL": "https://memory.allenlim.net",
+    // Temporary staged-rollout cutoff T0. Set this to the auth deployment
+    // instant before deploying. Generic auth-api audiences are accepted only
+    // when token iat < T0 and current time <= T0 + 8h + 5m. Resource tokens
+    // without memory:* capability scopes are accepted only through T0 + 20m.
+    // Remove this var in the next release. Empty/invalid fails closed.
+    "LEGACY_AUTH_AUDIENCE_CUTOFF": "2026-08-13T06:00:00Z",
     // Default logical sub-scope when x-memory-scope is absent.
     // Each scope gets its own Agent Memory profile → isolated memory store.
     // Every logical scope is bound to the JWT `sub`; empty selects the user's

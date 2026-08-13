@@ -46,16 +46,23 @@ const CHECKPOINT_LOCK_RETRY_MS = 10;
 const CHECKPOINT_LOCK_STALE_MS = 30_000;
 
 export async function runHook(hookName) {
-  switch (hookName) {
-    case "pre-prompt":
-    case "UserPromptSubmit":
-      return runPrePrompt();
-    case "post-turn":
-    case "Stop":
-      return runPostTurn();
-    default:
-      console.error(`[allenlim-memory-server] Unknown hook: ${hookName}`);
-      process.exit(0);
+  try {
+    switch (hookName) {
+      case "pre-prompt":
+      case "UserPromptSubmit":
+        return await runPrePrompt();
+      case "post-turn":
+      case "Stop":
+        return await runPostTurn();
+      default:
+        console.error(`[allenlim-memory-server] Unknown hook: ${hookName}`);
+        return;
+    }
+  } catch (error) {
+    const label = hookName === "post-turn" || hookName === "Stop"
+      ? "post-turn"
+      : "pre-prompt";
+    console.error(`[allenlim-memory-server:${label}] ${error.message}`);
   }
 }
 
@@ -72,7 +79,7 @@ async function runPrePrompt() {
 
   const prompt = hookInput.prompt ?? "";
   if (!prompt) {
-    process.exit(0);
+    return;
   }
 
   // Agent Memory recall() accepts natural language. Trim on a code-point
@@ -86,7 +93,7 @@ async function runPrePrompt() {
     const candidates = results.candidates ?? [];
 
     if (candidates.length === 0) {
-      process.exit(0);
+      return;
     }
 
     // Format the synthesized answer + candidate memories as context.
@@ -112,12 +119,12 @@ async function runPrePrompt() {
   } catch (err) {
     if (isTokenExpired()) {
       console.error(
-        "[allenlim-memory-server:pre-prompt] Token expired. Run `mem login` to refresh.",
+        "[allenlim-memory-server:pre-prompt] Session refresh failed. Sign in again with the plugin CLI.",
       );
     } else {
       console.error(`[allenlim-memory-server:pre-prompt] ${err.message}`);
     }
-    process.exit(0);
+    return;
   }
 }
 
@@ -129,11 +136,11 @@ async function runPostTurn() {
   try {
     hookInput = JSON.parse(raw);
   } catch {
-    process.exit(0);
+    return;
   }
 
   if (hookInput.stop_hook_active) {
-    process.exit(0);
+    return;
   }
 
   const sessionId = hookInput.session_id
@@ -159,7 +166,7 @@ async function runPostTurn() {
         },
         sessionId,
       });
-      process.exit(0);
+      return;
     } catch {
       console.error(
         incrementalIngestAttempted
@@ -169,7 +176,7 @@ async function runPostTurn() {
       // If an incremental server request was already attempted, do not send a
       // second overlapping fallback payload. Filesystem/setup failures that
       // happened before any request can still use the hook's direct messages.
-      if (incrementalIngestAttempted) process.exit(0);
+      if (incrementalIngestAttempted) return;
       incrementalFallback = true;
     }
   }
@@ -180,7 +187,7 @@ async function runPostTurn() {
   });
 
   if (messages.length === 0) {
-    process.exit(0);
+    return;
   }
 
   // Preserve the newest messages while staying inside the server contract:
@@ -188,7 +195,7 @@ async function runPostTurn() {
   const trimmedMessages = trimMessagesForIngest(messages);
 
   if (trimmedMessages.length === 0) {
-    process.exit(0);
+    return;
   }
 
   try {
@@ -199,14 +206,13 @@ async function runPostTurn() {
   } catch (err) {
     if (isTokenExpired()) {
       console.error(
-        "[allenlim-memory-server:post-turn] Token expired. Run `mem login` to refresh.",
+        "[allenlim-memory-server:post-turn] Session refresh failed. Sign in again with the plugin CLI.",
       );
     } else {
       console.error(`[allenlim-memory-server:post-turn] ${err.message}`);
     }
   }
 
-  process.exit(0);
 }
 
 /**

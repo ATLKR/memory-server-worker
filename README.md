@@ -18,14 +18,17 @@ A two-part system for giving AI agents persistent, searchable memory:
 
 Plus integration packages:
 
-- **`plugins/allenlim-memory-server`** — Devin / Claude Code / Codex plugin with
-  hooks for automatic recall (pre-prompt) and capture (post-turn).
+- **`plugins/allenlim-memory-server`** — Codex app/skills, Claude Code skills
+  and hooks, reusable Devin skills, and the optional `mem` CLI. Devin's remote
+  MCP connection is configured separately; Claude hooks are not installed in
+  Devin or Codex.
 - **`distributions/chatgpt/allenlim-memory-server`** — ChatGPT-compatible
   alternate distribution.
 
-Current release: **2.1.0**. This release adds operator-mapped API keys,
-HttpOnly browser sessions, incremental capture checkpoints, and security and
-release hardening on top of the Agents/MCP SDK 2.0 migration.
+Current release: **3.0.0**. This breaking release binds OAuth access tokens to
+the Memory resource, adds rotating 30-day refresh sessions, introduces
+least-privilege API-key registry v2, and hardens every browser and plugin
+credential path.
 
 ## Architecture
 
@@ -47,8 +50,11 @@ memory.allenlim.net (UI Worker — TanStack Start)
 ```
 
 Auth supports Allen Labs SSO and operator-provisioned API keys. CLI/MCP clients
-send an RS256 JWT as `Authorization: Bearer <jwt>` or a high-entropy key as
-`x-memory-api-key`. Browser SSO uses a Secure, HttpOnly session cookie that is
+send a short-lived, resource-bound RS256 JWT as `Authorization: Bearer <jwt>`
+or a high-entropy key as `x-memory-api-key`. Browser SSO keeps the 15-minute
+access token and rotating refresh token in separate Secure, HttpOnly,
+host-bound cookies. The UI refreshes proactively and after an eligible 401;
+the renewable session has a 30-day absolute lifetime. Browser cookies are
 accepted only on same-origin `/api/*` requests and never on `/mcp`.
 
 API-key plaintext belongs in a secret manager such as Proton Pass. The Worker
@@ -149,6 +155,24 @@ Agent Memory automatically classifies every memory as one of:
 
 ## CLI
 
+The plugin bundle does not place executables on `PATH` by itself. From a
+repository checkout, either use the workspace command directly or create an
+optional global link:
+
+```bash
+# Works without changing PATH
+npm exec --workspace allenlim-memory-server -- mem whoami
+
+# Optional: make `mem` available globally from this checkout
+npm link --workspace allenlim-memory-server
+```
+
+Interactive login uses OAuth with an ephemeral loopback callback, state, and
+PKCE S256. Access tokens last 15 minutes and refresh automatically; the
+renewable session lasts up to 30 days. Credentials and every rotated refresh
+token are written atomically to `~/.memory/credentials.json` with owner-only
+permissions.
+
 ```bash
 # Login (opens browser for SSO)
 mem login
@@ -169,9 +193,9 @@ mem list --session my-session-id
 # Get a specific memory
 mem get 01KZR5ZD6ZMQNQ36FR98EP4Y40
 
-# Delete
+# Delete (interactive confirmation; use --yes only for intentional automation)
 mem delete 01KZR5ZD6ZMQNQ36FR98EP4Y40
-mem delete-session my-session-id
+mem delete-session my-session-id --yes
 
 # Summary and stats
 mem summary
@@ -187,11 +211,31 @@ MEMORY_API_KEY="..." mem stats
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `MEMORY_SERVER_URL` | Worker URL | `https://memory.allenlim.net` |
+| `MEMORY_SERVER_URL` | Worker URL; HTTPS required except for loopback development | `https://memory.allenlim.net` |
+| `MEMORY_AUTH_API_URL` | OAuth issuer URL; HTTPS required except for loopback development | `https://auth-api.allen.company` |
 | `MEMORY_API_KEY` | API key for headless automation; takes precedence over JWT auth | — |
 | `MEMORY_TOKEN` | JWT bearer token (overrides credential file) | — |
 | `MEMORY_SCOPE` | Optional JWT logical sub-scope; ignored for API-key auth | — |
 | `MEMORY_REQUEST_TIMEOUT_MS` | Plugin request timeout, clamped to 100–60000 ms | `10000` |
+
+### Client behavior
+
+- **Codex:** the registered app supplies the nine Memory MCP tools and the
+  plugin supplies recall/capture skills. There is no local Claude-style hook.
+- **Claude Code:** `hooks/hooks.json` runs `UserPromptSubmit` recall and `Stop`
+  capture. The hooks fail open if Memory is temporarily unavailable.
+- **Devin:** the `.devin-plugin` package supplies reusable skills only. Add and
+  authenticate the remote MCP explicitly:
+
+  ```sh
+  devin mcp add --scope user allenlim-memory-server https://memory.allenlim.net/mcp --oauth-resource https://memory.allenlim.net
+  devin mcp login allenlim-memory-server --scopes openid,profile,email,offline_access,memory:read,memory:write,memory:delete --oauth-resource https://memory.allenlim.net
+  ```
+
+  OAuth is preferred for a personal session and supports automatic refresh.
+  For shared/headless use, keep an API key in Devin Secrets and send it as
+  `x-memory-api-key`; do not paste it into the plugin manifest or a shell
+  command. Devin does not consume this bundle's Claude hooks.
 
 ### Wrangler bindings (backend)
 
@@ -214,8 +258,14 @@ shell history, or command arguments. The registry is versioned JSON containing
 digest-only entries:
 
 ```json
-{"version":1,"keys":[{"id":"automation","digest":"sha256:<64-lowercase-hex>","userId":"<stable-user-id>"}]}
+{"version":2,"keys":[{"id":"automation","digest":"sha256:<64-lowercase-hex>","userId":"<stable-user-id>","permissions":["read","write","delete"],"expiresAt":"2027-08-13T00:00:00Z"}]}
 ```
+
+Version 2 requires an explicit non-empty subset of `read`, `write`, and
+`delete`, plus an RFC 3339 expiry for every key. An optional `disabledAt`
+timestamp schedules revocation. The legacy version-1 shape is accepted
+temporarily with historical full access so production can migrate without
+downtime; do not create new version-1 registries.
 
 ## Development
 

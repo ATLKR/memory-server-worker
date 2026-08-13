@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn. Use `mem` CLI to manually add, search, get, list, or delete memories.
+description: Personal persistent memory tools and client-specific recall/capture guidance. Use MCP tools directly or the optional repository `mem` CLI.
 ---
 
 # Memory Skill
@@ -12,20 +12,38 @@ supersession, and hybrid search (keyword + semantic + topic key).
 Authentication uses either a server-issued API key or Allen Labs SSO
 (JWT/JWKS). API keys are suitable for CI, services, and headless automation.
 
-## How it works
+## How it works by client
 
-- **Before each prompt**: The `UserPromptSubmit` hook automatically searches
+- **Claude Code, before each prompt**: The `UserPromptSubmit` hook searches
   the memory server for memories relevant to your current prompt and injects
-  them as additional context. You don't need to do anything — just use the
-  recalled memories as relevant context.
+  them as additional context.
 
-- **After each turn**: The `Stop` hook automatically ingests the conversation
+- **Claude Code, after each turn**: The `Stop` hook ingests the conversation
   messages into Agent Memory, which extracts facts, events, instructions, and
   tasks automatically. This happens silently.
 
+- **Codex**: The registered Memory app provides all nine MCP tools. The recall
+  and capture skills direct the agent to call them; Claude hooks are not used.
+
+- **Devin**: This plugin supplies skills only. The remote HTTP MCP must be
+  added separately at `https://memory.allenlim.net/mcp`; Claude hooks are not
+  supported by Devin's plugin package.
+
+  ```bash
+  devin mcp add --scope user allenlim-memory-server https://memory.allenlim.net/mcp --oauth-resource https://memory.allenlim.net
+  devin mcp login allenlim-memory-server --scopes openid,profile,email,offline_access,memory:read,memory:write,memory:delete --oauth-resource https://memory.allenlim.net
+  ```
+
+  Keep the explicit `--oauth-resource` value: Devin otherwise derives it from
+  the `/mcp` endpoint URL, while Memory access tokens are audience-bound to the
+  protected resource origin.
+
 ## Manual memory operations
 
-Use the `mem` CLI to manually manage memories:
+Use the MCP tools directly when they are available. The optional `mem` CLI can
+also manage memories. A plugin install does not add it to `PATH`; from this
+repository run `npm exec --workspace allenlim-memory-server -- mem ...`, or
+first run `npm link --workspace allenlim-memory-server` to create `mem`:
 
 ```bash
 # Check authentication status
@@ -51,7 +69,7 @@ mem list --session my-session-id
 mem delete 01KZR5ZD6ZMQNQ36FR98EP4Y40
 
 # Delete all memories for a session
-mem delete-session my-session-id
+mem delete-session my-session-id --yes
 
 # Generate a structured summary
 mem summary
@@ -69,10 +87,20 @@ mem logout
 ## Configuration
 
 The memory server URL defaults to `https://memory.allenlim.net`.
-Override with the `MEMORY_SERVER_URL` environment variable if needed.
+`MEMORY_SERVER_URL` and `MEMORY_AUTH_API_URL` require HTTPS except for explicit
+loopback development URLs.
 
-Credentials are stored in `~/.memory/credentials.json` after `mem login`.
-For CI/headless use, set `MEMORY_TOKEN` to a JWT directly.
+`mem login` uses OAuth state and PKCE S256 with a temporary loopback callback;
+tokens are never copied through the terminal. The 15-minute access token is
+automatically refreshed for up to 30 days. Rotated credentials are stored
+atomically in `~/.memory/credentials.json` with owner-only permissions. For
+CI/headless use, prefer `MEMORY_API_KEY`; `MEMORY_TOKEN` is a non-renewable
+override.
+
+The CLI reuses a recent public OAuth client registration across ephemeral
+loopback ports to avoid unbounded registrations. This public identifier (not a
+credential) is stored in `~/.memory/oauth-client.json`. If an administrator has
+removed that registration, retry once with `mem login --new-client`.
 
 For API-key authentication, set `MEMORY_API_KEY`. It takes precedence over
 `MEMORY_TOKEN` and stored SSO credentials. In API-key mode, the client sends

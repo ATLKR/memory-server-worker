@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
 import { timingSafeEqual as nodeTimingSafeEqual } from "node:crypto";
 import { describe, it } from "node:test";
+import { exportJWK, generateKeyPair, SignJWT } from "jose";
 import {
   API_KEY_MAX_BYTES,
+  API_KEY_PERMISSIONS,
   API_KEY_REGISTRY_MAX_BYTES,
+  type ApiKeyPermission,
   extractAuthorizationApiKey,
   verifyApiKey,
+  verifyJwt,
 } from "./auth.ts";
 
 // Node 24 does not yet expose the Workers-only SubtleCrypto extension. Keep
@@ -42,18 +46,174 @@ async function registry(
     key: string;
     userId: string;
     logicalScope?: string;
+    permissions?: ApiKeyPermission[];
+    expiresAt?: string;
+    disabledAt?: string;
   }>,
+  version: 1 | 2 = 2,
 ): Promise<string> {
   return JSON.stringify({
-    version: 1,
+    version,
     keys: await Promise.all(
-      entries.map(async ({ key, ...entry }) => ({
+      entries.map(async ({ key, permissions, expiresAt, disabledAt, ...entry }) => ({
         ...entry,
         digest: await digest(key),
+        ...(version === 2
+          ? {
+              permissions: permissions ?? [...API_KEY_PERMISSIONS],
+              expiresAt: expiresAt ?? "2099-01-01T00:00:00Z",
+              ...(disabledAt ? { disabledAt } : {}),
+            }
+          : {}),
       })),
     ),
   });
 }
+
+async function jwtFixture(
+  authApiUrl: string,
+  audience: string,
+  issuedAt: number,
+): Promise<{ token: string; jwks: { keys: Array<Record<string, unknown>> } }> {
+  const { privateKey, publicKey } = await generateKeyPair("RS256");
+  const publicJwk = await exportJWK(publicKey);
+  const kid = crypto.randomUUID();
+  const token = await new SignJWT({
+    email: "user@example.test",
+    ...(audience === authApiUrl
+      ? {}
+      : {
+          token_use: "access",
+          client_id: "memory-test-client",
+          azp: "memory-test-client",
+          scope: "memory:read memory:write memory:delete",
+        }),
+  })
+    .setProtectedHeader({ alg: "RS256", kid })
+    .setSubject("user-1")
+    .setIssuer(authApiUrl)
+    .setAudience(audience)
+    .setIssuedAt(issuedAt)
+    .setExpirationTime(issuedAt + (audience === authApiUrl ? 8 * 60 * 60 : 15 * 60))
+    .setJti(crypto.randomUUID())
+    .sign(privateKey);
+  return {
+    token,
+    jwks: { keys: [{ ...publicJwk, kid, alg: "RS256", use: "sig" }] },
+  };
+}
+
+describe("resource-bound JWT authentication", () => {
+  it("accepts the exact Memory audience", async (t) => {
+    const authApiUrl = `https://auth-${crypto.randomUUID()}.example.test`;
+    const resource = "https://memory.allenlim.net";
+    const fixture = await jwtFixture(
+      authApiUrl,
+      resource,
+      Math.floor(Date.now() / 1000),
+    );
+    t.mock.method(globalThis, "fetch", async () => Response.json(fixture.jwks));
+
+    assert.equal(
+      (await verifyJwt(authApiUrl, fixture.token, undefined, {
+        resourceAudience: resource,
+      }))?.sub,
+      "user-1",
+    );
+  });
+
+  it("automatically sunsets the legacy auth-api audience", async (t) => {
+    const authApiUrl = `https://auth-${crypto.randomUUID()}.example.test`;
+    const resource = "https://memory.allenlim.net";
+    const baseMs = Math.floor(Date.now() / 1000) * 1000;
+    const cutoff = new Date(baseMs + 60_000).toISOString();
+    const fixture = await jwtFixture(
+      authApiUrl,
+      authApiUrl,
+      Math.floor(baseMs / 1000),
+    );
+    t.mock.method(globalThis, "fetch", async () => Response.json(fixture.jwks));
+
+    assert.equal(
+      (await verifyJwt(authApiUrl, fixture.token, undefined, {
+        resourceAudience: resource,
+        legacyAudienceCutoff: cutoff,
+        now: new Date(baseMs + 2 * 60_000),
+      }))?.sub,
+      "user-1",
+    );
+    assert.equal(
+      await verifyJwt(authApiUrl, fixture.token, undefined, {
+        resourceAudience: resource,
+        legacyAudienceCutoff: cutoff,
+        now: new Date(baseMs + (8 * 60 + 7) * 60_000),
+      }),
+      null,
+    );
+  });
+
+  it("rejects legacy tokens issued at or after the migration cutoff", async (t) => {
+    const authApiUrl = `https://auth-${crypto.randomUUID()}.example.test`;
+    const resource = "https://memory.allenlim.net";
+    const cutoffMs = Math.floor(Date.now() / 1000) * 1000;
+    const fixture = await jwtFixture(
+      authApiUrl,
+      authApiUrl,
+      Math.floor(cutoffMs / 1000),
+    );
+    t.mock.method(globalThis, "fetch", async () => Response.json(fixture.jwks));
+
+    assert.equal(
+      await verifyJwt(authApiUrl, fixture.token, undefined, {
+        resourceAudience: resource,
+        legacyAudienceCutoff: new Date(cutoffMs).toISOString(),
+        now: new Date(cutoffMs),
+      }),
+      null,
+    );
+  });
+
+  it("rejects resource tokens missing access-token claims or exceeding 15 minutes", async (t) => {
+    const authApiUrl = `https://auth-${crypto.randomUUID()}.example.test`;
+    const resource = "https://memory.allenlim.net";
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const { privateKey, publicKey } = await generateKeyPair("RS256");
+    const kid = crypto.randomUUID();
+    const publicJwk = await exportJWK(publicKey);
+    t.mock.method(globalThis, "fetch", async () => Response.json({
+      keys: [{ ...publicJwk, kid, alg: "RS256", use: "sig" }],
+    }));
+
+    const missingClaims = await new SignJWT({})
+      .setProtectedHeader({ alg: "RS256", kid })
+      .setSubject("user-1")
+      .setIssuer(authApiUrl)
+      .setAudience(resource)
+      .setIssuedAt(issuedAt)
+      .setExpirationTime(issuedAt + 15 * 60)
+      .sign(privateKey);
+    const tooLong = await new SignJWT({
+      token_use: "access",
+      client_id: "memory-test-client",
+      azp: "memory-test-client",
+    })
+      .setProtectedHeader({ alg: "RS256", kid })
+      .setSubject("user-1")
+      .setIssuer(authApiUrl)
+      .setAudience(resource)
+      .setIssuedAt(issuedAt)
+      .setExpirationTime(issuedAt + 16 * 60)
+      .setJti(crypto.randomUUID())
+      .sign(privateKey);
+
+    assert.equal(await verifyJwt(authApiUrl, missingClaims, undefined, {
+      resourceAudience: resource,
+    }), null);
+    assert.equal(await verifyJwt(authApiUrl, tooLong, undefined, {
+      resourceAudience: resource,
+    }), null);
+  });
+});
 
 describe("API key authentication", () => {
   it("matches one of multiple digest-only entries and returns its fixed identity", async () => {
@@ -73,10 +233,98 @@ describe("API key authentication", () => {
       keyId: "second",
       userId: "user-b",
       logicalScope: "automation",
+      permissions: API_KEY_PERMISSIONS,
     });
     assert.equal(
       await verifyApiKey(value, "memory_test_wrong_0123456789abcdef"),
       null,
+    );
+  });
+
+  it("returns declared least-privilege permissions and keeps version-1 entries compatible", async () => {
+    const readOnlyKey = "memory_test_read_only_0123456789abcdef";
+    const legacyKey = "memory_test_legacy_full_0123456789abcdef";
+    const value = await registry([
+      {
+        id: "read-only",
+        key: readOnlyKey,
+        userId: "user-a",
+        permissions: ["read"],
+      },
+    ]);
+    const legacyValue = await registry(
+      [{ id: "legacy", key: legacyKey, userId: "user-b" }],
+      1,
+    );
+
+    assert.deepEqual(await verifyApiKey(value, readOnlyKey), {
+      keyId: "read-only",
+      userId: "user-a",
+      logicalScope: null,
+      permissions: ["read"],
+    });
+    assert.deepEqual(
+      (await verifyApiKey(legacyValue, legacyKey))?.permissions,
+      API_KEY_PERMISSIONS,
+    );
+  });
+
+  it("requires explicit permissions and expiry in version 2", async () => {
+    const key = "memory_test_v2_policy_0123456789abcdef";
+    const keyDigest = await digest(key);
+    const baseEntry = {
+      id: "v2-policy",
+      digest: keyDigest,
+      userId: "user-a",
+    };
+
+    for (const invalid of [
+      { version: 2, keys: [{ ...baseEntry, expiresAt: "2099-01-01T00:00:00Z" }] },
+      { version: 2, keys: [{ ...baseEntry, permissions: ["read"] }] },
+      {
+        version: 1,
+        keys: [{
+          ...baseEntry,
+          permissions: ["read"],
+          expiresAt: "2099-01-01T00:00:00Z",
+        }],
+      },
+    ]) {
+      assert.equal(await verifyApiKey(JSON.stringify(invalid), key), null);
+    }
+  });
+
+  it("rejects expired or disabled keys while allowing scheduled revocation", async () => {
+    const expiredKey = "memory_test_expired_0123456789abcdef";
+    const disabledKey = "memory_test_disabled_0123456789abcdef";
+    const scheduledKey = "memory_test_scheduled_0123456789abcdef";
+    const value = await registry([
+      {
+        id: "expired",
+        key: expiredKey,
+        userId: "user-a",
+        expiresAt: "2026-08-13T00:00:00Z",
+      },
+      {
+        id: "disabled",
+        key: disabledKey,
+        userId: "user-a",
+        disabledAt: "2026-08-12T23:59:59Z",
+      },
+      {
+        id: "scheduled",
+        key: scheduledKey,
+        userId: "user-a",
+        disabledAt: "2026-08-14T00:00:00Z",
+      },
+    ]);
+    const now = new Date("2026-08-13T00:00:00Z");
+
+    assert.equal(await verifyApiKey(value, expiredKey, now), null);
+    assert.equal(await verifyApiKey(value, disabledKey, now), null);
+    assert.deepEqual(
+      (await verifyApiKey(value, scheduledKey, now))?.permissions,
+      API_KEY_PERMISSIONS,
     );
   });
 
@@ -132,12 +380,34 @@ describe("API key authentication", () => {
       version: 1,
       keys: [{ id: "bad-digest", digest: "sha256:not-a-digest", userId: "user-a" }],
     });
+    const duplicatePermissionRegistry = JSON.stringify({
+      version: 2,
+      keys: [{
+        id: "duplicate-permission",
+        digest: keyDigest,
+        userId: "user-a",
+        permissions: ["read", "read"],
+        expiresAt: "2099-01-01T00:00:00Z",
+      }],
+    });
+    const invalidTimestampRegistry = JSON.stringify({
+      version: 2,
+      keys: [{
+        id: "invalid-timestamp",
+        digest: keyDigest,
+        userId: "user-a",
+        permissions: ["read"],
+        expiresAt: "tomorrow",
+      }],
+    });
 
     assert.equal(await verifyApiKey(plaintextRegistry, key), null);
     assert.equal(await verifyApiKey(duplicateRegistry, key), null);
     assert.equal(await verifyApiKey(duplicateIdRegistry, key), null);
     assert.equal(await verifyApiKey(wrongVersionRegistry, key), null);
     assert.equal(await verifyApiKey(badDigestRegistry, key), null);
+    assert.equal(await verifyApiKey(duplicatePermissionRegistry, key), null);
+    assert.equal(await verifyApiKey(invalidTimestampRegistry, key), null);
     assert.equal(
       await verifyApiKey("x".repeat(API_KEY_REGISTRY_MAX_BYTES + 1), key),
       null,

@@ -6,6 +6,7 @@ import {
   callTool,
   getMemoryDestinationFingerprint,
   getRequestTimeoutMs,
+  validateAccessToken,
 } from "./lib.mjs";
 
 const packageJson = JSON.parse(
@@ -14,6 +15,7 @@ const packageJson = JSON.parse(
 const originalFetch = globalThis.fetch;
 const managedEnvironment = [
   "MEMORY_API_KEY",
+  "MEMORY_AUTH_API_URL",
   "MEMORY_REQUEST_TIMEOUT_MS",
   "MEMORY_SCOPE",
   "MEMORY_SERVER_URL",
@@ -25,7 +27,7 @@ const originalEnvironment = Object.fromEntries(
 
 beforeEach(() => {
   for (const name of managedEnvironment) delete process.env[name];
-  process.env.MEMORY_TOKEN = "test-jwt";
+  process.env.MEMORY_TOKEN = jwtFor("test-user", "test-jwt");
 });
 
 afterEach(() => {
@@ -46,6 +48,21 @@ function captureSingleRequest(response) {
   return requests;
 }
 
+function jwtFor(subject, nonce, overrides = {}) {
+  const encode = (value) => Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "RS256", typ: "JWT" })}.${encode({
+    sub: subject,
+    nonce,
+    iss: "https://auth-api.allen.company",
+    aud: "https://memory.allenlim.net",
+    exp: Math.floor(Date.now() / 1000) + 900,
+    client_id: "test-client",
+    azp: "test-client",
+    token_use: "access",
+    ...overrides,
+  })}.signature`;
+}
+
 function assertToolsCallRequest(requests, expectedName, expectedArguments) {
   assert.equal(requests.length, 1, "callTool must issue exactly one request");
 
@@ -55,7 +72,7 @@ function assertToolsCallRequest(requests, expectedName, expectedArguments) {
   assert.equal(init.redirect, "manual");
 
   const requestHeaders = new Headers(init.headers);
-  assert.equal(requestHeaders.get("authorization"), "Bearer test-jwt");
+  assert.equal(requestHeaders.get("authorization"), `Bearer ${process.env.MEMORY_TOKEN}`);
   assert.equal(requestHeaders.get("x-memory-api-key"), null);
   assert.equal(requestHeaders.get("accept"), "application/json, text/event-stream");
   assert.equal(requestHeaders.get("content-type"), "application/json");
@@ -254,7 +271,7 @@ test("request timeout is bounded and aborts a stalled call", async () => {
 test("cross-origin redirects never receive API-key or JWT credentials", async () => {
   for (const status of [301, 302, 307, 308]) {
     for (const authMode of ["api-key", "jwt"]) {
-      process.env.MEMORY_TOKEN = "redirect-test-jwt";
+      process.env.MEMORY_TOKEN = jwtFor("redirect-user", "redirect-test-jwt");
       process.env.MEMORY_SCOPE = "private-scope";
       if (authMode === "api-key") {
         process.env.MEMORY_API_KEY = "redirect-test-api-key";
@@ -294,7 +311,7 @@ test("cross-origin redirects never receive API-key or JWT credentials", async ()
       } else {
         assert.equal(
           requestHeaders.get("authorization"),
-          "Bearer redirect-test-jwt",
+          `Bearer ${process.env.MEMORY_TOKEN}`,
         );
         assert.equal(requestHeaders.get("x-memory-api-key"), null);
         assert.equal(requestHeaders.get("x-memory-scope"), "private-scope");
@@ -334,7 +351,7 @@ test("same-origin redirects preserve the authenticated POST safely", async () =>
     assert.equal(init.redirect, "manual");
     assert.equal(
       new Headers(init.headers).get("authorization"),
-      "Bearer test-jwt",
+      `Bearer ${process.env.MEMORY_TOKEN}`,
     );
     assert.equal(
       new Headers(init.headers).get("x-memory-scope"),
@@ -397,9 +414,6 @@ test("MCP and HTTP error details are bounded to roughly 4 KiB", async () => {
 });
 
 test("destination fingerprints partition server, auth identity, and JWT scope", () => {
-  const jwtFor = (subject, nonce) =>
-    `header.${Buffer.from(JSON.stringify({ sub: subject, nonce })).toString("base64url")}.signature`;
-
   process.env.MEMORY_TOKEN = jwtFor("stable-user", "first");
   process.env.MEMORY_SCOPE = "scope-a";
   const first = getMemoryDestinationFingerprint();
@@ -427,10 +441,68 @@ test("destination fingerprints partition server, auth identity, and JWT scope", 
 
   delete process.env.MEMORY_API_KEY;
   delete process.env.MEMORY_SCOPE;
-  process.env.MEMORY_TOKEN = "opaque-jwt-credential-a";
-  const opaqueJwtA = getMemoryDestinationFingerprint();
-  assert.equal(getMemoryDestinationFingerprint(), opaqueJwtA);
-  assert.equal(opaqueJwtA.includes("opaque-jwt-credential-a"), false);
-  process.env.MEMORY_TOKEN = "opaque-jwt-credential-b";
-  assert.notEqual(getMemoryDestinationFingerprint(), opaqueJwtA);
+  process.env.MEMORY_TOKEN = jwtFor("another-user", "credential-a");
+  assert.notEqual(getMemoryDestinationFingerprint(), first);
+});
+
+test("successful JSON and SSE responses are bounded", async () => {
+  const oversized = "x".repeat(4 * 1024 * 1024 + 1);
+  for (const [body, contentType] of [
+    [oversized, "application/json"],
+    [`data: ${oversized}\n\n`, "text/event-stream"],
+  ]) {
+    captureSingleRequest(new Response(body, { headers: { "content-type": contentType } }));
+    await assert.rejects(callTool("memory_stats"), /exceeded 4194304 bytes/);
+  }
+});
+
+test("service URLs require HTTPS except for loopback development", async () => {
+  process.env.MEMORY_API_KEY = "test-key";
+  process.env.MEMORY_SERVER_URL = "http://example.com";
+  await assert.rejects(callTool("memory_stats"), /must use HTTPS/);
+
+  process.env.MEMORY_SERVER_URL = "http://127.10.20.30:8787";
+  const requests = captureSingleRequest(new Response(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    result: { content: [] },
+  }), { headers: { "content-type": "application/json" } }));
+  await callTool("memory_stats");
+  assert.equal(requests[0].url, "http://127.10.20.30:8787/mcp");
+});
+
+test("JWT metadata is checked before credentials are transmitted", async () => {
+  const valid = jwtFor("user", "valid");
+  assert.equal(validateAccessToken(valid).sub, "user");
+  const [, payload, signature] = valid.split(".");
+  const wrongAlgorithm = `${Buffer.from(JSON.stringify({ alg: "HS256" })).toString("base64url")}.${payload}.${signature}`;
+  assert.throws(() => validateAccessToken(wrongAlgorithm), /valid JWT/);
+  assert.throws(
+    () => validateAccessToken(jwtFor("user", "wrong-aud", { aud: "https://other.example" })),
+    /not scoped/,
+  );
+  assert.throws(
+    () => validateAccessToken(jwtFor("user", "wrong-iss", { iss: "https://other.example" })),
+    /unexpected issuer/,
+  );
+  assert.throws(
+    () => validateAccessToken(jwtFor("user", "expired", { exp: 1 })),
+    /expired/,
+  );
+  assert.throws(
+    () => validateAccessToken(jwtFor("", "missing-subject")),
+    /valid subject/,
+  );
+  assert.throws(
+    () => validateAccessToken(jwtFor("user", "wrong-use", { token_use: "refresh" })),
+    /unexpected token type/,
+  );
+  assert.throws(
+    () => validateAccessToken(jwtFor("user", "missing-client", { client_id: "" })),
+    /OAuth client binding/,
+  );
+  assert.throws(
+    () => validateAccessToken(jwtFor("user", "wrong-azp", { azp: "other-client" })),
+    /authorized party/,
+  );
 });

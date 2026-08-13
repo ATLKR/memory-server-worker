@@ -6,6 +6,15 @@ AUTH_API_URL=https://auth-api.allen.company
 # Auth web UI origin (browser sign-in form).
 AUTH_WEB_URL=https://auth.allen.company
 
+# Canonical protected-resource identifier and JWT audience.
+MEMORY_RESOURCE_URL=https://memory.allenlim.net
+
+# Optional, temporary migration instant T0 (RFC 3339). Legacy auth-api
+# audiences are accepted only for tokens issued before T0 and only through
+# T0 + 8h + 5m. Pre-T0 resource tokens without memory:* scopes are accepted
+# only through T0 + 20m. Leave empty to reject both legacy forms.
+LEGACY_AUTH_AUDIENCE_CUTOFF=
+
 # Default logical sub-scope when x-memory-scope is absent.
 # It is always bound to the JWT subject; leave empty for the personal profile.
 DEFAULT_SCOPE=
@@ -15,5 +24,8 @@ DEFAULT_SCOPE=
 #   npx wrangler secret put MEMORY_API_KEY_REGISTRY
 # Generate each key from at least 32 cryptographically random bytes (a
 # base64url encoding is 43 characters), then store only its SHA-256 digest.
-# Schema: {"version":1,"keys":[{"id":"automation","digest":"sha256:<64 lowercase hex>","userId":"stable-user-id","logicalScope":"optional-fixed-scope"}]}
+# Version 2 requires least privilege (a non-empty subset of read/write/delete)
+# and an expiry. Legacy version-1 entries remain full-access only for rollout
+# compatibility. `disabledAt` revokes at that instant.
+# Schema: {"version":2,"keys":[{"id":"automation","digest":"sha256:<64 lowercase hex>","userId":"stable-user-id","logicalScope":"optional-fixed-scope","permissions":["read","write"],"expiresAt":"2026-09-12T00:00:00Z","disabledAt":"2026-08-20T00:00:00Z"}]}
 MEMORY_API_KEY_REGISTRY=
