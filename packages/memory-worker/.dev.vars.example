@@ -19,13 +19,15 @@ LEGACY_AUTH_AUDIENCE_CUTOFF=
 # It is always bound to the JWT subject; leave empty for the personal profile.
 DEFAULT_SCOPE=
 
-# API-key registry for local development. This value contains only
-# SHA-256 digests, never plaintext API keys. Production must use:
+# API-key/PAT registry for local development. This value contains only
+# SHA-256 digests, never plaintext credentials. Production must use:
 #   npx wrangler secret put MEMORY_API_KEY_REGISTRY
-# Generate each key from at least 32 cryptographically random bytes (a
-# base64url encoding is 43 characters), then store only its SHA-256 digest.
-# Version 2 requires least privilege (a non-empty subset of read/write/delete)
-# and an expiry. Legacy version-1 entries remain full-access only for rollout
-# compatibility. `disabledAt` revokes at that instant.
-# Schema: {"version":2,"keys":[{"id":"automation","digest":"sha256:<64 lowercase hex>","userId":"stable-user-id","logicalScope":"optional-fixed-scope","permissions":["read","write"],"expiresAt":"2026-09-12T00:00:00Z","disabledAt":"2026-08-20T00:00:00Z"}]}
+# Generate each credential from at least 32 cryptographically random bytes,
+# then store only its SHA-256 digest. PAT plaintext must be exactly
+# `memory_pat_` plus the 43-character base64url encoding of 32 random bytes.
+# Version 3 requires a scheme-bound kind (`api-key` or `pat`), least privilege
+# (a non-empty subset of read/write/delete), and an expiry. Versions 1 and 2
+# remain API-key-only for rollout compatibility. `disabledAt` revokes at that
+# instant.
+# Schema: {"version":3,"keys":[{"id":"headless-pat","kind":"pat","digest":"sha256:<64 lowercase hex>","userId":"stable-user-id","logicalScope":"optional-fixed-scope","permissions":["read","write"],"expiresAt":"2027-08-13T00:00:00Z","disabledAt":"2026-08-20T00:00:00Z"}]}
 MEMORY_API_KEY_REGISTRY=

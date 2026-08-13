@@ -3,6 +3,24 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.1.0] - 2026-08-13
+
+### Added
+
+- Browser-approval-free CLI authentication through API keys or personal
+  access tokens. `mem auth set --api-key-stdin` and `--pat-stdin` avoid argv
+  exposure and write an origin-bound, owner-only local credential record.
+- `MEMORY_PAT` support and a generic authenticated stdio-to-HTTP MCP proxy for
+  clients that cannot attach custom HTTP authentication headers.
+- Digest-only registry v3 distinguishes API keys from `memory_pat_...` PATs;
+  credentials cannot be replayed through the other credential scheme.
+
+### Security
+
+- Conflicting `MEMORY_API_KEY` and `MEMORY_PAT` variables fail closed. Neither
+  credential mode sends `x-memory-scope`, cross-origin redirects stay blocked,
+  and CLI status/output never prints credential plaintext.
+
 ## [3.0.1] - 2026-08-13
 
 ### Fixed
@@ -95,6 +113,7 @@ All notable changes to this project are documented here. This project follows
 - Bound memory profiles to authenticated user identities and migrated the
   known production profile without deleting the legacy source.
 
+[3.1.0]: https://github.com/ATLKR/memory-server-worker/compare/v3.0.1...v3.1.0
 [3.0.1]: https://github.com/ATLKR/memory-server-worker/compare/v3.0.0...v3.0.1
 [3.0.0]: https://github.com/ATLKR/memory-server-worker/compare/v2.1.0...v3.0.0
 [2.1.0]: https://github.com/ATLKR/memory-server-worker/compare/v2.0.0...v2.1.0

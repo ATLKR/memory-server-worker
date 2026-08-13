@@ -181,16 +181,18 @@ export function extractBearerToken(authHeader: string | null): string | null {
   return token || null;
 }
 
-// ---------- API key registry ----------
+// ---------- Digest-backed credential registry ----------
 
 /**
- * API keys are stored as SHA-256 digests in one Worker secret named
+ * API keys and personal access tokens (PATs) are stored as SHA-256 digests in
+ * one Worker secret named
  * MEMORY_API_KEY_REGISTRY. The secret uses this versioned JSON shape:
  *
  * {
- *   "version": 2,
+ *   "version": 3,
  *   "keys": [{
  *     "id": "automation",
+ *     "kind": "api-key",
  *     "digest": "sha256:<64 lowercase hex characters>",
  *     "userId": "stable-user-id",
  *     "logicalScope": "optional-fixed-scope",
@@ -200,9 +202,13 @@ export function extractBearerToken(authHeader: string | null): string | null {
  *   }]
  * }
  *
- * Version 1 remains accepted only for the legacy digest/user/scope shape and
- * retains the historical read/write/delete access. Version 2 requires every
- * key to declare both the narrowest required permission set and an expiry.
+ * Versions 1 and 2 remain API-key-only. Version 1 accepts only the legacy
+ * digest/user/scope shape and retains historical read/write/delete access.
+ * Version 2 requires every key to declare the narrowest required permission
+ * set and an expiry. Version 3 additionally requires `kind` to be either
+ * `api-key` or `pat`, preventing one stored digest from crossing credential
+ * schemes. PAT plaintext has the reserved `memory_pat_` prefix followed by 43
+ * base64url characters and is accepted only as an Authorization Bearer token.
  * `expiresAt` rejects the key at and after that instant. `disabledAt` can
  * revoke immediately or schedule revocation. Plaintext API keys must never be
  * placed in the registry. `strict()` also rejects accidental fields such as
@@ -264,6 +270,19 @@ const apiKeyRegistryEntrySchema = z
   })
   .strict();
 
+export const REGISTRY_CREDENTIAL_KINDS = ["api-key", "pat"] as const;
+export type RegistryCredentialKind = typeof REGISTRY_CREDENTIAL_KINDS[number];
+
+const credentialRegistryEntrySchema = z
+  .object({
+    ...apiKeyRegistryBaseEntryShape,
+    kind: z.enum(REGISTRY_CREDENTIAL_KINDS),
+    permissions: apiKeyPermissionsSchema,
+    expiresAt: apiKeyTimestampSchema,
+    disabledAt: apiKeyTimestampSchema.optional(),
+  })
+  .strict();
+
 const apiKeyRegistrySchema = z
   .discriminatedUnion("version", [
     z.object({
@@ -274,6 +293,10 @@ const apiKeyRegistrySchema = z
       version: z.literal(2),
       keys: z.array(apiKeyRegistryEntrySchema).min(1).max(20),
     }).strict(),
+    z.object({
+      version: z.literal(3),
+      keys: z.array(credentialRegistryEntrySchema).min(1).max(20),
+    }).strict(),
   ])
   .superRefine((registry, context) => {
     const ids = new Set<string>();
@@ -283,14 +306,14 @@ const apiKeyRegistrySchema = z
         context.addIssue({
           code: "custom",
           path: ["keys", index, "id"],
-          message: "API key ids must be unique",
+          message: "credential ids must be unique",
         });
       }
       if (digests.has(entry.digest)) {
         context.addIssue({
           code: "custom",
           path: ["keys", index, "digest"],
-          message: "API key digests must be unique",
+          message: "credential digests must be unique",
         });
       }
       ids.add(entry.id);
@@ -301,12 +324,14 @@ const apiKeyRegistrySchema = z
 // Cloudflare limits each Worker secret/environment variable to 5 KiB.
 export const API_KEY_REGISTRY_MAX_BYTES = 5 * 1024;
 export const API_KEY_MAX_BYTES = 512;
+export const PERSONAL_ACCESS_TOKEN_PREFIX = "memory_pat_";
 // Provision keys from at least 32 cryptographically random bytes. Base64url
 // encoding that material produces a convenient 43-character header value.
 const API_KEY_MIN_BYTES = 32;
 const SHA_256_BYTES = 32;
 const API_KEY_AUTHORIZATION_PATTERN = /^ApiKey[ \t]+([^\s]+)$/i;
 const VISIBLE_ASCII_PATTERN = /^[\x21-\x7e]+$/;
+const PERSONAL_ACCESS_TOKEN_PATTERN = /^memory_pat_[A-Za-z0-9_-]{43}$/;
 
 export interface ApiKeyIdentity {
   keyId: string;
@@ -355,21 +380,33 @@ function parseApiKeyRegistry(registryJson: string): z.infer<typeof apiKeyRegistr
  * length is always fixed at 32 bytes. The plaintext key is never logged or
  * retained in the returned identity.
  */
-export async function verifyApiKey(
+async function verifyRegistryCredential(
   registryJson: string | undefined,
-  providedKey: string,
+  providedCredential: string,
+  expectedKind: RegistryCredentialKind,
   now: Date = new Date(),
 ): Promise<ApiKeyIdentity | null> {
-  if (!registryJson || providedKey !== providedKey.trim()) return null;
-  if (!VISIBLE_ASCII_PATTERN.test(providedKey)) return null;
-
-  const keyBytes = new TextEncoder().encode(providedKey);
   if (
-    keyBytes.byteLength < API_KEY_MIN_BYTES ||
-    keyBytes.byteLength > API_KEY_MAX_BYTES
+    !registryJson ||
+    providedCredential !== providedCredential.trim() ||
+    !VISIBLE_ASCII_PATTERN.test(providedCredential)
   ) {
     return null;
   }
+
+  const isPat = PERSONAL_ACCESS_TOKEN_PATTERN.test(providedCredential);
+  if (
+    (expectedKind === "pat" && !isPat) ||
+    (expectedKind === "api-key" && isPat)
+  ) {
+    return null;
+  }
+
+  const credentialBytes = new TextEncoder().encode(providedCredential);
+  if (
+    credentialBytes.byteLength < API_KEY_MIN_BYTES ||
+    credentialBytes.byteLength > API_KEY_MAX_BYTES
+  ) return null;
 
   const registry = parseApiKeyRegistry(registryJson);
   if (!registry) return null;
@@ -377,12 +414,14 @@ export async function verifyApiKey(
   if (!Number.isFinite(nowMs)) return null;
 
   const providedDigest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", keyBytes),
+    await crypto.subtle.digest("SHA-256", credentialBytes),
   );
   let identity: ApiKeyIdentity | null = null;
   for (const entry of registry.keys) {
     const expectedDigest = decodeSha256Digest(entry.digest);
     if (crypto.subtle.timingSafeEqual(providedDigest, expectedDigest)) {
+      const entryKind = "kind" in entry ? entry.kind : "api-key";
+      if (entryKind !== expectedKind) continue;
       const expiresAt = "expiresAt" in entry ? entry.expiresAt : undefined;
       const disabledAt = "disabledAt" in entry ? entry.disabledAt : undefined;
       const expired = expiresAt !== undefined && Date.parse(expiresAt) <= nowMs;
@@ -399,4 +438,25 @@ export async function verifyApiKey(
     }
   }
   return identity;
+}
+
+/** Verify a key presented through x-memory-api-key or Authorization: ApiKey. */
+export async function verifyApiKey(
+  registryJson: string | undefined,
+  providedKey: string,
+  now: Date = new Date(),
+): Promise<ApiKeyIdentity | null> {
+  return verifyRegistryCredential(registryJson, providedKey, "api-key", now);
+}
+
+/**
+ * Verify a prefixed, opaque personal access token presented as Bearer auth.
+ * Versions 1 and 2 are deliberately API-key-only; PATs require a v3 entry.
+ */
+export async function verifyPersonalAccessToken(
+  registryJson: string | undefined,
+  providedToken: string,
+  now: Date = new Date(),
+): Promise<ApiKeyIdentity | null> {
+  return verifyRegistryCredential(registryJson, providedToken, "pat", now);
 }

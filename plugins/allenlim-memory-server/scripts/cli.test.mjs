@@ -26,9 +26,172 @@ test("CLI missing and invalid commands remain usage errors", async () => {
   }
 });
 
+test("CLI stores and uses an API key from stdin without exposing it", async (context) => {
+  let receivedApiKey;
+  const server = createServer((request, response) => {
+    receivedApiKey = request.headers["x-memory-api-key"];
+    assert.equal(request.headers.authorization, undefined);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { content: [{ type: "text", text: JSON.stringify({ total: 0 }) }] },
+    }));
+  });
+  context.after(() => new Promise((resolve) => server.close(resolve)));
+  await listen(server);
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const testHome = join(tmpdir(), `memory-api-key-home-${process.pid}-${Date.now()}`);
+  await mkdir(testHome, { recursive: true });
+  const secret = "a".repeat(43);
+  const environment = {
+    HOME: testHome,
+    USERPROFILE: testHome,
+    MEMORY_SERVER_URL: origin,
+  };
+
+  const configured = await runCli(["auth", "set", "--api-key-stdin"], environment, `${secret}\n`);
+  assert.equal(configured.code, 0, configured.stderr);
+  assert.doesNotMatch(`${configured.stdout}${configured.stderr}`, new RegExp(secret));
+  const stored = JSON.parse(
+    await readFile(join(testHome, ".memory", "service-credential.json"), "utf8"),
+  );
+  assert.deepEqual(
+    { kind: stored.kind, server: stored.server, version: stored.version },
+    { kind: "api-key", server: origin, version: 1 },
+  );
+  assert.equal(stored.credential, secret);
+
+  const status = await runCli(["auth", "status"], environment);
+  assert.equal(status.code, 0, status.stderr);
+  assert.match(status.stdout, /API key/);
+  const stats = await runCli(["stats"], environment);
+  assert.equal(stats.code, 0, stats.stderr);
+  assert.equal(receivedApiKey, secret);
+
+  const unset = await runCli(["auth", "unset"], environment);
+  assert.equal(unset.code, 0, unset.stderr);
+  await assert.rejects(
+    readFile(join(testHome, ".memory", "service-credential.json")),
+    /ENOENT/,
+  );
+});
+
+test("CLI stores and uses a PAT from stdin as a bearer credential", async (context) => {
+  let receivedAuthorization;
+  const server = createServer((request, response) => {
+    receivedAuthorization = request.headers.authorization;
+    assert.equal(request.headers["x-memory-api-key"], undefined);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      result: { content: [{ type: "text", text: JSON.stringify({ total: 0 }) }] },
+    }));
+  });
+  context.after(() => new Promise((resolve) => server.close(resolve)));
+  await listen(server);
+  const address = server.address();
+  assert(address && typeof address === "object");
+  const origin = `http://127.0.0.1:${address.port}`;
+  const testHome = join(tmpdir(), `memory-pat-home-${process.pid}-${Date.now()}`);
+  await mkdir(testHome, { recursive: true });
+  const secret = `memory_pat_${"A".repeat(43)}`;
+  const environment = {
+    HOME: testHome,
+    USERPROFILE: testHome,
+    MEMORY_SERVER_URL: origin,
+  };
+
+  const configured = await runCli(["auth", "set", "--pat-stdin"], environment, `${secret}\n`);
+  assert.equal(configured.code, 0, configured.stderr);
+  assert.doesNotMatch(`${configured.stdout}${configured.stderr}`, new RegExp(secret));
+  const status = await runCli(["whoami"], environment);
+  assert.equal(status.code, 0, status.stderr);
+  assert.match(status.stdout, /PAT/);
+  const stats = await runCli(["stats"], environment);
+  assert.equal(stats.code, 0, stats.stderr);
+  assert.equal(receivedAuthorization, `Bearer ${secret}`);
+});
+
+test("CLI logout removes a stored service credential", async () => {
+  const testHome = join(tmpdir(), `memory-service-logout-home-${process.pid}-${Date.now()}`);
+  await mkdir(testHome, { recursive: true });
+  const environment = { HOME: testHome, USERPROFILE: testHome };
+  const secret = `memory_pat_${"D".repeat(43)}`;
+  const configured = await runCli(
+    ["auth", "set", "--pat-stdin"],
+    environment,
+    `${secret}\n`,
+  );
+  assert.equal(configured.code, 0, configured.stderr);
+
+  const logout = await runCli(["logout"], environment);
+  assert.equal(logout.code, 0, logout.stderr);
+  assert.match(logout.stdout, /stored local credentials removed/);
+  assert.doesNotMatch(`${logout.stdout}${logout.stderr}`, new RegExp(secret));
+  await assert.rejects(
+    readFile(join(testHome, ".memory", "service-credential.json")),
+    /ENOENT/,
+  );
+});
+
+test("CLI fails closed when a stored service credential is unreadable", async () => {
+  const testHome = join(
+    tmpdir(),
+    `memory-invalid-service-credential-${process.pid}-${Date.now()}`,
+  );
+  const credentialDirectory = join(testHome, ".memory");
+  await mkdir(credentialDirectory, { recursive: true });
+  const marker = "must-not-appear-in-diagnostics";
+  await writeFile(
+    join(credentialDirectory, "service-credential.json"),
+    `{invalid-json:${marker}`,
+    "utf8",
+  );
+
+  const result = await runCli(["auth", "status"], {
+    HOME: testHome,
+    USERPROFILE: testHome,
+  });
+
+  assert.equal(result.code, 1);
+  assert.match(result.stderr, /service credential is unreadable or invalid/i);
+  assert.doesNotMatch(`${result.stdout}${result.stderr}`, new RegExp(marker));
+});
+
+test("CLI rejects conflicting environment credentials and invalid stdin forms", async () => {
+  const testHome = join(tmpdir(), `memory-auth-reject-home-${process.pid}-${Date.now()}`);
+  await mkdir(testHome, { recursive: true });
+  const environment = { HOME: testHome, USERPROFILE: testHome };
+  const bothFlags = await runCli(
+    ["auth", "set", "--api-key-stdin", "--pat-stdin"],
+    environment,
+    "a".repeat(43),
+  );
+  assert.equal(bothFlags.code, 1);
+  assert.match(bothFlags.stderr, /exactly one/);
+  const multiline = await runCli(
+    ["auth", "set", "--api-key-stdin"],
+    environment,
+    `${"a".repeat(43)}\nsecond-line\n`,
+  );
+  assert.equal(multiline.code, 1);
+  assert.match(multiline.stderr, /exactly one non-empty credential line/);
+  const conflicting = await runCli(["auth", "status"], {
+    ...environment,
+    MEMORY_API_KEY: "a".repeat(43),
+    MEMORY_PAT: `memory_pat_${"B".repeat(43)}`,
+  });
+  assert.equal(conflicting.code, 1);
+  assert.match(conflicting.stderr, /Set only one/);
+});
+
 test("CLI exits nonzero when an MCP result reports isError", async (context) => {
   const server = createServer((request, response) => {
-    assert.equal(request.headers["x-memory-api-key"], "test-api-key");
+    assert.equal(request.headers["x-memory-api-key"], "test-api-key-0123456789abcdef012345");
     response.writeHead(200, { "content-type": "application/json" });
     response.end(
       JSON.stringify({
@@ -51,7 +214,7 @@ test("CLI exits nonzero when an MCP result reports isError", async (context) => 
   assert(address && typeof address === "object");
 
   const result = await runCli(["stats"], {
-    MEMORY_API_KEY: "test-api-key",
+    MEMORY_API_KEY: "test-api-key-0123456789abcdef012345",
     MEMORY_REQUEST_TIMEOUT_MS: "2000",
     MEMORY_SERVER_URL: `http://127.0.0.1:${address.port}`,
   });
@@ -64,7 +227,7 @@ test("CLI exits nonzero when an MCP result reports isError", async (context) => 
 test("CLI bounds stdin before parsing ingest JSON", async () => {
   const result = await runCli(
     ["ingest"],
-    { MEMORY_API_KEY: "test-api-key" },
+    { MEMORY_API_KEY: "test-api-key-0123456789abcdef012345" },
     "x".repeat(4 * 1024 * 1024 + 1),
   );
   assert.equal(result.code, 1);
@@ -112,7 +275,7 @@ test("CLI deletion requires --yes when stdin is not a terminal", async (context)
   const address = server.address();
   assert(address && typeof address === "object");
   const environment = {
-    MEMORY_API_KEY: "test-api-key",
+    MEMORY_API_KEY: "test-api-key-0123456789abcdef012345",
     MEMORY_SERVER_URL: `http://127.0.0.1:${address.port}`,
   };
   const blocked = await runCli(["delete", "memory-id"], environment);
@@ -616,7 +779,7 @@ test("post-turn hook remains fail-open when an MCP ingest fails", async (context
     "post-turn.mjs",
     [],
     {
-      MEMORY_API_KEY: "test-api-key",
+      MEMORY_API_KEY: "test-api-key-0123456789abcdef012345",
       MEMORY_REQUEST_TIMEOUT_MS: "2000",
       MEMORY_SERVER_URL: `http://127.0.0.1:${address.port}`,
     },
@@ -670,7 +833,7 @@ test("post-turn falls back to direct messages when transcript setup fails", asyn
     "post-turn.mjs",
     [],
     {
-      MEMORY_API_KEY: "test-api-key",
+      MEMORY_API_KEY: "test-api-key-0123456789abcdef012345",
       MEMORY_REQUEST_TIMEOUT_MS: "2000",
       MEMORY_SERVER_URL: `http://127.0.0.1:${address.port}`,
     },

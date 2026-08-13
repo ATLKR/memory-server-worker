@@ -4,6 +4,9 @@
  *
  * Usage:
  *   node scripts/cli.mjs login                    # SSO login via Allen Labs auth server
+ *   node scripts/cli.mjs auth set --api-key-stdin # store API key from stdin
+ *   node scripts/cli.mjs auth set --pat-stdin     # store PAT from stdin
+ *   node scripts/cli.mjs auth unset               # remove stored API key/PAT
  *   node scripts/cli.mjs logout                   # clear stored credentials
  *   node scripts/cli.mjs whoami                   # show current authenticated user
  *   node scripts/cli.mjs add "some fact" [--session sid]
@@ -18,7 +21,8 @@
  *
  * Environment:
  *   MEMORY_SERVER_URL  — worker URL (defaults to https://memory.allenlim.net)
- *   MEMORY_API_KEY     — API key (takes precedence over JWT credentials)
+ *   MEMORY_API_KEY     — API key (mutually exclusive with MEMORY_PAT)
+ *   MEMORY_PAT         — PAT (mutually exclusive with MEMORY_API_KEY)
  *   MEMORY_TOKEN       — JWT bearer token (overrides credential file; for CI/headless)
  *   MEMORY_SCOPE       — scope header (optional)
  *   MEMORY_REQUEST_TIMEOUT_MS — request timeout in milliseconds (default 10000)
@@ -37,13 +41,15 @@ import {
   readStdin,
   saveOAuthClientRegistration,
   saveCredentialsWithLock,
+  saveServiceCredentialWithLock,
+  clearServiceCredentialWithLock,
 } from "./lib.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { createServer } from "node:http";
 import { createInterface } from "node:readline/promises";
 
 const USAGE =
-  "Usage: mem <login|logout|whoami|add|search|ingest|get|list|delete|delete-session|summary|stats|hook> [args] [flags]";
+  "Usage: mem <auth|login|logout|whoami|add|search|ingest|get|list|delete|delete-session|summary|stats|hook> [args] [flags]";
 
 function parseArgs(argv) {
   const args = argv.slice(2);
@@ -206,20 +212,72 @@ async function handleLogin(flags) {
 
 async function handleLogout() {
   const revoked = await logout();
+  await clearServiceCredentialWithLock();
   console.log(
     revoked
-      ? "Logged out. Renewable session revoked and local credentials removed."
-      : "Logged out locally. The authorization server could not be reached; local credentials were removed.",
+      ? "Logged out. Renewable session revoked and all stored local credentials removed. Environment credentials, if set, remain active."
+      : "Logged out locally. The authorization server could not be reached; stored local credentials were removed. Environment credentials, if set, remain active.",
+  );
+}
+
+async function handleAuth(positional, flags) {
+  const action = positional[0];
+  if (action === "set") {
+    const apiKeyStdin = flags["api-key-stdin"] === true;
+    const patStdin = flags["pat-stdin"] === true;
+    if (
+      apiKeyStdin === patStdin ||
+      positional.length !== 1 ||
+      Object.keys(flags).some((flag) => !["api-key-stdin", "pat-stdin"].includes(flag))
+    ) {
+      throw new Error("Use exactly one of --api-key-stdin or --pat-stdin.");
+    }
+    const input = await readStdin();
+    const lines = input.replace(/\r\n/g, "\n").split("\n");
+    if (lines.at(-1) === "") lines.pop();
+    if (lines.length !== 1 || !lines[0]) {
+      throw new Error("Expected exactly one non-empty credential line on stdin.");
+    }
+    const kind = apiKeyStdin ? "api-key" : "pat";
+    await saveServiceCredentialWithLock(kind, lines[0]);
+    console.log(`${kind === "pat" ? "PAT" : "API key"} saved for ${getMemoryResource()}.`);
+    return;
+  }
+  if (action === "unset") {
+    if (Object.keys(flags).length > 0 || positional.length !== 1) {
+      throw new Error("Usage: mem auth unset");
+    }
+    await clearServiceCredentialWithLock();
+    console.log("Stored API key or PAT removed.");
+    return;
+  }
+  if (action === "status") {
+    if (Object.keys(flags).length > 0 || positional.length !== 1) {
+      throw new Error("Usage: mem auth status");
+    }
+    const mode = getAuthenticationMode();
+    if (mode === "api-key") console.log("Authenticated with an API key.");
+    else if (mode === "pat") console.log("Authenticated with a PAT.");
+    else if (mode === "jwt") console.log("Authenticated with an OAuth/JWT session.");
+    else console.log("Not authenticated.");
+    return;
+  }
+  throw new Error(
+    "Usage: mem auth <set --api-key-stdin|set --pat-stdin|unset|status>",
   );
 }
 
 function handleWhoami() {
   if (!isLoggedIn()) {
-    console.log("Not authenticated. Set MEMORY_API_KEY or run `mem login` to sign in.");
+    console.log("Not authenticated. Set MEMORY_API_KEY or MEMORY_PAT, run `mem auth set`, or run `mem login`.");
     return;
   }
   if (getAuthenticationMode() === "api-key") {
-    console.log("Authenticated with MEMORY_API_KEY.");
+    console.log("Authenticated with an API key.");
+    return;
+  }
+  if (getAuthenticationMode() === "pat") {
+    console.log("Authenticated with a PAT.");
     return;
   }
   const user = getCurrentUser();
@@ -241,6 +299,9 @@ async function main() {
     }
 
     switch (cmd) {
+      case "auth":
+        await handleAuth(positional, flags);
+        break;
       case "login":
         await handleLogin(flags);
         break;

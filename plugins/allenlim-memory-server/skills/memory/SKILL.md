@@ -9,8 +9,9 @@ You have access to a personal persistent memory system. Memories are stored in
 [Cloudflare Agent Memory](https://developers.cloudflare.com/agent-memory/) —
 a managed service with automatic extraction, classification, deduplication,
 supersession, and hybrid search (keyword + semantic + topic key).
-Authentication uses either a server-issued API key or Allen Labs SSO
-(JWT/JWKS). API keys are suitable for CI, services, and headless automation.
+Authentication uses a server-issued API key, a personal access token (PAT),
+or Allen Labs SSO (JWT/JWKS). API keys are suitable for CI/services; PATs are
+suitable for browser-free personal CLI access.
 
 ## How it works by client
 
@@ -25,18 +26,23 @@ Authentication uses either a server-issued API key or Allen Labs SSO
 - **Codex**: The registered Memory app provides all nine MCP tools. The recall
   and capture skills direct the agent to call them; Claude hooks are not used.
 
-- **Devin**: This plugin supplies skills only. The remote HTTP MCP must be
-  added separately at `https://memory.allenlim.net/mcp`; Claude hooks are not
-  supported by Devin's plugin package.
+- **Devin**: Use the bundled `memory-mcp-stdio` bridge with Proton Pass CLI.
+  This avoids browser approval and keeps only a `pass://` URI in configuration:
 
-  ```bash
-  devin mcp add --scope user allenlim-memory-server https://memory.allenlim.net/mcp --oauth-resource https://memory.allenlim.net
-  devin mcp login allenlim-memory-server --scopes openid,profile,email,offline_access,memory:read,memory:write,memory:delete --oauth-resource https://memory.allenlim.net
+  ```json
+  {
+    "command": "pass-cli",
+    "args": ["run", "--", "memory-mcp-stdio"],
+    "env": {
+      "MEMORY_PAT": "pass://Development/Memory Server PAT - personal CLI - 2026-08-13/password",
+      "MEMORY_SERVER_URL": "https://memory.allenlim.net",
+      "PROTON_PASS_AGENT_REASON": "Use personal Memory MCP without browser approval"
+    }
+  }
   ```
 
-  Keep the explicit `--oauth-resource` value: Devin otherwise derives it from
-  the `/mcp` endpoint URL, while Memory access tokens are audience-bound to the
-  protected resource origin.
+  `pass-cli run` resolves the PAT only in the bridge's child environment.
+  `devin mcp login` is not required. Claude hooks remain unsupported by Devin.
 
 ## Manual memory operations
 
@@ -48,6 +54,11 @@ first run `npm link --workspace allenlim-memory-server` to create `mem`:
 ```bash
 # Check authentication status
 mem whoami
+
+# Store a credential from a secret manager without browser approval or argv exposure
+secret-manager-command | mem auth set --api-key-stdin
+secret-manager-command | mem auth set --pat-stdin
+mem auth status
 
 # Add a memory
 mem add "User prefers dark mode"
@@ -102,9 +113,12 @@ loopback ports to avoid unbounded registrations. This public identifier (not a
 credential) is stored in `~/.memory/oauth-client.json`. If an administrator has
 removed that registration, retry once with `mem login --new-client`.
 
-For API-key authentication, set `MEMORY_API_KEY`. It takes precedence over
-`MEMORY_TOKEN` and stored SSO credentials. In API-key mode, the client sends
-only `x-memory-api-key`; it does not send `Authorization` or `x-memory-scope`.
+For API-key authentication, set `MEMORY_API_KEY`; for PAT authentication, set
+`MEMORY_PAT`. Environment credentials take precedence over the owner-only
+`~/.memory/service-credential.json`, which takes precedence over
+`MEMORY_TOKEN` and stored SSO credentials. Setting both environment variables
+fails closed. API keys send only `x-memory-api-key`; PATs send only
+`Authorization: Bearer memory_pat_...`. Neither sends `x-memory-scope`.
 The server determines the memory profile and permissions associated with the
 key, so `MEMORY_SCOPE` applies only to JWT authentication.
 

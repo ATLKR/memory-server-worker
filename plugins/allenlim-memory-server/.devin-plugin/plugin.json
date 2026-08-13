@@ -1,7 +1,7 @@
 {
   "name": "allenlim-memory-server",
-  "version": "3.0.1",
-  "description": "Reusable personal-memory skills for Devin. Connect the remote Memory MCP separately with devin mcp add/login to enable tools; Devin does not install this bundle's Claude hooks.",
+  "version": "3.1.0",
+  "description": "Reusable personal-memory skills and an approval-free Proton Pass-backed stdio bridge for Devin. Devin does not install this bundle's Claude hooks.",
   "author": {
     "name": "Allen Lim",
     "email": "allenlim@allenlabs.org"

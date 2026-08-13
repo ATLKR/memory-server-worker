@@ -1,6 +1,6 @@
 {
   "name": "allenlim-memory-server",
-  "version": "3.0.1",
+  "version": "3.1.0",
   "description": "Personal persistent memory — recalls relevant context before every response and captures every conversation. Backed by Cloudflare Agent Memory (managed hybrid search).",
   "author": {
     "name": "Allen Lim",

@@ -1,6 +1,6 @@
 {
   "name": "allenlim-plugins",
-  "version": "3.0.1",
+  "version": "3.1.0",
   "description": "Allen Lim's personal productivity plugins.",
   "owner": {
     "name": "Allen Lim",
@@ -12,7 +12,7 @@
       "name": "allenlim-memory-server",
       "source": "./plugins/allenlim-memory-server",
       "description": "Personal persistent memory — auto-recalls relevant memories before each prompt and captures conversation summaries after each turn.",
-      "version": "3.0.1",
+      "version": "3.1.0",
       "category": "Productivity"
     }
   ]
