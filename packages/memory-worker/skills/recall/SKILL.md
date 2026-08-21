@@ -1,6 +1,6 @@
 ---
 name: recall
-description: Search personal memories for relevant context before responding to the user. Always run memory_search at the start of EVERY conversation turn — no exceptions.
+description: Search personal memories for relevant context before responding to the user. Always run memory_search at the start of every conversation turn — no exceptions.
 ---
 
 # Recall Memories

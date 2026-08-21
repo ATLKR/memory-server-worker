@@ -47,6 +47,11 @@ memory_ingest({
 })
 ```
 
+Keep each call within the server contract: at most **100 messages**, no more
+than **32 KiB of UTF-8 content per message**, and no more than **1 MiB of
+message content in total**. For longer conversations, retain the newest
+relevant messages and trim older context first.
+
 ### 2. `memory_add` — explicit single memory
 
 Use `memory_add` when you know exactly what should be stored and want to
@@ -67,5 +72,7 @@ memory_add({
   the old (the old version is preserved but the new one surfaces in recall).
 - `memory_ingest` is **idempotent** — re-ingesting the same conversation
   does not create duplicates.
+- Ingest requests are limited to 100 messages, 32 KiB per message, and
+  1 MiB of UTF-8 message content in total.
 - Do not ingest after every single message. Do it after a meaningful
   conversation turn or when the user goes idle.
