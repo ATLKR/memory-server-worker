@@ -37,6 +37,23 @@ describe("resolveProfileName", () => {
 
     assert.notEqual(unscoped, explicitlyScoped);
   });
+
+  it("partitions the same user and scope by application designator", async () => {
+    const base = await resolveProfileName("user-123", "personal");
+    const groupChat = await resolveProfileName(
+      "user-123",
+      "personal",
+      "OpenClaw Group Chat",
+    );
+    const directChat = await resolveProfileName(
+      "user-123",
+      "personal",
+      "OpenClaw Direct Chat",
+    );
+
+    assert.notEqual(groupChat, base);
+    assert.notEqual(groupChat, directChat);
+  });
 });
 
 describe("isValidSsoState", () => {

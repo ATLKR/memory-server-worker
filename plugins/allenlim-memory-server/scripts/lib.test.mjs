@@ -30,6 +30,7 @@ const packageJson = JSON.parse(
 const originalFetch = globalThis.fetch;
 const managedEnvironment = [
   "MEMORY_API_KEY",
+  "MEMORY_APPLICATION",
   "MEMORY_PAT",
   "MEMORY_AUTH_API_URL",
   "MEMORY_REQUEST_TIMEOUT_MS",
@@ -198,6 +199,28 @@ test("MEMORY_PAT uses Bearer without JWT scope or API-key headers", async () => 
   );
   assert.equal(requestHeaders.get("x-memory-api-key"), null);
   assert.equal(requestHeaders.get("x-memory-scope"), null);
+});
+
+test("MEMORY_APPLICATION sends a separate application designator", async () => {
+  process.env.MEMORY_PAT = `memory_pat_${"C".repeat(43)}`;
+  process.env.MEMORY_APPLICATION = "OpenClaw Group Chat";
+  const requests = captureSingleRequest(
+    new Response(
+      JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        result: { content: [{ type: "text", text: "ok" }] },
+      }),
+      { headers: { "content-type": "application/json" } },
+    ),
+  );
+
+  assert.equal(await callTool("memory_stats"), "ok");
+  assert.equal(
+    new Headers(requests[0].init.headers).get("x-memory-application"),
+    "OpenClaw Group Chat",
+  );
+  delete process.env.MEMORY_APPLICATION;
 });
 
 test("conflicting API-key and PAT environment credentials fail closed", async () => {

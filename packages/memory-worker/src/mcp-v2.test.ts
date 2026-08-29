@@ -915,6 +915,23 @@ describe("Worker personal access token authentication", () => {
       await resolveProfileName("pat-user", "headless"),
     ]);
 
+    const application = "OpenClaw Group Chat";
+    const partitioned = await worker.fetch(
+      new Request("https://memory.allenlim.net/api/stats", {
+        headers: {
+          authorization: `Bearer ${pat}`,
+          "x-memory-application": application,
+        },
+      }),
+      env,
+      {} as ExecutionContext,
+    );
+    assert.equal(partitioned.status, 200);
+    assert.equal(
+      profiles.at(-1),
+      await resolveProfileName("pat-user", "headless", application),
+    );
+
     const session = await worker.fetch(
       new Request("https://memory.allenlim.net/api/session", {
         headers: { authorization: `Bearer ${pat}` },

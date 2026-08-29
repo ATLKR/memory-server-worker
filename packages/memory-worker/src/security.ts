@@ -25,6 +25,7 @@ export function legacyProfileName(userId: string): string {
 export async function resolveProfileName(
   userId: string,
   logicalScope?: string | null,
+  application?: string | null,
 ): Promise<string> {
   const normalizedUserId = userId.trim();
   if (!normalizedUserId) {
@@ -32,16 +33,23 @@ export async function resolveProfileName(
   }
 
   const normalizedScope = logicalScope?.trim();
-  if (!normalizedScope && UUID_PATTERN.test(normalizedUserId)) {
+  const normalizedApplication = application?.trim();
+  if (!normalizedScope && !normalizedApplication && UUID_PATTERN.test(normalizedUserId)) {
     return legacyProfileName(normalizedUserId);
   }
 
   // JSON tuple encoding keeps the identity components unambiguous even if a
   // JWT subject or logical scope contains delimiter characters. `null` also
   // remains distinct from an explicit scope named "personal".
-  const input = new TextEncoder().encode(
-    JSON.stringify(["memory-profile-v1", normalizedUserId, normalizedScope || null]),
-  );
+  const profileTuple = normalizedApplication
+    ? [
+        "memory-profile-v2",
+        normalizedUserId,
+        normalizedScope || null,
+        normalizedApplication,
+      ]
+    : ["memory-profile-v1", normalizedUserId, normalizedScope || null];
+  const input = new TextEncoder().encode(JSON.stringify(profileTuple));
   const digest = new Uint8Array(await crypto.subtle.digest("SHA-256", input));
   const hex = Array.from(digest, (byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${SCOPED_PROFILE_PREFIX}${hex}`;

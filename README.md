@@ -25,10 +25,9 @@ Plus integration packages:
 - **`distributions/chatgpt/allenlim-memory-server`** — ChatGPT-compatible
   alternate distribution.
 
-Current release: **3.1.1**. This release adds approval-free API-key and PAT
-authentication for command-line clients, a Proton Pass-backed stdio bridge,
-and scheme-bound credential registry v3 while retaining the resource-bound
-OAuth and rotating 30-day session model from 3.0.
+Current release: **3.2.0**. This release adds an OpenClaw memory-provider
+plugin and identity-bound application partitions, while retaining the
+approval-free API-key/PAT and resource-bound OAuth models from 3.1.
 
 ## Architecture
 
@@ -67,6 +66,12 @@ optional logical scope. Callers cannot override an API key's or PAT's scope.
 Every profile is isolated by the authenticated JWT subject. An optional
 `x-memory-scope` value creates a logical sub-scope that is SHA-256-bound to
 that subject, so a caller cannot select another user's profile.
+
+Clients may also send `x-memory-application` to partition the same authenticated
+user and logical scope by calling application. The designator is combined with
+the authenticated identity before profile hashing, so values such as
+`OpenClaw Group Chat` and `Claude Code` use independent Agent Memory profiles.
+Set `MEMORY_APPLICATION` when using the bundled CLI or stdio bridge.
 
 ### Migrating pre-2.0 profiles
 

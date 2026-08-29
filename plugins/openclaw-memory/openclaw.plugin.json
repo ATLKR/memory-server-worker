@@ -1,0 +1,44 @@
+{
+  "id": "allenlim-memory",
+  "name": "Allenlim Memory",
+  "description": "Cloudflare Agent Memory as OpenClaw's primary memory slot.",
+  "kind": "memory",
+  "activation": {
+    "onStartup": true
+  },
+  "contracts": {
+    "tools": [
+      "memory_search",
+      "memory_get"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "serverUrl": {
+        "type": "string"
+      },
+      "application": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 100
+      },
+      "credentialCommand": {
+        "type": "string"
+      },
+      "credentialArgs": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      },
+      "autoRecall": {
+        "type": "boolean"
+      },
+      "autoCapture": {
+        "type": "boolean"
+      }
+    }
+  }
+}

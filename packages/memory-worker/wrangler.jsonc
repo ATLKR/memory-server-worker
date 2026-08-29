@@ -44,9 +44,9 @@
     // Remove this var in the next release. Empty/invalid fails closed.
     "LEGACY_AUTH_AUDIENCE_CUTOFF": "2026-08-13T06:00:00Z",
     // Default logical sub-scope when x-memory-scope is absent.
-    // Each scope gets its own Agent Memory profile → isolated memory store.
-    // Every logical scope is bound to the JWT `sub`; empty selects the user's
-    // personal identity (UUID subjects retain their legacy profile name).
+    // Each scope and optional x-memory-application designator gets its own
+    // Agent Memory profile. Both remain bound to the authenticated identity;
+    // empty selects the user's personal legacy-compatible profile.
     "DEFAULT_SCOPE": ""
   },
 

@@ -366,6 +366,9 @@ async function authenticate(
   requestUrl: URL,
   requestId: string,
 ): Promise<AuthenticationResult> {
+  const applicationHeader = request.headers.get("x-memory-application");
+  const application = applicationHeader?.trim() || null;
+  if (applicationHeader !== null && (!application || application.length > 100)) return null;
   const authorization = request.headers.get("authorization");
   const headerApiKey = request.headers.get("x-memory-api-key");
 
@@ -387,6 +390,7 @@ async function authenticate(
     const profileName = await resolveProfileName(
       identity.userId,
       identity.logicalScope,
+      application,
     );
     return {
       method: "api-key",
@@ -412,6 +416,7 @@ async function authenticate(
     const profileName = await resolveProfileName(
       identity.userId,
       identity.logicalScope,
+      application,
     );
     return {
       method: "pat",
@@ -470,7 +475,7 @@ async function authenticate(
     : env.DEFAULT_SCOPE?.trim() || null;
   // Never fall back to the old caller-selected profile name. Legacy scoped
   // data is copied offline only after an operator verifies exclusive ownership.
-  const profileName = await resolveProfileName(session.sub, logicalScope);
+  const profileName = await resolveProfileName(session.sub, logicalScope, application);
   return { method, profileName, session, permissions };
 }
 
@@ -486,7 +491,7 @@ function createServer(
   const permissionError = (permission: ApiKeyPermission) =>
     toolError(`Credential lacks the ${permission} permission.`, requestId);
   const server = new McpServer(
-    { name: "memory-server", version: "3.1.1" },
+    { name: "memory-server", version: "3.2.0" },
     {
       // Server-level instructions — ChatGPT/Codex read these on initialize.
       instructions:
@@ -1885,6 +1890,7 @@ const MCP_ALLOWED_HEADERS = [
   "authorization",
   "x-memory-api-key",
   "x-memory-scope",
+  "x-memory-application",
   "mcp-session-id",
   "mcp-protocol-version",
   "mcp-method",

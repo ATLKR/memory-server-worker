@@ -15,6 +15,7 @@
  *   MEMORY_PAT         — personal access token (mutually exclusive with API key)
  *   MEMORY_TOKEN       — JWT bearer token (overrides credential file; for CI/headless)
  *   MEMORY_SCOPE       — optional logical sub-scope within the authenticated user
+ *   MEMORY_APPLICATION — optional calling-application designator
  *   MEMORY_AUTH_API_URL — auth API URL for login (defaults to https://auth-api.allen.company)
  *   MEMORY_REQUEST_TIMEOUT_MS — request timeout in milliseconds (default 10000; 100-60000)
  *
@@ -45,7 +46,7 @@ const SERVICE_CREDENTIAL_PATH = join(homedir(), ".memory", "service-credential.j
 const CREDENTIALS_LOCK_PATH = join(homedir(), ".memory", "credentials.lock");
 const OAUTH_CLIENT_PATH = join(homedir(), ".memory", "oauth-client.json");
 
-const PLUGIN_VERSION = "3.1.1";
+const PLUGIN_VERSION = "3.2.0";
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const MIN_REQUEST_TIMEOUT_MS = 100;
 const MAX_REQUEST_TIMEOUT_MS = 60_000;
@@ -912,6 +913,8 @@ async function headers() {
     "mcp-protocol-version": "2025-11-25",
     "user-agent": `allenlim-memory-server/${PLUGIN_VERSION}`,
   };
+  const application = process.env.MEMORY_APPLICATION?.trim();
+  if (application) h["x-memory-application"] = application;
 
   const serviceAuthentication = getServiceAuthentication();
   if (serviceAuthentication) {

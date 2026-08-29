@@ -3,6 +3,22 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.2.0] - 2026-08-29
+
+### Added
+
+- An OpenClaw memory-provider plugin that exposes the canonical
+  `memory_search` and `memory_get` tools, automatically recalls context before
+  prompts, and captures successful conversations after turns.
+- Identity-bound memory partitions selected with the
+  `x-memory-application` header. OpenClaw defaults to the separate
+  `OpenClaw Group Chat` application designator.
+
+### Changed
+
+- The shared CLI and stdio MCP bridge now forward `MEMORY_APPLICATION` so
+  advanced MCP tools and the OpenClaw provider can share the same partition.
+
 ## [3.1.1] - 2026-08-13
 
 ### Fixed
@@ -121,6 +137,7 @@ All notable changes to this project are documented here. This project follows
 - Bound memory profiles to authenticated user identities and migrated the
   known production profile without deleting the legacy source.
 
+[3.2.0]: https://github.com/ATLKR/memory-server-worker/compare/v3.1.1...v3.2.0
 [3.1.1]: https://github.com/ATLKR/memory-server-worker/compare/v3.1.0...v3.1.1
 [3.1.0]: https://github.com/ATLKR/memory-server-worker/compare/v3.0.1...v3.1.0
 [3.0.1]: https://github.com/ATLKR/memory-server-worker/compare/v3.0.0...v3.0.1
