@@ -5,6 +5,9 @@ import { promisify } from "node:util";
 const execFileAsync = promisify(execFile);
 const DEFAULT_SERVER_URL = "https://memory.allenlim.net";
 const DEFAULT_APPLICATION = "OpenClaw Group Chat";
+const DEFAULT_REQUEST_TIMEOUT_MS = 120_000;
+const MIN_REQUEST_TIMEOUT_MS = 100;
+const MAX_REQUEST_TIMEOUT_MS = 120_000;
 const MAX_CAPTURE_MESSAGES = 100;
 const MAX_MESSAGE_BYTES = 32 * 1024;
 const MAX_INGEST_BYTES = 1024 * 1024;
@@ -26,18 +29,58 @@ export function truncateUtf8(value, maxBytes) {
 }
 
 export function normalizeConfig(raw = {}) {
-  let serverUrl = String(raw.serverUrl || DEFAULT_SERVER_URL);
+  let serverUrl = String(raw.serverUrl || DEFAULT_SERVER_URL).trim();
   while (serverUrl.endsWith("/")) serverUrl = serverUrl.slice(0, -1);
+  let parsedServerUrl;
+  try {
+    parsedServerUrl = new URL(serverUrl);
+  } catch {
+    throw new Error("serverUrl must be a valid absolute URL");
+  }
+  if (parsedServerUrl.username || parsedServerUrl.password) {
+    throw new Error("serverUrl must not contain credentials");
+  }
+  if (
+    parsedServerUrl.protocol !== "https:" &&
+    !(parsedServerUrl.protocol === "http:" && isLoopbackHostname(parsedServerUrl.hostname))
+  ) {
+    throw new Error("serverUrl must use HTTPS (HTTP is allowed only for loopback development)");
+  }
+  parsedServerUrl.hash = "";
+  parsedServerUrl.search = "";
+  serverUrl = parsedServerUrl.href;
+  while (serverUrl.endsWith("/")) serverUrl = serverUrl.slice(0, -1);
+
+  const credentialCommand = String(raw.credentialCommand || "").trim();
+  if (!credentialCommand) throw new Error("credentialCommand is required");
+  const configuredTimeout = Number(raw.requestTimeoutMs);
+  const requestTimeoutMs = Number.isFinite(configuredTimeout)
+    ? Math.min(
+        MAX_REQUEST_TIMEOUT_MS,
+        Math.max(MIN_REQUEST_TIMEOUT_MS, Math.trunc(configuredTimeout)),
+      )
+    : DEFAULT_REQUEST_TIMEOUT_MS;
+  const application = String(raw.application || DEFAULT_APPLICATION).trim();
   return {
     serverUrl,
-    application: String(raw.application || DEFAULT_APPLICATION).trim(),
-    credentialCommand: String(raw.credentialCommand || "").trim(),
+    application: application || DEFAULT_APPLICATION,
+    credentialCommand,
     credentialArgs: Array.isArray(raw.credentialArgs)
       ? raw.credentialArgs.map(String)
       : [],
+    requestTimeoutMs,
     autoRecall: raw.autoRecall !== false,
     autoCapture: raw.autoCapture !== false,
   };
+}
+
+function isLoopbackHostname(hostname) {
+  const normalized = hostname.toLowerCase().replace(/^\[|\]$/g, "");
+  if (normalized === "localhost" || normalized === "::1") return true;
+  const octets = normalized.split(".").map(Number);
+  return octets.length === 4 &&
+    octets.every((octet) => Number.isInteger(octet) && octet >= 0 && octet <= 255) &&
+    octets[0] === 127;
 }
 
 export function normalizeMessages(messages) {
@@ -103,7 +146,11 @@ export function createMemoryClient(config, deps = {}) {
     const { stdout } = await execFileAsync(
       config.credentialCommand,
       config.credentialArgs,
-      { encoding: "utf8", maxBuffer: 16 * 1024 },
+      {
+        encoding: "utf8",
+        maxBuffer: 16 * 1024,
+        timeout: config.requestTimeoutMs,
+      },
     );
     const credential = stdout.trim();
     if (!credential.startsWith("memory_pat_")) {
@@ -117,6 +164,9 @@ export function createMemoryClient(config, deps = {}) {
   return {
     async call(name, args = {}) {
       const credential = await readCredential();
+      const boundedArgs = name === "memory_search"
+        ? { ...args, query: truncateUtf8(args.query ?? "", MAX_QUERY_BYTES) }
+        : args;
       const response = await fetchImpl(`${config.serverUrl}/mcp`, {
         method: "POST",
         headers: {
@@ -126,11 +176,12 @@ export function createMemoryClient(config, deps = {}) {
           "mcp-protocol-version": "2025-11-25",
           "x-memory-application": config.application,
         },
+        signal: AbortSignal.timeout(config.requestTimeoutMs),
         body: JSON.stringify({
           jsonrpc: "2.0",
           id: crypto.randomUUID(),
           method: "tools/call",
-          params: { name, arguments: args },
+          params: { name, arguments: boundedArgs },
         }),
       });
       const text = await response.text();
@@ -152,6 +203,7 @@ const plugin = {
   register(api) {
     const config = normalizeConfig(api.pluginConfig);
     const client = createMemoryClient(config);
+    const hookTimeoutMs = config.requestTimeoutMs + 5_000;
 
     api.registerMemoryCapability({
       promptBuilder: ({ availableTools }) => {
@@ -216,7 +268,7 @@ const plugin = {
         } catch (error) {
           api.logger.warn(`automatic memory recall failed: ${error.message}`);
         }
-      }, { timeoutMs: 120_000 });
+      }, { timeoutMs: hookTimeoutMs });
     }
 
     if (config.autoCapture) {
@@ -232,7 +284,7 @@ const plugin = {
         } catch (error) {
           api.logger.warn(`automatic memory capture failed: ${error.message}`);
         }
-      }, { timeoutMs: 120_000 });
+      }, { timeoutMs: hookTimeoutMs });
     }
   },
 };

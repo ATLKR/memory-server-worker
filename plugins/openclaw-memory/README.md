@@ -23,6 +23,7 @@ Example OpenClaw configuration:
           "application": "OpenClaw Group Chat",
           "credentialCommand": "/absolute/path/to/credential-command",
           "credentialArgs": [],
+          "requestTimeoutMs": 120000,
           "autoRecall": true,
           "autoCapture": true
         }
@@ -35,3 +36,5 @@ Example OpenClaw configuration:
 The credential command must print one `memory_pat_...` credential to stdout.
 Keep the command and its backing secret manager owner-only. The credential is
 never stored in OpenClaw configuration and is cached in memory for five minutes.
+Remote MCP and credential-command calls are aborted after `requestTimeoutMs`;
+plain HTTP is accepted only for loopback development.

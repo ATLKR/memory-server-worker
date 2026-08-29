@@ -483,7 +483,7 @@ test("MCP and HTTP error details are bounded to roughly 4 KiB", async () => {
   }
 });
 
-test("destination fingerprints partition server, auth identity, and JWT scope", () => {
+test("destination fingerprints partition server, auth identity, JWT scope, and application", () => {
   process.env.MEMORY_TOKEN = jwtFor("stable-user", "first");
   process.env.MEMORY_SCOPE = "scope-a";
   const first = getMemoryDestinationFingerprint();
@@ -496,6 +496,13 @@ test("destination fingerprints partition server, auth identity, and JWT scope", 
   assert.notEqual(getMemoryDestinationFingerprint(), first);
 
   process.env.MEMORY_SCOPE = "scope-a";
+  process.env.MEMORY_APPLICATION = "OpenClaw Group Chat";
+  const openClaw = getMemoryDestinationFingerprint();
+  assert.notEqual(openClaw, first);
+  process.env.MEMORY_APPLICATION = "Claude Code";
+  assert.notEqual(getMemoryDestinationFingerprint(), openClaw);
+  delete process.env.MEMORY_APPLICATION;
+
   process.env.MEMORY_SERVER_URL = "https://other-memory.example";
   assert.notEqual(getMemoryDestinationFingerprint(), first);
 

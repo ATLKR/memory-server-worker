@@ -869,12 +869,15 @@ export function getMemoryDestinationFingerprint() {
     }
   }
 
-  return deriveDestinationFingerprint({
+  const destinationMaterial = {
     authKind,
     identity,
     logicalScope,
     server: getCanonicalServerUrl(),
-  });
+  };
+  const application = process.env.MEMORY_APPLICATION?.trim();
+  if (application) destinationMaterial.application = application;
+  return deriveDestinationFingerprint(destinationMaterial);
 }
 
 function getStableJwtUserId(token, credentials) {

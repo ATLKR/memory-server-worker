@@ -25,7 +25,8 @@
         "maxLength": 100
       },
       "credentialCommand": {
-        "type": "string"
+        "type": "string",
+        "minLength": 1
       },
       "credentialArgs": {
         "type": "array",
@@ -33,12 +34,18 @@
           "type": "string"
         }
       },
+      "requestTimeoutMs": {
+        "type": "integer",
+        "minimum": 100,
+        "maximum": 120000
+      },
       "autoRecall": {
         "type": "boolean"
       },
       "autoCapture": {
         "type": "boolean"
       }
-    }
+    },
+    "required": ["credentialCommand"]
   }
 }
