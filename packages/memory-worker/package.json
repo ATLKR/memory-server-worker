@@ -20,15 +20,15 @@
     "@modelcontextprotocol/client": "2.0.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@modelcontextprotocol/server": "2.0.0",
-    "agents": "0.20.1",
-    "jose": "^6.2.8",
+    "agents": "0.21.0",
+    "jose": "^6.2.10",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "0.21.2",
+    "@cloudflare/vitest-pool-workers": "0.22.0",
     "@cloudflare/workers-types": "^5.20260813.1",
     "typescript": "^7.0.2",
-    "vitest": "4.1.10",
-    "wrangler": "^4.122.0"
+    "vitest": "4.1.11",
+    "wrangler": "^4.126.0"
   }
 }
