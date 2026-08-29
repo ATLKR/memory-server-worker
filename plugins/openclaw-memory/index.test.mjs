@@ -115,9 +115,14 @@ describe("OpenClaw memory adapter", () => {
     const client = createMemoryClient(testConfig({ requestTimeoutMs: 100 }), {
       readCredential: async () => `memory_pat_${"A".repeat(43)}`,
       fetchImpl: async (_url, init) => new Promise((_resolve, reject) => {
-        init.signal.addEventListener("abort", () => reject(init.signal.reason), {
-          once: true,
-        });
+        const watchdog = setTimeout(
+          () => reject(new Error("MCP request did not abort")),
+          1_000,
+        );
+        init.signal.addEventListener("abort", () => {
+          clearTimeout(watchdog);
+          reject(init.signal.reason);
+        }, { once: true });
       }),
     });
 
