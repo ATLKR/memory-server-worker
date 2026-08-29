@@ -26,8 +26,10 @@ export function truncateUtf8(value, maxBytes) {
 }
 
 export function normalizeConfig(raw = {}) {
+  let serverUrl = String(raw.serverUrl || DEFAULT_SERVER_URL);
+  while (serverUrl.endsWith("/")) serverUrl = serverUrl.slice(0, -1);
   return {
-    serverUrl: String(raw.serverUrl || DEFAULT_SERVER_URL).replace(/\/+$/, ""),
+    serverUrl,
     application: String(raw.application || DEFAULT_APPLICATION).trim(),
     credentialCommand: String(raw.credentialCommand || "").trim(),
     credentialArgs: Array.isArray(raw.credentialArgs)

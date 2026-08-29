@@ -11,6 +11,11 @@ import {
 describe("OpenClaw memory adapter", () => {
   it("defaults to the group-chat application partition", () => {
     assert.equal(normalizeConfig().application, "OpenClaw Group Chat");
+    assert.equal(
+      normalizeConfig({ serverUrl: `https://memory.allenlim.net${"/".repeat(10_000)}` })
+        .serverUrl,
+      "https://memory.allenlim.net",
+    );
   });
 
   it("normalizes transcript messages and drops tool records", () => {
