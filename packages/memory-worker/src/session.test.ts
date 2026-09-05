@@ -435,6 +435,63 @@ describe("browser SSO session", () => {
     assert.equal(response.headers.has("set-cookie"), false);
   });
 
+  for (const { status, body } of [
+    { status: 408, body: { error: "temporarily_unavailable" } },
+    { status: 429, body: { error: "temporarily_unavailable" } },
+    { status: 400, body: { error: "temporarily_unavailable" } },
+    { status: 403, body: { error: "upstream diagnostic" } },
+    { status: 502, body: { error: "invalid_grant" } },
+    { status: 200, body: { error: "invalid_grant" } },
+  ]) {
+    it(`preserves refresh cookies for unconfirmed upstream rejection (${status})`, async (t) => {
+      t.mock.method(console, "error", () => undefined);
+      t.mock.method(globalThis, "fetch", async () => Response.json(body, { status }));
+
+      const response = await worker.fetch(
+        new Request(`${ORIGIN}/auth/refresh`, {
+          method: "POST",
+          headers: {
+            origin: ORIGIN,
+            cookie: "__Host-memory_refresh=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq",
+          },
+        }),
+        testEnv(),
+        executionContext(),
+      );
+
+      assert.equal(response.status, 502);
+      assert.equal(response.headers.has("set-cookie"), false);
+    });
+  }
+
+  for (const { status, error } of [
+    { status: 400, error: "invalid_grant" },
+    { status: 401, error: "invalid_client" },
+  ]) {
+    it(`clears refresh cookies after confirmed OAuth ${error}`, async (t) => {
+      t.mock.method(console, "error", () => undefined);
+      t.mock.method(globalThis, "fetch", async () => Response.json({ error }, { status }));
+
+      const response = await worker.fetch(
+        new Request(`${ORIGIN}/auth/refresh`, {
+          method: "POST",
+          headers: {
+            origin: ORIGIN,
+            cookie: "__Host-memory_refresh=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopq",
+          },
+        }),
+        testEnv(),
+        executionContext(),
+      );
+
+      assert.equal(response.status, 401);
+      const cookies = getSetCookies(response).join("\n");
+      assert.match(cookies, /__Host-memory_session=;.*Max-Age=0/);
+      assert.match(cookies, /__Host-memory_refresh=;.*Max-Age=0/);
+      assert.match(cookies, /__Host-memory_refresh_client=;.*Max-Age=0/);
+    });
+  }
+
   it("never authenticates with unprefixed legacy SSO cookies", async () => {
     const response = await worker.fetch(
       new Request(`${ORIGIN}/auth/callback?state=legacy-state&code=test-code`, {
