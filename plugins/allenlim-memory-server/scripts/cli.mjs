@@ -204,7 +204,9 @@ async function handleLogin(flags) {
       token: tokens.access_token,
       client_id: registration.clientId,
     });
-    console.log("Logged in. This session refreshes automatically for up to 30 days.");
+    console.log(
+      "Logged in. This session refreshes automatically and expires after 30 days of inactivity.",
+    );
   } finally {
     callback.close();
   }

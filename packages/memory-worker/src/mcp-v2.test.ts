@@ -323,6 +323,219 @@ function apiKeyEnv(
   } as Env;
 }
 
+async function productionMcpRequest(
+  env: Env,
+  method: string,
+  params: Record<string, unknown>,
+  apiKey: string,
+): Promise<{ response: Response; rpc: JsonRpcResponse }> {
+  const response = await worker.fetch(
+    new Request(MCP_URL, {
+      method: "POST",
+      headers: {
+        host: "memory.allenlim.net",
+        accept: "application/json, text/event-stream",
+        "content-type": "application/json",
+        "mcp-protocol-version": LEGACY_PROTOCOL_VERSION,
+        "x-memory-api-key": apiKey,
+      },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+    }),
+    env,
+    {} as ExecutionContext,
+  );
+  return { response, rpc: await parseJsonRpc(response) };
+}
+
+describe("Production MCP tool catalog", () => {
+  const catalogKey = "memory_catalog_test_0123456789abcdef";
+  const expected = {
+    memory_add: {
+      title: "Add memory",
+      permission: "write",
+      scopes: ["memory:read", "memory:write"],
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: false,
+    },
+    memory_search: {
+      title: "Search memories",
+      permission: "read",
+      scopes: ["memory:read"],
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    memory_ingest: {
+      title: "Ingest conversation memories",
+      permission: "write",
+      scopes: ["memory:read", "memory:write"],
+      readOnlyHint: false,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    memory_list: {
+      title: "List memories",
+      permission: "read",
+      scopes: ["memory:read"],
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    memory_get: {
+      title: "Get memory",
+      permission: "read",
+      scopes: ["memory:read"],
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    memory_delete: {
+      title: "Delete memory",
+      permission: "delete",
+      scopes: ["memory:read", "memory:delete"],
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+    },
+    memory_delete_session: {
+      title: "Delete session memories",
+      permission: "delete",
+      scopes: ["memory:read", "memory:delete"],
+      readOnlyHint: false,
+      destructiveHint: true,
+      idempotentHint: true,
+    },
+    memory_summary: {
+      title: "Summarize memories",
+      permission: "read",
+      scopes: ["memory:read"],
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+    memory_stats: {
+      title: "Get memory statistics",
+      permission: "read",
+      scopes: ["memory:read"],
+      readOnlyHint: true,
+      destructiveHint: false,
+      idempotentHint: true,
+    },
+  } as const;
+
+  const validArguments: Record<keyof typeof expected, Record<string, unknown>> = {
+    memory_add: { content: "remember this" },
+    memory_search: { query: "relevant context" },
+    memory_ingest: {
+      messages: [{ role: "user", content: "I prefer concise answers." }],
+    },
+    memory_list: {},
+    memory_get: { id: "memory-id" },
+    memory_delete: { id: "memory-id" },
+    memory_delete_session: { sessionId: "session-id" },
+    memory_summary: {},
+    memory_stats: {},
+  };
+
+  it("advertises all nine tools with exact OAuth and safety metadata", async () => {
+    const registry = await apiKeyRegistry(catalogKey);
+    const listed = await productionMcpRequest(
+      apiKeyEnv(registry, []),
+      "tools/list",
+      {},
+      catalogKey,
+    );
+
+    assert.equal(listed.response.status, 200);
+    assert.equal(listed.rpc.error, undefined);
+    const tools = listed.rpc.result?.tools as Array<{
+      name: string;
+      title?: string;
+      description?: string;
+      annotations?: Record<string, boolean>;
+      _meta?: {
+        securitySchemes?: Array<{ type: string; scopes?: string[] }>;
+      };
+      inputSchema?: Record<string, unknown>;
+      outputSchema?: Record<string, unknown>;
+    }>;
+
+    assert.equal(tools.length, 9);
+    assert.deepEqual(tools.map((tool) => tool.name), Object.keys(expected));
+    for (const tool of tools) {
+      const policy = expected[tool.name as keyof typeof expected];
+      assert.ok(policy, `unexpected tool ${tool.name}`);
+      assert.equal(tool.title, policy.title);
+      assert.match(tool.description ?? "", /^Use this /);
+      assert.deepEqual(tool.annotations, {
+        readOnlyHint: policy.readOnlyHint,
+        destructiveHint: policy.destructiveHint,
+        idempotentHint: policy.idempotentHint,
+        openWorldHint: false,
+      });
+      assert.deepEqual(tool._meta?.securitySchemes, [{
+        type: "oauth2",
+        scopes: [...policy.scopes],
+      }]);
+      assert.equal(tool.inputSchema?.type, "object");
+      assert.equal(tool.outputSchema?.type, "object");
+    }
+  });
+
+  it("keeps each advertised capability aligned with handler enforcement", async () => {
+    for (const [name, policy] of Object.entries(expected)) {
+      const missingPermission = policy.permission === "read" ? "write" : "read";
+      const registry = await apiKeyRegistry(catalogKey, {
+        permissions: [missingPermission],
+      });
+      const profiles: string[] = [];
+      const called = await productionMcpRequest(
+        apiKeyEnv(registry, profiles),
+        "tools/call",
+        {
+          name,
+          arguments: validArguments[name as keyof typeof validArguments],
+        },
+        catalogKey,
+      );
+
+      assert.equal(called.response.status, 200, name);
+      assert.equal(called.rpc.error, undefined, name);
+      assert.equal(called.rpc.result?.isError, true, name);
+      assert.match(
+        JSON.stringify(called.rpc.result?.content),
+        new RegExp(`${policy.permission} permission`),
+        name,
+      );
+      assert.deepEqual(profiles, [], `${name} must reject before profile access`);
+    }
+  });
+
+  it("describes every tool and deletion confirmation in server instructions", async () => {
+    const registry = await apiKeyRegistry(catalogKey);
+    const initialized = await productionMcpRequest(
+      apiKeyEnv(registry, []),
+      "initialize",
+      {
+        protocolVersion: LEGACY_PROTOCOL_VERSION,
+        capabilities: {},
+        clientInfo: { name: "catalog-test", version: "1.0.0" },
+      },
+      catalogKey,
+    );
+
+    assert.equal(initialized.response.status, 200);
+    assert.equal(initialized.rpc.error, undefined);
+    const instructions = initialized.rpc.result?.instructions as string;
+    for (const name of Object.keys(expected)) {
+      assert.match(instructions, new RegExp(`\\b${name}\\b`));
+    }
+    assert.match(instructions, /explicitly requests or confirms that deletion/i);
+    assert.match(instructions, /skills and resources are optional/i);
+  });
+});
+
 describe("MCP v2 runtime", () => {
   it("loads the v2 packages and serves a modern envelope", async () => {
     assert.equal(typeof McpServer, "function");

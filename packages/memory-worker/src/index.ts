@@ -281,6 +281,110 @@ const MEMORY_OAUTH_SCOPES: Record<ApiKeyPermission, string> = {
   delete: "memory:delete",
 };
 
+type MemoryMcpToolName =
+  | "memory_add"
+  | "memory_search"
+  | "memory_ingest"
+  | "memory_list"
+  | "memory_get"
+  | "memory_delete"
+  | "memory_delete_session"
+  | "memory_summary"
+  | "memory_stats";
+
+type MemoryMcpToolPolicy = {
+  title: string;
+  permission: ApiKeyPermission;
+  idempotent: boolean;
+  destructive: boolean;
+};
+
+/**
+ * Single source of truth for the authorization and safety contract advertised
+ * by tools/list and enforced by each handler. OAuth grants currently require
+ * memory:read as their baseline, so write/delete tools advertise that baseline
+ * plus the one additional capability they exercise.
+ */
+const MEMORY_MCP_TOOL_POLICIES = {
+  memory_add: {
+    title: "Add memory",
+    permission: "write",
+    idempotent: false,
+    destructive: false,
+  },
+  memory_search: {
+    title: "Search memories",
+    permission: "read",
+    idempotent: true,
+    destructive: false,
+  },
+  memory_ingest: {
+    title: "Ingest conversation memories",
+    permission: "write",
+    idempotent: true,
+    destructive: false,
+  },
+  memory_list: {
+    title: "List memories",
+    permission: "read",
+    idempotent: true,
+    destructive: false,
+  },
+  memory_get: {
+    title: "Get memory",
+    permission: "read",
+    idempotent: true,
+    destructive: false,
+  },
+  memory_delete: {
+    title: "Delete memory",
+    permission: "delete",
+    idempotent: true,
+    destructive: true,
+  },
+  memory_delete_session: {
+    title: "Delete session memories",
+    permission: "delete",
+    idempotent: true,
+    destructive: true,
+  },
+  memory_summary: {
+    title: "Summarize memories",
+    permission: "read",
+    idempotent: true,
+    destructive: false,
+  },
+  memory_stats: {
+    title: "Get memory statistics",
+    permission: "read",
+    idempotent: true,
+    destructive: false,
+  },
+} as const satisfies Record<MemoryMcpToolName, MemoryMcpToolPolicy>;
+
+function memoryMcpToolMetadata(name: MemoryMcpToolName) {
+  const policy = MEMORY_MCP_TOOL_POLICIES[name];
+  const scopes = policy.permission === "read"
+    ? [MEMORY_OAUTH_SCOPES.read]
+    : [MEMORY_OAUTH_SCOPES.read, MEMORY_OAUTH_SCOPES[policy.permission]];
+  return {
+    title: policy.title,
+    annotations: {
+      readOnlyHint: policy.permission === "read",
+      destructiveHint: policy.destructive,
+      idempotentHint: policy.idempotent,
+      // Every operation stays inside the authenticated user's private profile.
+      openWorldHint: false,
+    },
+    // @modelcontextprotocol/server 2.0 preserves OpenAI's documented
+    // back-compat securitySchemes mirror through Tool._meta. Its strict Tool
+    // type does not yet expose the equivalent top-level extension.
+    _meta: {
+      securitySchemes: [{ type: "oauth2", scopes }],
+    },
+  };
+}
+
 function permissionsFromSession(
   session: SessionPayload,
   env: Env,
@@ -490,20 +594,24 @@ function createServer(
   const profileName = auth.profileName;
   const permissionError = (permission: ApiKeyPermission) =>
     toolError(`Credential lacks the ${permission} permission.`, requestId);
+  const authorizeTool = (name: MemoryMcpToolName) => {
+    const permission = MEMORY_MCP_TOOL_POLICIES[name].permission;
+    return hasPermission(auth, permission) ? null : permissionError(permission);
+  };
   const server = new McpServer(
     { name: "memory-server", version: "3.2.0" },
     {
       // Server-level instructions — ChatGPT/Codex read these on initialize.
       instructions:
-        "This is a personal persistent-memory server powered by Cloudflare " +
-        "Agent Memory. ALWAYS call memory_search at the start of every " +
-        "user message to recall relevant context before responding. " +
-        "After a conversation turn, use memory_ingest to automatically " +
-        "extract and store facts, events, instructions, and tasks. " +
-        "Use memory_add to store a specific memory explicitly. " +
-        "Use memory_summary to get a structured overview of everything " +
-        "you know about the user. Memories are automatically classified, " +
-        "deduplicated, and superseded when newer facts replace older ones.",
+        "This server provides private persistent memory. Call memory_search " +
+        "at the start of a user message when prior context could help. Use " +
+        "memory_ingest after a conversation turn to extract durable items, " +
+        "or memory_add for one explicit item. Use memory_list to browse, " +
+        "memory_get for full content by ID, memory_stats for counts, and " +
+        "memory_summary for an overview. Only call memory_delete or " +
+        "memory_delete_session when the user explicitly requests or confirms " +
+        "that deletion. Tools are the universal interface; skills and " +
+        "resources are optional guidance extensions.",
     },
   );
 
@@ -576,19 +684,21 @@ function createServer(
   server.registerTool(
     "memory_add",
     {
+      ...memoryMcpToolMetadata("memory_add"),
       description:
-        "Store a memory explicitly. Agent Memory will automatically " +
+        "Use this when the user explicitly asks to remember one specific " +
+        "item. Agent Memory will automatically " +
         "classify it (fact/event/instruction/task), generate a summary, " +
         "and handle deduplication. If a similar fact or instruction " +
         "already exists, the new one supersedes the old (history is " +
-        "preserved). Use this when you know exactly what to remember. " +
-        "For extracting memories from a conversation, use memory_ingest " +
-        "instead.",
+        "preserved). For extracting memories from a conversation, use " +
+        "memory_ingest instead.",
       inputSchema: addMemoryInputSchema,
       outputSchema: memoryEntrySchema,
     },
     async (params) => {
-      if (!hasPermission(auth, "write")) return permissionError("write");
+      const denied = authorizeTool("memory_add");
+      if (denied) return denied;
       try {
         const profile = await getProfile(env, profileName);
         const memory = await profile.remember({
@@ -619,17 +729,19 @@ function createServer(
   server.registerTool(
     "memory_search",
     {
+      ...memoryMcpToolMetadata("memory_search"),
       description:
-        "Search memories using natural language. Agent Memory runs " +
+        "Use this when prior personal context could help answer the user's " +
+        "current message. Agent Memory runs " +
         "hybrid search (keyword + semantic + topic key) in parallel " +
-        "and returns a synthesized answer grounded in stored content. " +
-        "Call this at the start of every user message to recall " +
-        "relevant context.",
+        "and returns a synthesized answer grounded in stored content. Use " +
+        "memory_get instead when an exact memory ID is already known.",
       inputSchema: searchMemoryInputSchema,
       outputSchema: searchResultSchema,
     },
     async (params) => {
-      if (!hasPermission(auth, "read")) return permissionError("read");
+      const denied = authorizeTool("memory_search");
+      if (denied) return denied;
       try {
         const profile = await getProfile(env, profileName);
         const result: RecallResult = await profile.recall(params.query, {
@@ -656,8 +768,10 @@ function createServer(
   server.registerTool(
     "memory_ingest",
     {
+      ...memoryMcpToolMetadata("memory_ingest"),
       description:
-        "Extract memories from a conversation. Agent Memory reads the " +
+        "Use this after a conversation turn to extract durable memories " +
+        "automatically. Agent Memory reads the " +
         "messages and automatically identifies facts, events, " +
         "instructions, and tasks. Re-ingesting the same conversation " +
         "is idempotent — no duplicates are created. Call this after " +
@@ -667,7 +781,8 @@ function createServer(
       outputSchema: ingestResultSchema,
     },
     async (params) => {
-      if (!hasPermission(auth, "write")) return permissionError("write");
+      const denied = authorizeTool("memory_ingest");
+      if (denied) return denied;
       try {
         const profile = await getProfile(env, profileName);
         await profile.ingest(
@@ -693,15 +808,18 @@ function createServer(
   server.registerTool(
     "memory_list",
     {
+      ...memoryMcpToolMetadata("memory_list"),
       description:
-        "List stored memories, optionally filtered by type or session. " +
+        "Use this when the user wants to browse stored memories or inspect " +
+        "a filtered, paginated collection. Filter by type or session. " +
         "Returns entries ordered by most recently updated. Use the " +
-        "cursor for pagination.",
+        "cursor for pagination. Use memory_search for natural-language recall.",
       inputSchema: listMemoryInputSchema,
       outputSchema: listResultSchema,
     },
     async (params) => {
-      if (!hasPermission(auth, "read")) return permissionError("read");
+      const denied = authorizeTool("memory_list");
+      if (denied) return denied;
       try {
         const profile = await getProfile(env, profileName);
         const result = await profile.list({
@@ -739,14 +857,17 @@ function createServer(
   server.registerTool(
     "memory_get",
     {
+      ...memoryMcpToolMetadata("memory_get"),
       description:
-        "Fetch a single memory by its ID. Returns the full entry " +
-        "including content, type, and timestamps.",
+        "Use this when an exact memory ID is already known and its full " +
+        "content is needed. Returns the complete entry including content, " +
+        "type, session, and timestamps. Do not use for natural-language search.",
       inputSchema: getMemoryInputSchema,
       outputSchema: memoryEntrySchema,
     },
     async (params) => {
-      if (!hasPermission(auth, "read")) return permissionError("read");
+      const denied = authorizeTool("memory_get");
+      if (denied) return denied;
       try {
         const profile = await getProfile(env, profileName);
         const memory = await profile.get(params.id);
@@ -777,12 +898,17 @@ function createServer(
   server.registerTool(
     "memory_delete",
     {
-      description: "Delete a memory by ID. This is irreversible.",
+      ...memoryMcpToolMetadata("memory_delete"),
+      description:
+        "Use this only when the user explicitly requests or confirms deleting " +
+        "one memory whose exact ID is known. This permanently deletes that " +
+        "memory and is irreversible. Never infer consent to delete.",
       inputSchema: deleteMemoryInputSchema,
       outputSchema: deleteResultSchema,
     },
     async (params) => {
-      if (!hasPermission(auth, "delete")) return permissionError("delete");
+      const denied = authorizeTool("memory_delete");
+      if (denied) return denied;
       try {
         const profile = await getProfile(env, profileName);
         await profile.delete(params.id);
@@ -805,14 +931,18 @@ function createServer(
   server.registerTool(
     "memory_delete_session",
     {
+      ...memoryMcpToolMetadata("memory_delete_session"),
       description:
+        "Use this only when the user explicitly requests or confirms deleting " +
+        "every memory associated with one session ID. This is irreversible. " +
         "Delete all memories associated with a session ID. " +
         "Idempotent — deleting a session with no memories is a no-op.",
       inputSchema: deleteSessionInputSchema,
       outputSchema: deleteSessionResultSchema,
     },
     async (params) => {
-      if (!hasPermission(auth, "delete")) return permissionError("delete");
+      const denied = authorizeTool("memory_delete_session");
+      if (denied) return denied;
       try {
         const profile = await getProfile(env, profileName);
         await profile.deleteSession(params.sessionId);
@@ -832,15 +962,17 @@ function createServer(
   server.registerTool(
     "memory_summary",
     {
+      ...memoryMcpToolMetadata("memory_summary"),
       description:
-        "Generate a structured Markdown summary of everything stored " +
-        "in memory. Use this to inspect what Agent Memory remembers " +
-        "about the user, or to bootstrap a new session with context.",
+        "Use this when a structured Markdown overview of the user's stored " +
+        "memory is needed, or to bootstrap a new session with broad context. " +
+        "Use memory_search for a focused question and memory_stats for counts.",
       inputSchema: summaryInputSchema,
       outputSchema: summaryResultSchema,
     },
     async (params) => {
-      if (!hasPermission(auth, "read")) return permissionError("read");
+      const denied = authorizeTool("memory_summary");
+      if (denied) return denied;
       try {
         const profile = await getProfile(env, profileName);
         const result = await profile.getSummary({
@@ -864,15 +996,18 @@ function createServer(
   server.registerTool(
     "memory_stats",
     {
+      ...memoryMcpToolMetadata("memory_stats"),
       description:
-        "Return memory statistics: total count and per-type breakdown " +
-        "(fact, event, instruction, task). Note: counts are approximate " +
+        "Use this when the user asks how many memories are stored or wants a " +
+        "per-type breakdown (fact, event, instruction, task). Returns the " +
+        "total and each type's count. Note: counts are approximate " +
         "for profiles with more than 500 memories.",
       inputSchema: z.object({}),
       outputSchema: statsResultSchema,
     },
     async () => {
-      if (!hasPermission(auth, "read")) return permissionError("read");
+      const denied = authorizeTool("memory_stats");
+      if (denied) return denied;
       try {
         const profile = await getProfile(env, profileName);
         // Agent Memory doesn't have a direct stats endpoint, so we
@@ -1555,7 +1690,8 @@ async function handleLogout(
       // Logout is local-first for user safety and availability. Revocation is
       // best effort; even if auth is down, clearing host-only HttpOnly cookies
       // ensures this browser is signed out. The remote family remains bounded
-      // by its 30-day absolute expiry and cannot be read back from the browser.
+      // by its current 30-day inactivity expiry and cannot be read back from
+      // the browser to extend itself.
       await revokeRefreshFamily(authApiUrl, refreshToken, resource, requestId);
     }
   }

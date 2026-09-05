@@ -23,9 +23,9 @@
  *
  * JWT verification itself needs no shared secret. API-key authentication is
  * handled separately below through a digest-only Worker secret. The JWT
- * access token is valid for 15 minutes. Browser/CLI clients can use the
- * auth server's one-time rotating refresh token for up to the family's
- * absolute 30-day lifetime.
+ * access token is valid for 15 minutes. Browser/CLI clients use the auth
+ * server's one-time rotating refresh token; every successful refresh renews
+ * the session's 30-day inactivity window.
  */
 
 import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";

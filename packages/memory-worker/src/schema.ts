@@ -116,8 +116,11 @@ export const ingestMemoryShape = {
   messages: z
     .array(
       z.object({
-        role: z.enum(["system", "user", "assistant"]),
-        content: utf8BoundedString(MAX_MEMORY_CONTENT_BYTES, "Message content"),
+        role: z
+          .enum(["system", "user", "assistant"])
+          .describe("The speaker for this message: system, user, or assistant."),
+        content: utf8BoundedString(MAX_MEMORY_CONTENT_BYTES, "Message content")
+          .describe("The message text to inspect for durable memories."),
       }),
     )
     .min(1)
@@ -180,7 +183,11 @@ export const getMemoryShape = {
 };
 
 export const deleteMemoryShape = {
-  id: z.string().min(1).max(512).describe("The memory ID to delete."),
+  id: z
+    .string()
+    .min(1)
+    .max(512)
+    .describe("The exact memory ID the user explicitly approved deleting."),
 };
 
 export const deleteSessionShape = {
@@ -188,7 +195,9 @@ export const deleteSessionShape = {
     .string()
     .min(1)
     .max(64)
-    .describe("The session ID to delete all memories for."),
+    .describe(
+      "The exact session ID whose memories the user explicitly approved deleting.",
+    ),
 };
 
 export const summaryShape = {

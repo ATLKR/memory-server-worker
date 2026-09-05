@@ -3,6 +3,15 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.2.1] - 2026-09-05
+
+### Fixed
+
+- Published operation-specific OAuth schemes and safety annotations for all
+  nine Memory MCP tools so clients can discover the complete API contract.
+- Aligned renewable OAuth clients with the server's sliding 30-day inactivity
+  window, and generated runtime skills from their canonical Markdown sources.
+
 ## [3.2.0] - 2026-08-29
 
 ### Added

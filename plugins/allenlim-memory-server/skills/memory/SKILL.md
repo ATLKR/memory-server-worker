@@ -113,8 +113,10 @@ loopback development URLs.
 
 `mem login` uses OAuth state and PKCE S256 with a temporary loopback callback;
 tokens are never copied through the terminal. The 15-minute access token is
-automatically refreshed for up to 30 days. Rotated credentials are stored
-atomically in `~/.memory/credentials.json` with owner-only permissions. For
+automatically refreshed, and every successful refresh renews the session for
+another 30 days. Reconnect only after 30 days without a refresh. Rotated
+credentials are stored atomically in `~/.memory/credentials.json` with
+owner-only permissions. For
 CI/headless use, prefer `MEMORY_API_KEY`; `MEMORY_TOKEN` is a non-renewable
 override.
 
