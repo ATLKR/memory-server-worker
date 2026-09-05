@@ -3,6 +3,22 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [3.2.1] - 2026-09-05
+
+### Fixed
+
+- Published operation-specific OAuth schemes and safety annotations for all
+  nine Memory MCP tools so clients can discover the complete API contract.
+- Aligned renewable OAuth clients with the server's sliding 30-day inactivity
+  window, and generated runtime skills from their canonical Markdown sources.
+- Preserved browser refresh credentials when the auth server is temporarily
+  unavailable, and accepted case-insensitive Bearer authentication schemes.
+- Prevented malformed credential-command output and transport errors from
+  disclosing OpenClaw PATs in automatic hook logs.
+- Cleared pending refresh state when logout supersedes a browser refresh.
+- Patched the vulnerable `fast-uri` and `qs` dependencies and updated CodeQL.
+- Included the OpenClaw package in release-version consistency checks.
+
 ## [3.2.0] - 2026-08-29
 
 ### Added

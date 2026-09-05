@@ -1,6 +1,6 @@
 {
   "name": "@allenlim/openclaw-memory",
-  "version": "3.2.0",
+  "version": "3.2.1",
   "private": true,
   "type": "module",
   "description": "OpenClaw memory-slot adapter for Allenlim Memory Server.",

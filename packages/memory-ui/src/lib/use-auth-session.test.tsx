@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { AUTH_INVALIDATED_EVENT, type AuthSession } from "./api";
@@ -17,10 +17,12 @@ const SESSION: AuthSession = {
 };
 
 function SessionHarness() {
-  const { loggedIn, user, signingOut, signOut } = useAuthSession();
+  const { loggedIn, user, refreshing, signingOut, signOut, error } = useAuthSession();
   return (
     <div>
       <output>{loggedIn ? user?.name : "Signed out"}</output>
+      <output aria-label="Refresh state">{refreshing ? "Refreshing" : "Idle"}</output>
+      {error && <p role="alert">{error}</p>}
       <button type="button" onClick={() => void signOut()} disabled={signingOut}>
         {signingOut ? "Signing out" : "Sign out"}
       </button>
@@ -132,5 +134,34 @@ describe("AuthSessionProvider", () => {
     await waitFor(() => expect(logoutAction).toHaveBeenCalledOnce());
     expect(await screen.findByText("Signed out")).toBeInTheDocument();
     expect(screen.queryByText("Late refresh")).not.toBeInTheDocument();
+  });
+
+  it("clears refreshing after a concurrent logout fails", async () => {
+    let resolveRefresh!: (session: AuthSession) => void;
+    const sessionLoader = () => new Promise<AuthSession>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const logoutAction = async () => { throw new Error("Logout temporarily unavailable"); };
+    const user = userEvent.setup();
+    render(
+      <AuthSessionProvider
+        initialSession={SESSION}
+        sessionLoader={sessionLoader}
+        logoutAction={logoutAction}
+      >
+        <SessionHarness />
+      </AuthSessionProvider>,
+    );
+
+    await act(async () => {
+      window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true }));
+    });
+    expect(screen.getByLabelText("Refresh state")).toHaveTextContent("Refreshing");
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await act(async () => resolveRefresh(SESSION));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Logout temporarily unavailable");
+    expect(screen.getByText("Memory User")).toBeInTheDocument();
+    expect(screen.getByLabelText("Refresh state")).toHaveTextContent("Idle");
   });
 });

@@ -10,10 +10,25 @@ import {
   type ApiKeyPermission,
   type RegistryCredentialKind,
   extractAuthorizationApiKey,
+  extractBearerToken,
   verifyApiKey,
   verifyJwt,
   verifyPersonalAccessToken,
 } from "./auth.ts";
+
+describe("Bearer authorization parsing", () => {
+  it("accepts case-insensitive authentication schemes without changing the token", () => {
+    for (const scheme of ["Bearer", "bearer", "BEARER", "bEaReR"]) {
+      assert.equal(extractBearerToken(`${scheme} Token.With_Case-123`), "Token.With_Case-123");
+    }
+  });
+
+  it("rejects missing, non-Bearer, and ambiguous credentials", () => {
+    for (const value of [null, "", "Bearer", "Bearer ", "BearerToken", "ApiKey token", "Bearer first second"]) {
+      assert.equal(extractBearerToken(value), null);
+    }
+  });
+});
 
 // Node 24 does not yet expose the Workers-only SubtleCrypto extension. Keep
 // this compatibility shim in tests; production always calls the Workers Web

@@ -23,9 +23,9 @@
  *
  * JWT verification itself needs no shared secret. API-key authentication is
  * handled separately below through a digest-only Worker secret. The JWT
- * access token is valid for 15 minutes. Browser/CLI clients can use the
- * auth server's one-time rotating refresh token for up to the family's
- * absolute 30-day lifetime.
+ * access token is valid for 15 minutes. Browser/CLI clients use the auth
+ * server's one-time rotating refresh token; every successful refresh renews
+ * the session's 30-day inactivity window.
  */
 
 import { createRemoteJWKSet, jwtVerify, type JWTPayload, type JWTVerifyGetKey } from "jose";
@@ -175,10 +175,7 @@ export async function verifyJwt(
  */
 export function extractBearerToken(authHeader: string | null): string | null {
   if (!authHeader) return null;
-  const trimmed = authHeader.trim();
-  if (!trimmed.startsWith("Bearer ")) return null;
-  const token = trimmed.slice("Bearer ".length).trim();
-  return token || null;
+  return /^Bearer[ \t]+([^\s]+)$/i.exec(authHeader.trim())?.[1] ?? null;
 }
 
 // ---------- Digest-backed credential registry ----------

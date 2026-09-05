@@ -46,7 +46,7 @@ const SERVICE_CREDENTIAL_PATH = join(homedir(), ".memory", "service-credential.j
 const CREDENTIALS_LOCK_PATH = join(homedir(), ".memory", "credentials.lock");
 const OAUTH_CLIENT_PATH = join(homedir(), ".memory", "oauth-client.json");
 
-const PLUGIN_VERSION = "3.2.0";
+const PLUGIN_VERSION = "3.2.1";
 const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
 const MIN_REQUEST_TIMEOUT_MS = 100;
 const MAX_REQUEST_TIMEOUT_MS = 60_000;
@@ -829,8 +829,9 @@ async function performLockedTokenRefresh(credentials) {
   }
   saveCredentials(result.access_token, result.expires_in, credentials.user, {
     refreshToken: result.refresh_token,
+    // Each rotation renews the inactivity window. The server's new lifetime
+    // replaces the previous deadline instead of retaining a login-time cap.
     refreshTokenExpiresIn: result.refresh_token_expires_in,
-    refreshFamilyExpiresAt: credentials.refreshFamilyExpiresAt || credentials.refreshTokenExpiresAt,
     clientId: credentials.clientId,
     resource,
   });

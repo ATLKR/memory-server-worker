@@ -81,5 +81,5 @@ memory_add({
   timeout or server failure is retried without skipping later messages.
 - Configure `MEMORY_API_KEY` for service auth or `MEMORY_PAT` for browser-free
   personal auth. `mem auth set --api-key-stdin|--pat-stdin` can store either
-  without argv exposure. OAuth remains available for a renewable 30-day
-  session; `MEMORY_TOKEN` is a non-renewable JWT override.
+  without argv exposure. OAuth refreshes renew a 30-day inactivity window;
+  `MEMORY_TOKEN` is a non-renewable JWT override.
