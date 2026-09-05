@@ -129,6 +129,7 @@ export function AuthSessionProvider({
     refreshGeneration.current += 1;
     refreshController.current?.abort();
     const pendingRefresh = refreshPromise.current;
+    setRefreshing(false);
     setSigningOut(true);
     setError(null);
     try {

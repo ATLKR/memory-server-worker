@@ -143,17 +143,24 @@ export function createMemoryClient(config, deps = {}) {
     if (deps.readCredential) return deps.readCredential();
     if (cachedCredential && Date.now() < credentialExpiresAt) return cachedCredential;
     if (!config.credentialCommand) throw new Error("credentialCommand is required");
-    const { stdout } = await execFileAsync(
-      config.credentialCommand,
-      config.credentialArgs,
-      {
-        encoding: "utf8",
-        maxBuffer: 16 * 1024,
-        timeout: config.requestTimeoutMs,
-      },
-    );
+    let stdout;
+    try {
+      ({ stdout } = await execFileAsync(
+        config.credentialCommand,
+        config.credentialArgs,
+        {
+          encoding: "utf8",
+          maxBuffer: 16 * 1024,
+          timeout: config.requestTimeoutMs,
+        },
+      ));
+    } catch {
+      // Child-process errors contain command arguments and captured output.
+      // Never attach the original error: hosts may serialize its properties.
+      throw new Error("Memory credential command failed");
+    }
     const credential = stdout.trim();
-    if (!credential.startsWith("memory_pat_")) {
+    if (!/^memory_pat_[A-Za-z0-9_-]{43}$/.test(credential)) {
       throw new Error("Memory credential command returned an invalid credential");
     }
     cachedCredential = credential;
@@ -265,8 +272,9 @@ const plugin = {
           return {
             prependContext: `<personal-memory application=${JSON.stringify(config.application)}>\n${result.answer}\n</personal-memory>`,
           };
-        } catch (error) {
-          api.logger.warn(`automatic memory recall failed: ${error.message}`);
+        } catch {
+          // Transport errors can include credential-bearing request headers.
+          api.logger.warn("automatic memory recall failed");
         }
       }, { timeoutMs: hookTimeoutMs });
     }
@@ -281,8 +289,8 @@ const plugin = {
             messages,
             sessionId: sessionIdFor(ctx.sessionKey, event.runId),
           });
-        } catch (error) {
-          api.logger.warn(`automatic memory capture failed: ${error.message}`);
+        } catch {
+          api.logger.warn("automatic memory capture failed");
         }
       }, { timeoutMs: hookTimeoutMs });
     }
