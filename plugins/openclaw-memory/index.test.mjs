@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import {
+import plugin, {
   createMemoryClient,
   normalizeConfig,
   normalizeMessages,
@@ -16,6 +16,74 @@ function testConfig(overrides = {}) {
 }
 
 describe("OpenClaw memory adapter", () => {
+  it("rejects multiline credential output without exposing the PAT in header errors", async () => {
+    const credential = `memory_pat_${"A".repeat(43)}`;
+    let requests = 0;
+    const client = createMemoryClient(testConfig({
+      credentialCommand: process.execPath,
+      credentialArgs: ["-e", `process.stdout.write(${JSON.stringify(`${credential}\ncommand notice`)})`],
+    }), {
+      fetchImpl: async (url, init) => {
+        requests += 1;
+        new Request(url, init);
+        throw new Error("Invalid credential reached the transport");
+      },
+    });
+
+    await assert.rejects(client.call("memory_search", { query: "test" }), (error) => {
+      assert.ok(!error.message.includes(credential));
+      assert.match(error.message, /invalid credential/i);
+      return true;
+    });
+    assert.equal(requests, 0);
+  });
+
+  it("does not expose failed credential-command output or arguments", async () => {
+    const credential = `memory_pat_${"B".repeat(43)}`;
+    const client = createMemoryClient(testConfig({
+      credentialCommand: process.execPath,
+      credentialArgs: ["-e", `process.stderr.write(${JSON.stringify(credential)}); process.exit(1)`],
+    }));
+
+    await assert.rejects(client.call("memory_search", { query: "test" }), (error) => {
+      assert.ok(!String(error.stack).includes(credential));
+      assert.ok(!JSON.stringify(error).includes(credential));
+      assert.match(error.message, /credential command.*failed/i);
+      return true;
+    });
+  });
+
+  it("keeps credential-bearing transport errors out of automatic hook logs", async (t) => {
+    const credential = `memory_pat_${"C".repeat(43)}`;
+    const warnings = [];
+    const hooks = new Map();
+    let requests = 0;
+    t.mock.method(globalThis, "fetch", async () => {
+      requests += 1;
+      throw new Error(`invalid Authorization header: Bearer ${credential}`);
+    });
+    plugin.register({
+      pluginConfig: testConfig({
+        credentialCommand: process.execPath,
+        credentialArgs: ["-e", `process.stdout.write(${JSON.stringify(credential)})`],
+      }),
+      registerMemoryCapability() {},
+      registerTool() {},
+      on: (name, handler) => hooks.set(name, handler),
+      logger: { warn: (message) => warnings.push(message) },
+    });
+
+    await hooks.get("before_prompt_build")({ prompt: "test" });
+    await hooks.get("agent_end")({
+      success: true,
+      messages: [{ role: "user", content: "test" }],
+    }, { sessionKey: "test-session" });
+
+    assert.equal(requests, 2);
+    assert.equal(warnings.length, 2);
+    assert.ok(warnings.every((message) => !message.includes(credential)));
+  });
+
   it("defaults to the group-chat application partition", () => {
     assert.equal(testConfig().application, "OpenClaw Group Chat");
     assert.equal(
