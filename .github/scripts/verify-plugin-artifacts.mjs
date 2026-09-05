@@ -29,6 +29,7 @@ const jsonVersionFiles = [
   "packages/memory-worker/package.json",
   "packages/memory-ui/package.json",
   "plugins/allenlim-memory-server/package.json",
+  "plugins/openclaw-memory/package.json",
   "plugins/allenlim-memory-server/.codex-plugin/plugin.json",
   "plugins/allenlim-memory-server/.claude-plugin/plugin.json",
   "plugins/allenlim-memory-server/.devin-plugin/plugin.json",
@@ -45,6 +46,7 @@ for (const relative of [
   "packages/memory-worker",
   "packages/memory-ui",
   "plugins/allenlim-memory-server",
+  "plugins/openclaw-memory",
 ]) {
   assert.equal(
     packageLock.packages?.[relative]?.version,

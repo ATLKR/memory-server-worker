@@ -599,7 +599,7 @@ function createServer(
     return hasPermission(auth, permission) ? null : permissionError(permission);
   };
   const server = new McpServer(
-    { name: "memory-server", version: "3.2.0" },
+    { name: "memory-server", version: "3.2.1" },
     {
       // Server-level instructions — ChatGPT/Codex read these on initialize.
       instructions:
