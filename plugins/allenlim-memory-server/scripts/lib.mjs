@@ -829,8 +829,9 @@ async function performLockedTokenRefresh(credentials) {
   }
   saveCredentials(result.access_token, result.expires_in, credentials.user, {
     refreshToken: result.refresh_token,
+    // Each rotation renews the inactivity window. The server's new lifetime
+    // replaces the previous deadline instead of retaining a login-time cap.
     refreshTokenExpiresIn: result.refresh_token_expires_in,
-    refreshFamilyExpiresAt: credentials.refreshFamilyExpiresAt || credentials.refreshTokenExpiresAt,
     clientId: credentials.clientId,
     resource,
   });

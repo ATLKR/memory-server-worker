@@ -341,16 +341,19 @@ test("CLI refreshes an expired access token and atomically stores rotation", asy
   const testHome = join(tmpdir(), `memory-cli-home-${process.pid}-${Date.now()}`);
   const credentialDir = join(testHome, ".memory");
   await mkdir(credentialDir, { recursive: true });
+  const previousRefreshExpiry = new Date(Date.now() + 86_400_000).toISOString();
   await writeFile(join(credentialDir, "credentials.json"), JSON.stringify({
     token: jwtFor(origin, origin, "expired", -60),
     expiresAt: new Date(Date.now() - 60_000).toISOString(),
     refreshToken: "refresh-old",
-    refreshTokenExpiresAt: new Date(Date.now() + 86_400_000).toISOString(),
+    refreshTokenExpiresAt: previousRefreshExpiry,
+    refreshFamilyExpiresAt: previousRefreshExpiry,
     clientId: "client-id",
     resource: origin,
     user: { id: "user-id" },
   }));
 
+  const refreshStartedAt = Date.now();
   const result = await runCli(["stats"], {
     HOME: testHome,
     USERPROFILE: testHome,
@@ -363,6 +366,14 @@ test("CLI refreshes an expired access token and atomically stores rotation", asy
   const stored = JSON.parse(await readFile(join(credentialDir, "credentials.json"), "utf8"));
   assert.equal(stored.refreshToken, "refresh-new");
   assert.equal(stored.token, mcpAuthorization.slice("Bearer ".length));
+  const refreshLifetimeMs = 30 * 24 * 60 * 60 * 1000;
+  const storedRefreshExpiry = new Date(stored.refreshTokenExpiresAt).getTime();
+  assert.ok(
+    storedRefreshExpiry >= refreshStartedAt + refreshLifetimeMs,
+    "rotation must renew the server-provided inactivity window",
+  );
+  assert.ok(storedRefreshExpiry <= Date.now() + refreshLifetimeMs);
+  assert.equal(stored.refreshFamilyExpiresAt, stored.refreshTokenExpiresAt);
   assert.deepEqual(
     (await readdir(credentialDir)).filter((name) => name.endsWith(".tmp") || name.endsWith(".lock")),
     [],
