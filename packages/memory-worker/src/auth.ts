@@ -175,10 +175,7 @@ export async function verifyJwt(
  */
 export function extractBearerToken(authHeader: string | null): string | null {
   if (!authHeader) return null;
-  const trimmed = authHeader.trim();
-  if (!trimmed.startsWith("Bearer ")) return null;
-  const token = trimmed.slice("Bearer ".length).trim();
-  return token || null;
+  return /^Bearer[ \t]+([^\s]+)$/i.exec(authHeader.trim())?.[1] ?? null;
 }
 
 // ---------- Digest-backed credential registry ----------

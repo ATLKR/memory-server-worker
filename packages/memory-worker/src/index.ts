@@ -1111,6 +1111,9 @@ const oauthRefreshInProgressSchema = z.object({
   error_code: z.literal("refresh_in_progress"),
   retry_after: z.number().int().min(1).max(10),
 });
+const oauthRefreshRejectionSchema = z.object({
+  error: z.enum(["invalid_grant", "invalid_client"]),
+});
 
 function sessionCookie(token: string, maxAge: number): string {
   // The __Host- prefix requires Secure, Path=/, and no Domain attribute. That
@@ -1596,7 +1599,13 @@ async function handleSessionRefresh(
       name: "UpstreamResponseError",
       status: refreshResponse.status,
     });
-    if (refreshResponse.status >= 400 && refreshResponse.status < 500) {
+    // A timeout, throttle, or proxy error does not invalidate the credential.
+    // Only discard the browser's refresh token after a confirmed OAuth
+    // grant/client rejection from the issuer.
+    if (
+      (refreshResponse.status === 400 || refreshResponse.status === 401) &&
+      oauthRefreshRejectionSchema.safeParse(refreshBody).success
+    ) {
       return clearSessionResponse("session refresh was rejected", requestId);
     }
     return Response.json(

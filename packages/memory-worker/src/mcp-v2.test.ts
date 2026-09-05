@@ -1060,7 +1060,7 @@ describe("Worker personal access token authentication", () => {
   const pat = `memory_pat_${"A".repeat(43)}`;
   const apiKey = "memory_worker_v3_api_key_0123456789abcdef";
 
-  it("uses a version-3 Bearer PAT for real REST and MCP operations", async () => {
+  it("uses a version-3 PAT with case-insensitive Bearer schemes for REST and MCP", async () => {
     const registry = await credentialRegistry([{
       id: "headless-pat",
       credential: pat,
@@ -1086,7 +1086,7 @@ describe("Worker personal access token authentication", () => {
 
     const rest = await worker.fetch(
       new Request("https://memory.allenlim.net/api/stats", {
-        headers: { authorization: `Bearer ${pat}` },
+        headers: { authorization: `bearer ${pat}` },
       }),
       env,
       {} as ExecutionContext,
@@ -1104,7 +1104,7 @@ describe("Worker personal access token authentication", () => {
         headers: {
           host: "memory.allenlim.net",
           accept: "application/json, text/event-stream",
-          authorization: `Bearer ${pat}`,
+          authorization: `bEaReR ${pat}`,
           "content-type": "application/json",
           "mcp-protocol-version": LEGACY_PROTOCOL_VERSION,
         },
