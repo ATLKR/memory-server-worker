@@ -1,0 +1,13 @@
+{
+  "name": "@allenlabs/memory-saas-foundation",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Isolated identity foundation; not a deployed SaaS or authentication server",
+  "engines": { "node": ">=22.16.0" },
+  "scripts": {
+    "test": "node --experimental-strip-types --experimental-sqlite --test test/*.test.mjs",
+    "typecheck": "tsc --noEmit -p tsconfig.json",
+    "check": "npm run typecheck && npm test"
+  }
+}
