@@ -53,7 +53,7 @@ export function canonicalEmail(input: string): { address: string; domain: string
 
 /** Only digests enter the database. Tokens must contain >=256 bits of entropy. */
 export async function digestToken(token: string): Promise<string> {
-  if (typeof token !== 'string' || token.length < 32 || token.length > 1024 || /\s/.test(token)) throw new IdentityDenied();
+  if (typeof token !== 'string' || token.length < 32 || token.length > 8192 || /\s/.test(token)) throw new IdentityDenied();
   const bytes = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(token)));
   return Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
 }
@@ -109,9 +109,9 @@ export class IdentityService {
     const r = await this.db.withSession('first-primary').prepare(`
       SELECT c.account_id AS accountId,m.id AS membershipId,m.organization_id AS organizationId,m.role
       FROM active_credentials c JOIN active_memberships m ON m.account_id=c.account_id
-      WHERE c.token_digest=? AND c.expires_at>? AND m.organization_id=?
-        AND (c.membership_id IS NULL OR c.membership_id=m.id)`)
-      .bind(hash, at, identifier(organizationId)).first<OrganizationAuthorization>();
+      WHERE c.token_digest=? AND c.expires_at>? AND m.expires_at>? AND m.organization_id=?
+        AND ((c.kind='session' AND c.membership_id IS NULL) OR (c.kind='api_key' AND c.membership_id=m.id))`)
+      .bind(hash, at, at, identifier(organizationId)).first<OrganizationAuthorization>();
     if (!r) throw new IdentityDenied();
     return r;
   }
@@ -183,11 +183,11 @@ export class IdentityService {
     await this.write(`INSERT INTO revocations(id,kind,actor_credential_id,domain_id,address,created_at)
       SELECT ?,'domain',c.id,d.id,?,? FROM active_credentials c
       JOIN active_memberships m ON m.account_id=c.account_id
-      JOIN domain_managers g ON g.membership_id=m.id
+      JOIN domain_managers g ON g.membership_id=m.id AND g.revoked_at IS NULL
       JOIN domains d ON d.id=g.domain_id AND d.organization_id=m.organization_id
       WHERE c.token_digest=? AND c.expires_at>? AND d.id=? AND d.name=?
         AND d.revoked_at IS NULL AND d.verified_until>?
-        AND m.role IN ('owner','admin') AND ${RECENT_SESSION}`,
-      [crypto.randomUUID(), address, at, hash, at, identifier(domainId), domain, at, at - REAUTH_WINDOW_MS, at]);
+        AND m.expires_at>? AND m.role IN ('owner','admin') AND ${RECENT_SESSION}`,
+      [crypto.randomUUID(), address, at, hash, at, identifier(domainId), domain, at, at, at - REAUTH_WINDOW_MS, at]);
   }
 }
