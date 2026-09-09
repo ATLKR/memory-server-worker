@@ -1,4 +1,4 @@
-# Integrated release candidate: 0.4.0-rc.2
+# Integrated release candidate: 0.4.0-rc.3
 
 This is the maintained integration record. Other files in this folder originated
 in the supplied release kit and describe its proposed design and launch work.
@@ -10,6 +10,21 @@ SHA-256: `18e0155b8362d285867fbbb34f0db3a88208de20b4e91801924bbd0bbd671d69`.
 It targeted commit `b94c434f2074ea975111cb4e3efd4371a9481ac1`; its 91 manifest
 entries verified. This proves archive consistency, not publisher identity.
 The integration retains the repository's MIT license and attribution.
+
+## Recorded 0.4.0-rc.3 deployment: 2026-09-09
+
+[The rc.3 corrections](RC3_FIXES.md) are deployed from runtime commit
+`d44a13ad90248305b2c46b5e0d6a30e85d1aeace`, Worker version
+`4454c391-5587-4835-a15c-c73926644724`. No new migration or provider configuration
+was required. The seven deployed migration hashes remain unchanged.
+
+Local verification passes 349 baseline/release/client tests and seven native
+workerd auth/HTTP tests, plus the expanded bundled Worker/D1 integration. All four
+workflows pass for the runtime commit. Live HTTPS confirms rc.3, maintenance
+heartbeat, separate MCP/SCIM authentication challenges and SCIM error formatting.
+Real-account SSO again reaches the console. A synthetic invalid email proof
+produces a proof error while preserving the session; subsequent workspace
+refresh succeeds. No email was sent or PAT issued for that negative test.
 
 ## 0.4.0-rc.2 source changes
 

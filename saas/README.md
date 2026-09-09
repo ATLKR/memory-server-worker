@@ -1,7 +1,9 @@
 # Memory by Allen Labs — hosted pilot
 
-**0.4.0-rc.2** is deployed at [memory.allenlabs.org](https://memory.allenlabs.org).
-Real-account SSO now reaches the authenticated management console. The maintained
+**0.4.0-rc.3** is deployed at [memory.allenlabs.org](https://memory.allenlabs.org).
+Real-account SSO now reaches the authenticated management console. See the
+[rc.3 corrections](docs/release/RC3_FIXES.md) for account-switching, retry,
+revocation and SCIM fixes. The maintained
 [release integration record](docs/release/INTEGRATION.md) records the current
 features, verification and remaining work. The 0.3.0 notes below are historical.
 
