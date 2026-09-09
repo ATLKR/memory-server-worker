@@ -1,5 +1,12 @@
 # Operations runbook
 
+The record below describes the 0.3.0 deployment. The integrated 0.4.0-rc.1 source,
+its sixth migration, changed feature limits and provider activation defaults are
+documented in [release/INTEGRATION.md](release/INTEGRATION.md). Cloudflare Email
+proof delivery is covered in [release/EMAIL.md](release/EMAIL.md). Treat these
+current documents as the source of truth for release behavior; retain this prior
+deployment record for recovery context.
+
 This runbook covers the Standard memory Worker in `saas/`, deployed at `https://memory.allenlabs.org`. Release 0.3.0 and its fifth migration are deployed; the service remains a hosted pilot rather than production GA. Real-user browser login remains unverified. The 0.3.0 public HTTP smoke check passed on 2026-09-08 at 09:22 UTC. Central-auth upstream CI is green; that result is separate from this SaaS module's passing local checks.
 
 ## Deployment record — 2026-09-08

@@ -11,6 +11,7 @@ import { appScript, renderPage, renderStyles } from './ui.ts';
 import { handleMcp } from './mcp.ts';
 
 export interface ApplicationOptions {
+  release?: import('./release/types.ts').Extension;
   clock?: () => number;
   auth?: AuthOptions;
   limit?: (key: string) => Promise<{ success: boolean }>;
@@ -47,13 +48,19 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
   const workspace = new WorkspaceService(db, clock);
   const memory = new MemoryService(db, clock);
   const memoryApi = createMemoryApi(db, clock);
-  const auth = createAuthController(db, settings.auth, (p, token) => workspace.signIn(p, token), { ...options.auth, clock });
+  const auth = createAuthController(db, settings.auth, async (p, token) => {
+    const session = await workspace.signIn(p, token);
+    await options.release?.signedIn(p, session, token !== undefined);
+    return session;
+  }, { ...options.auth, clock });
   async function route(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.origin !== settings.origin) throw new HttpError(421, 'invalid_host');
     if (request.headers.has('origin') && request.headers.get('origin') !== settings.origin) throw new HttpError(403, 'origin_denied');
+    const publicResponse = await options.release?.publicRoute(request);
+    if (publicResponse) return publicResponse;
     if (request.method === 'GET') {
-      if (url.pathname === '/') return new Response(renderPage(settings.brand), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+      if (url.pathname === '/') return new Response(options.release ? renderPage(settings.brand).replace(/<body([^>]*)>/, '<body$1><p><a href="/manage">Memory 서비스 관리</a></p>') : renderPage(settings.brand), { headers: { 'content-type': 'text/html; charset=utf-8' } });
       if (url.pathname === '/assets/app.js') return new Response(appScript, { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
       if (url.pathname === '/assets/app.css') return new Response(renderStyles(settings.brand), { headers: { 'content-type': 'text/css; charset=utf-8' } });
       if (url.pathname === '/health') return json({ status: 'ok', version: SERVICE_VERSION, mode: 'managed' });
@@ -93,6 +100,8 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
       .bind(hash, at, at).first<{ accountId: string; kind: string }>();
     if (!credential || (!bearer && credential.kind !== 'session')) throw new HttpError(401, 'authentication_required');
     if (options.limit && !(await options.limit(`account:${credential.accountId}`)).success) throw new HttpError(429, 'rate_limited');
+    const releaseResponse = await options.release?.route(request, token);
+    if (releaseResponse) return releaseResponse;
     if (url.pathname === '/mcp') return handleMcp(request, memory, token, settings.brand.name);
     if (url.pathname.startsWith('/v1/spaces')) {
       if (url.pathname === '/v1/spaces' && request.method === 'GET') return json({ results: await memory.listSpaces(token) });

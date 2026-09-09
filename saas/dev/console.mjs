@@ -4,12 +4,14 @@ import { WorkspaceService } from '../src/workspace.ts';
 import { MemoryService } from '../src/memory.ts';
 import { createApplication } from '../src/app.ts';
 import { readSettings, AUTH_ISSUER, PUBLIC_ORIGIN } from '../src/config.ts';
+import { IdentityService } from '../src/identity.ts';
+import { createRelease } from '../src/release/extension.ts';
 
 // Synthetic localhost preview only. This module is not in the Worker bundle.
 const port = Number(process.env.MEMORY_CONSOLE_PORT ?? 8792);
 if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error('Invalid console port');
 const localOrigin = `http://127.0.0.1:${port}`;
-const database = openLocalDatabase({ workspace: true });
+const database = openLocalDatabase({ workspace: true, release: true });
 const workspace = new WorkspaceService(database.db);
 const session = await workspace.signIn({ issuer: AUTH_ISSUER, subject: 'synthetic-console', email: 'demo@example.org', emailVerified: true, expiresAt: Date.now() + 900000, permission: 'write' });
 const snap = await workspace.snapshot(session.token);
@@ -20,7 +22,9 @@ for (const [body, source] of [
   ['조직의 읽기 권한과 쓰기 권한은 분리됩니다. API 키는 생성한 화면에서 한 번만 표시됩니다.', '팀 운영'],
 ]) await memory.create(session.token, snap.spaces[0].id, { body, source });
 const settings = readSettings({ PRODUCT_NAME: 'Memory by Allen Labs · 로컬 데모' });
-const app = createApplication(database.db, settings);
+const release = createRelease({ DB: database.db, PUBLIC_ORIGIN, PRODUCT_NAME: settings.brand.name,
+  REQUEST_LIMITER: { limit: async () => ({ success: true }) } }, { identity: new IdentityService(database.db) });
+const app = createApplication(database.db, settings, { release });
 
 const server = createServer(async (req, res) => {
   try {

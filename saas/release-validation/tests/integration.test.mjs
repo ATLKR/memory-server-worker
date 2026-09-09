@@ -1,0 +1,22 @@
+import test from 'node:test';import assert from 'node:assert/strict';import {mkdtemp,writeFile,readFile,mkdir,rm} from 'node:fs/promises';import {tmpdir} from 'node:os';import path from 'node:path';import {pathToFileURL,fileURLToPath} from 'node:url';import {fixture,at} from './db.mjs';import {createRelease} from '../../src/release/extension.ts';
+let patchApp,verifyBlob;try{({patchApp,verifyBlob}=await import('../tools/patches.mjs'));}catch{}
+test('patch targets the exact connector-verified PR app blob and refuses drift',async()=>{assert.ok(patchApp,'patch tooling missing');const source=await readFile(new URL('./upstream/app.ts',import.meta.url),'utf8');verifyBlob(source,'efd4c8953ac964321cb6795d01c1c9cc702d2da4');assert.throws(()=>verifyBlob(source+'\n','efd4c8953ac964321cb6795d01c1c9cc702d2da4'));const patched=patchApp(source);assert.throws(()=>patchApp(patched));assert.ok(patched.indexOf('release?.publicRoute')>patched.indexOf("'origin_denied'"));assert.ok(patched.indexOf('release?.route')>patched.indexOf('`account:${credential.accountId}`'));});
+for(const name of ['unauthenticated','cookie-csrf','cookie-key-denied','correct-cookie','public-csp','host-rejected','unknown-memory-no-fallback'])test('original app envelope '+name,async()=>{
+ assert.ok(patchApp,'patch tooling missing');const dir=await mkdtemp(path.join(tmpdir(),'memory-app-'));const {db,token,key}=await fixture();
+ try{const source=await readFile(new URL('./upstream/app.ts',import.meta.url),'utf8');await writeFile(path.join(dir,'package.json'),'{"type":"module"}');await writeFile(path.join(dir,'app.ts'),patchApp(source));
+ const util=pathToFileURL(fileURLToPath(new URL('../../src/release/util.ts',import.meta.url))).href;
+ const mocks={
+  'identity.ts':`export {tokenHash as digestToken} from '${util}';export class IdentityDenied extends Error{}`,
+  'api.ts':`export {body,json} from '${util}';export class HttpError extends Error{constructor(status,code){super(code);this.status=status;this.code=code;}}export const textField=x=>x;export const optionalText=x=>x;export function createMemoryApi(){return async()=>new Response('LEGACY MEMORY FALLTHROUGH',{status:598});}`,
+  'memory.ts':`export class MemoryService{constructor(){}}export class MemoryInvalid extends Error{}export class MemoryDenied extends Error{}export class MemoryConflict extends Error{}`,
+  'workspace.ts':`export class WorkspaceService{constructor(){}}export class WorkspaceError extends Error{}`,
+  'auth.ts':`export const SESSION_COOKIE='__Host-memory_session';export function createAuthController(){return {handle:async()=>null,resolveBearer:async()=>{throw Error('Synthetic envelope tests do not verify JWTs');}};}`,
+  'config.ts':`export const SERVICE_VERSION='fixture';`,
+  'ui.ts':`export const appScript='';export const renderPage=()=>'<html><body>fixture</body></html>';export const renderStyles=()=>'';`,
+  'mcp.ts':`export const handleMcp=()=>new Response('LEGACY MCP FALLTHROUGH',{status:598});`
+ };for(const [file,content]of Object.entries(mocks))await writeFile(path.join(dir,file),content);
+ const {createApplication}=await import(pathToFileURL(path.join(dir,'app.ts')).href);const origin='https://memory.example.com';const env={DB:db,PUBLIC_ORIGIN:origin,REQUEST_LIMITER:{limit:async()=>({success:true})}},release=createRelease(env,{clock:()=>at});const app=createApplication(db,{origin,brand:{name:'Test'},auth:{issuer:'https://issuer.example'}},{clock:()=>at,release});
+ let req;if(name==='public-csp')req=new Request(origin+'/manage');else if(name==='host-rejected')req=new Request('https://evil.test/manage');else{const headers={'content-type':'application/json'};if(name!=='unauthenticated')headers.cookie='__Host-memory_session='+(name==='cookie-key-denied'?key:token);if(name!=='cookie-csrf')headers.origin=origin;req=new Request(origin+(name==='unknown-memory-no-fallback'?'/v1/spaces/s1/unrecognized':'/v1/spaces/s1/memories'),{method:'POST',headers,body:JSON.stringify({body:'Integration',operationId:'envelope'})});}
+ const r=await app(req);assert.equal(r.status,{unauthenticated:401,'cookie-csrf':403,'cookie-key-denied':401,'correct-cookie':201,'public-csp':200,'host-rejected':421,'unknown-memory-no-fallback':404}[name]);assert.ok(r.headers.get('content-security-policy').includes("frame-ancestors 'none'"));assert.equal(r.headers.get('cache-control'),'no-store');
+ }finally{db.close();await rm(dir,{recursive:true,force:true});}
+});
