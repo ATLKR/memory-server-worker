@@ -1,7 +1,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { createHash } from 'node:crypto';
 
-// Migrations 0001..0005 are already applied remotely. Their byte hashes are
+// Migrations 0001..0006 are already applied remotely. Their byte hashes are
 // frozen; neither --check nor sync is allowed to rewrite an existing migration.
 // Future changes belong in a new source and a new forward migration.
 const deployedHashes = [
@@ -10,6 +10,7 @@ const deployedHashes = [
   'ac437c62f25c90abad9716f913d08e859e4de7038fc1aee067d6a15ac631c0d4',
   '9e147360a59d427ca14de5f131ae7878afd961521aa1abf27d2df68872ff50ee',
   'af45edf2e5620b3c3412133405dae525e1b8ceb824305736574fece64b9956c4',
+  '5e8412358d9096244720d21e5ae12f2c12c10a624dd2c5622c5f79b2fea15dac',
 ];
 const sources = ['schema.sql', 'memory-schema.sql', 'product-schema.sql', 'auth-schema.sql', 'hierarchy-schema.sql', 'release-schema.sql'];
 const out = new URL('../migrations/', import.meta.url);

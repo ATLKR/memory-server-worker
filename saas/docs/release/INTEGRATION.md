@@ -11,6 +11,21 @@ It targeted commit `b94c434f2074ea975111cb4e3efd4371a9481ac1`; its 91 manifest
 entries verified. This proves archive consistency, not publisher identity.
 The integration retains the repository's MIT license and attribution.
 
+## Deployed pilot: 2026-09-09
+
+Release `0.4.0-rc.1` is deployed at `https://memory.allenlabs.org` from runtime
+commit `ca249c3bfdae1ab15f934717de4c7dd2e29adc30`, Worker version
+`8637303b-2899-4145-a1df-c71208e909f1`. Migration 6 is applied and its bytes are
+now frozen by the migration checker. Public HTTPS checks pass for the management
+page/assets, liveness, protected REST/MCP rejection, OAuth discovery and PKCE
+redirection. Schema, SSO and native Email binding configuration checks are true.
+Actual user callback completion and email receipt are still unverified.
+
+The pre-migration-6 D1 Time Travel bookmark is
+`0000000b-00000000-000050e1-2780da49ab84ab9bfffe1cbe5c0df3ab`.
+It is a recovery reference within the provider retention window, not permission
+to overwrite live data; restore and reconcile separately before considering a cutover.
+
 ## Available in the pilot
 
 - Atomic memory operation IDs and usage receipts, optimistic revisions, memory
