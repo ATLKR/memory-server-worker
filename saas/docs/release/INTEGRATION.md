@@ -72,6 +72,11 @@ The release test fixture now loads the actual migrations 1–5, including their
 immutable and revocation triggers. Existing remote migration bytes remain frozen;
 all changes use migration 6. The bundled workerd test applies it to populated D1
 and checks old revisions, FTS backfill, current ACLs and atomic writes.
+The harness also uses the installed Wrangler statement splitter: a compact
+`+CASE` expression exposed a deployment-only split error and was corrected with
+whitespace. The first remote attempt rolled back before migration 6 applied.
+Email timeout tests wait for the actual provider invocation before advancing
+their fake clock, avoiding a platform-dependent event-loop race.
 
 The development-only `sharp` dependency is overridden to the maintainer's patched
 0.35.4; the resulting npm audit reports no vulnerabilities. It is not bundled in
@@ -80,6 +85,8 @@ the production Worker. [Maintainer advisory](https://github.com/lovell/sharp/sec
 ## Verification and remaining limits
 
 Run `npm run check`, `npm run test:d1`, and `npm run eval:lexical` from `saas`.
+The complete local check covers 171 existing tests, 143 release tests and five
+client/template tests, plus typechecking and migration source/hash consistency.
 The evaluation loads the supplied synthetic corpus through the real memory APIs.
 All 51 cases were evaluated locally: recall@5 0.62, MRR@5 0.60, forbidden hits 0,
 stale hits 0, and one negative query with irrelevant results. This measures lexical

@@ -26,5 +26,9 @@
   },
   "devDependencies": {
     "tsx": "^4.23.12"
+  },
+  "overrides": {
+    "hono": "4.13.5",
+    "js-yaml": "4.3.2"
   }
 }

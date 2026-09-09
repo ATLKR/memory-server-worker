@@ -28,11 +28,13 @@ test('Cloudflare mail failure destroys the challenge and does not expose provide
 });
 test('Cloudflare mail timeout destroys the challenge without retrying the uncertain send',async t=>{
  t.mock.timers.enable({apis:['setTimeout']});
- const {db,token}=await fixture();let calls=0;
+ const {db,token}=await fixture();let calls=0;const deliveryStarted=Promise.withResolvers();
  try{
- const admin=new Admin({DB:db,MAIL_FROM:'noreply@memory.allenlabs.org',EMAIL:{send:async()=>{calls++;return new Promise(()=>{});}}},()=>at);
+ const admin=new Admin({DB:db,MAIL_FROM:'noreply@memory.allenlabs.org',EMAIL:{send:async()=>{calls++;deliveryStarted.resolve();return new Promise(()=>{});}}},()=>at);
  const pending=admin.startReauth(token,'e1');const denied=assert.rejects(pending,e=>e.code==='mail_delivery_timeout');
- for(let i=0;i<20&&calls===0;i++)await new Promise(resolve=>setImmediate(resolve));
+ // Crypto and database setup can outlast any fixed number of event-loop turns.
+ // Advance the mocked deadline only after the provider call actually starts.
+ await Promise.race([deliveryStarted.promise,denied]);
  assert.equal(calls,1);t.mock.timers.tick(10001);await denied;
  assert.equal(calls,1);assert.equal(db.raw.prepare('SELECT count(*) AS n FROM release_reauth_challenges').get().n,0);
  }finally{db.close();}
