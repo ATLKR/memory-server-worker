@@ -1,20 +1,30 @@
 # Memory by Allen Labs — hosted pilot
 
-The source is now **0.4.0-rc.1**, integrating the supplied release kit after
-security, compatibility and real-schema fixes. See the maintained
+The source includes **0.4.0-rc.2** maintenance and connection fixes on top of the
+integrated release kit. This source update is not a deployment or CI result. See the maintained
 [release integration record](docs/release/INTEGRATION.md) for current features,
-verification, activation defaults and remaining work. The sections below record
-the deployed 0.3.0 baseline; the integration record supersedes its feature limits.
+verification, activation defaults and remaining work. The latest recorded pilot
+deployment there is 0.4.0-rc.1. The sections below retain the historical 0.3.0
+baseline; the integration record supersedes its feature limits.
 
 The candidate adds atomic retry receipts, capability/Space-scoped PATs, FTS5,
 trash/restore, exports, explicit sharing, pooled quotas and a `/manage` console.
 MCP clients/plugins can connect with PAT or central Better Auth SSO; see
 [connection instructions](docs/CONNECTING.md). Email proofs use native Cloudflare
 Email Service. AI extraction/hybrid search, Stripe and signed deprovisioning have
-adapters and tests but require live provider configuration. No cron is configured;
-automatic erasure is explicitly disabled. Run `npm run check`, `npm run test:d1`
-and `npm run eval:lexical` to verify the candidate. All six actual schema sources
-are used by the release tests; deployed migrations 1–5 retain their exact bytes.
+adapters and tests but require live provider configuration. A five-minute cron
+performs bounded expiry cleanup; `BACKGROUND_JOBS_ENABLED=false` keeps provider
+processing off and `AUTO_ERASURE_ENABLED=false` preserves retained memories.
+Unavailable ingestion, index rebuild and billing controls are disabled in the UI.
+The seventh, index-only migration supports cleanup; deployed migrations 1–6 retain
+their exact bytes. Run `npm run check`, `npm run test:d1` and
+`npm run eval:lexical` to verify the candidate. SSO templates now request their
+intended identity/read/write/delete scopes explicitly. Callback failure codes
+identify a fixed processing stage without exposing credentials. A Workers-only
+login failure was reproduced and fixed: unsupported `redirect: 'error'` prevented
+token/JWKS requests from being sent. Manual redirects with explicit 3xx rejection
+now pass the actual workerd PKCE/token/JWKS/session tests; live acceptance follows
+deployment.
 
 The `saas/` module provides a Korean browser console, central sign-in, personal/team Spaces, versioned memory, organization administration, REST, and MCP on a Cloudflare Worker with dedicated D1 storage. The display name is provisional and configurable. The existing personal Worker, UI, plugins, and database remain separate.
 

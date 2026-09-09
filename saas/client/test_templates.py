@@ -7,6 +7,7 @@ import unittest
 ROOT = pathlib.Path(__file__).parent
 SERVER = "allenlabs-memory"
 ENDPOINT = "https://memory.allenlabs.org/mcp"
+SSO_SCOPES = ["openid", "profile", "email", "memory:read", "memory:write", "memory:delete"]
 
 
 class ConnectionTemplates(unittest.TestCase):
@@ -19,6 +20,8 @@ class ConnectionTemplates(unittest.TestCase):
             expected = {"url": ENDPOINT}
             if mode == "pat":
                 expected["bearer_token_env_var"] = "MEMORY_SAAS_PAT"
+            else:
+                expected["scopes"] = SSO_SCOPES
             self.assertEqual(config["mcp_servers"][SERVER], expected)
 
     def test_claude_and_plugin_http_configs_do_not_embed_credentials(self):
@@ -27,6 +30,8 @@ class ConnectionTemplates(unittest.TestCase):
             expected = {"type": "http", "url": ENDPOINT}
             if mode == "pat":
                 expected["headers"] = {"Authorization": "Bearer ${MEMORY_SAAS_PAT}"}
+            else:
+                expected["oauth"] = {"scopes": " ".join(SSO_SCOPES)}
             self.assertEqual(config, {"mcpServers": {SERVER: expected}})
 
     def test_pat_examples_require_explicit_space_selection(self):

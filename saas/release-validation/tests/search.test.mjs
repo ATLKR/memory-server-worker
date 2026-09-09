@@ -6,7 +6,7 @@ for(const name of ['lexical','cross-space-vector','stale-vector','revoked-during
  const store=new MemoryStore(db,()=>at);let now=at;let vectors=new Map();let failUpsert=false;
  const ai={run:async()=>({data:[Array(1024).fill(0.1)]})};
  const index={query:async()=>({matches:[...vectors.values()].map(x=>({id:x.id,score:1,metadata:x.metadata}))}),upsert:async vs=>{if(failUpsert)throw Error('offline');vs.forEach(v=>vectors.set(v.id,v));},deleteByIds:async ids=>ids.forEach(i=>vectors.delete(i)),getByIds:async ids=>ids.filter(i=>vectors.has(i)).map(id=>({id}))};
- const env={DB:db,AI:ai,MEMORY_INDEX:index};const search=new Search(env,()=>now);const jobs=new Jobs(env,()=>now);
+ const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',AI:ai,MEMORY_INDEX:index};const search=new Search(env,()=>now);const jobs=new Jobs(env,()=>now);
  try{const m=await store.create(token,'s1',{body:'alpha beta memory'},'add');
  if(name==='lexical'){const r=await search.query(token,'s1','alpha',10,'search');assert.equal(r.results[0].id,m.id);}
  if(name==='cross-space-vector'){const otherM=await store.create(other,'s2',{body:'classified'},'other-add');vectors.set('foreign',{id:'foreign',metadata:{memoryId:otherM.id,revision:1}});const r=await search.query(token,'s1','unmatched',10,'search');assert.equal(r.results.length,0);}
@@ -19,7 +19,7 @@ for(const name of ['lexical','cross-space-vector','stale-vector','revoked-during
 });
 test('hybrid ranking counts a memory once despite multiple matching chunks',async()=>{
  const {db,token}=await fixture();try{const store=new MemoryStore(db,()=>at),a=await store.create(token,'s1',{body:'first'},'first'),b=await store.create(token,'s1',{body:'second'},'second');
- const env={DB:db,AI:{run:async()=>({data:[Array(1024).fill(0.1)]})},MEMORY_INDEX:{query:async()=>({matches:[a,b,b,b].map((m,i)=>({id:'v'+i,score:1,metadata:{memoryId:m.id,revision:1}}))})}};
+ const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',AI:{run:async()=>({data:[Array(1024).fill(0.1)]})},MEMORY_INDEX:{query:async()=>({matches:[a,b,b,b].map((m,i)=>({id:'v'+i,score:1,metadata:{memoryId:m.id,revision:1}}))})}};
  const r=await new Search(env,()=>at).query(token,'s1','notlexical',10,'semantic-once');assert.equal(r.results[0].id,a.id);
  }finally{db.close();}
 });
@@ -45,7 +45,7 @@ test('a delayed older upsert cannot delete a newer revision vector',async()=>{
  const {db,token}=await fixture();let releaseOld,started;const oldStarted=new Promise(resolve=>{started=resolve;});const vectors=new Map();let oldWork;
  try {
   const index={async upsert(values){if(values[0].metadata.revision===1){started();await new Promise(resolve=>{releaseOld=resolve;});}for(const value of values)vectors.set(value.id,value);},async deleteByIds(ids){ids.forEach(id=>vectors.delete(id));},async getByIds(ids){return ids.flatMap(id=>vectors.has(id)?[vectors.get(id)]:[]);},async query(){return {matches:[...vectors.values()].map(value=>({...value,score:1}))};}};
-  const env={DB:db,AI:{run:async()=>({data:[Array(1024).fill(.1)]})},MEMORY_INDEX:index};const jobs=new Jobs(env,()=>at),store=new MemoryStore(db,()=>at);
+  const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',AI:{run:async()=>({data:[Array(1024).fill(.1)]})},MEMORY_INDEX:index};const jobs=new Jobs(env,()=>at),store=new MemoryStore(db,()=>at);
   const memory=await store.create(token,'s1',{body:'First revision'},'first');oldWork=jobs.index(await jobs.claim());await oldStarted;
   await store.update(token,'s1',memory.id,{body:'Newer revision',expectedRevision:1},'second');await jobs.index(await jobs.claim());
   assert.deepEqual([...vectors.values()].map(value=>value.metadata.revision),[2]);releaseOld();await oldWork;
@@ -59,7 +59,7 @@ test('stale higher-ranked chunks cannot conceal a matching current vector revisi
  try {
   const store=new MemoryStore(db,()=>at),memory=await store.create(token,'s1',{body:'Old fact'},'create');
   await store.update(token,'s1',memory.id,{body:'Current fact',expectedRevision:1},'update');
-  const env={DB:db,AI:{run:async()=>({data:[Array(1024).fill(.1)]})},MEMORY_INDEX:{query:async()=>({matches:[1,1,2,2,999].map((revision,index)=>({id:'vector-'+index,score:1,metadata:{memoryId:memory.id,revision}}))})}};
+  const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',AI:{run:async()=>({data:[Array(1024).fill(.1)]})},MEMORY_INDEX:{query:async()=>({matches:[1,1,2,2,999].map((revision,index)=>({id:'vector-'+index,score:1,metadata:{memoryId:memory.id,revision}}))})}};
   const result=await new Search(env,()=>at).query(token,'s1','notlexical',10,'search');
   assert.equal(result.results.length,1);assert.equal(result.results[0].revision,2);assert.equal(result.results[0].score,1/63);
  } finally {db.close();}
@@ -69,7 +69,7 @@ test('a deletion job cannot remove vectors created by a concurrent restore',asyn
  const {db,token}=await fixture();const vectors=new Map();
  try {
   const index={async upsert(values){values.forEach(value=>vectors.set(value.id,value));},async deleteByIds(ids){ids.forEach(id=>vectors.delete(id));},async getByIds(ids){return ids.flatMap(id=>vectors.has(id)?[vectors.get(id)]:[]);}};
-  const env={DB:db,AI:{run:async()=>({data:[Array(1024).fill(.1)]})},MEMORY_INDEX:index};const jobs=new Jobs(env,()=>at),store=new MemoryStore(db,()=>at);
+  const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',AI:{run:async()=>({data:[Array(1024).fill(.1)]})},MEMORY_INDEX:index};const jobs=new Jobs(env,()=>at),store=new MemoryStore(db,()=>at);
   const memory=await store.create(token,'s1',{body:'Restorable'},'create');await jobs.drain(1);await store.remove(token,'s1',memory.id,1,'delete');const deletion=await jobs.claim();
   const prepare=db.prepare.bind(db);let restored=false;
   db.prepare=sql=>{const statement=prepare(sql);if(sql.startsWith('SELECT vector_id AS vectorId')){const all=statement.all.bind(statement);statement.all=async()=>{if(!restored){restored=true;await store.restore(token,'s1',memory.id,2,'restore');await jobs.index(await jobs.claim());}return all();};}return statement;};

@@ -31,14 +31,18 @@ Memory SaaS의 메모리 저장소는 **Space**다. Git 저장소와 자동으�
 PAT는 [codex.pat.toml](../client/codex.pat.toml), SSO는 [codex.sso.toml](../client/codex.sso.toml)의 테이블을 사용자 Codex 설정에 병합한다. 같은 서버에 둘을 중복 설정하지 않는다. PAT 방식에서는 Codex 프로세스가 `MEMORY_SAAS_PAT` 환경변수를 받아야 한다. SSO 방식에서는 다음 명령을 실행한다.
 
 ```sh
-codex mcp login allenlabs-memory
+codex mcp login allenlabs-memory --scopes openid,profile,email,memory:read,memory:write,memory:delete
 ```
 
-`bearer_token_env_var`와 OAuth 로그인 명령은 [공식 Codex MCP 문서](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)를 따른다. 기존 ChatGPT 등록 앱 ID를 이 SaaS 주소에 재사용하거나 앱 설치를 자동 수행하는 설정은 포함하지 않는다.
+`bearer_token_env_var`와 OAuth 로그인 명령은 [공식 Codex MCP 문서](https://learn.chatgpt.com/docs/extend/mcp?surface=cli)를 따른다. 위 명령은 로그인에 사용할 권한을 명시한다. 설정의 `scopes`는 [Codex 설정 문서](https://learn.chatgpt.com/docs/config-file/config-reference)에 정의되어 있지만, 자동 로그인에서는 서버의 `scopes_supported`가 우선할 수 있으므로 배열만 줄여서 권한 제한을 보장하지 않는다. 기존 ChatGPT 등록 앱 ID를 이 SaaS 주소에 재사용하거나 앱 설치를 자동 수행하는 설정은 포함하지 않는다.
 
 ## Claude Code와 MCP 기반 플러그인
 
 [claude.pat.json](../client/claude.pat.json) 또는 [claude.sso.json](../client/claude.sso.json)의 `mcpServers` 항목을 프로젝트 `.mcp.json`에 병합한다. PAT 방식은 `${MEMORY_SAAS_PAT}`를 실행 환경에서 받는다. SSO 방식은 Claude Code의 `/mcp`에서 `allenlabs-memory` 인증을 시작한다. 플러그인이 자체 `.mcp.json`을 제공하는 경우에도 같은 HTTP 서버 항목을 사용할 수 있다. [공식 Claude Code MCP 문서](https://code.claude.com/docs/en/mcp)를 참고한다.
+
+SSO 템플릿의 `oauth.scopes`는 읽기·추가·수정·삭제에 필요한 권한과 계정 이메일 연결에 필요한 identity 권한을 명시한다. 이를 생략하면 현재 Claude Code는 401 응답의 `scope="memory:read"`를 따라 읽기 전용으로 로그인할 수 있다. 이미 그렇게 로그인했다면 `/mcp`에서 해당 서버의 인증을 지우고 다시 로그인하여 변경된 권한에 동의한다. 권한 문자열은 공백으로 구분하며 [Claude Code의 scope 설정](https://code.claude.com/docs/en/mcp#restrict-oauth-scopes)을 따른다.
+
+읽기 전용 연결은 Claude Code에서 `oauth.scopes`를 `"memory:read"`로 바꾼 뒤 다시 인증한다. 조직 이메일 연결까지 필요한 첫 로그인에는 `"openid profile email memory:read"`를 사용한다. Codex에서는 `codex mcp login allenlabs-memory --scopes memory:read`로 요청할 수 있다. 클라이언트의 자동 재인증과 관계없이 특정 Space·동작 제한을 강제하려면 `capabilities: ["read"]`와 명시적인 `spaceIds`를 가진 PAT를 사용한다. `email`은 인증된 이메일 연결에, `profile`은 표시 이름에 사용되며 조직 권한 자체를 부여하지 않는다.
 
 서버 연결과 별개로 [Space 사용 지침](../client/AGENT-GUIDANCE.md)을 프로젝트 지침이나 플러그인 스킬에 넣고 실제 Space ID를 지정한다. [MCP 인수 예제](../client/mcp-examples.json)는 현재 도구 이름과 필수 인수를 사용한다. PAT의 서버 권한 제한과 에이전트의 Space 선택 지침은 각각 설정해야 한다.
 
@@ -55,6 +59,8 @@ OAuth를 지원하는 원격 MCP 클라이언트는 서비스의 401 응답에 �
 | 중앙 로그인 UI | `https://auth.allen.company` |
 
 클라이언트는 중앙 서버가 제공하는 메타데이터와 등록 정책을 사용해 Authorization Code + PKCE로 토큰을 받는다. 실제 클라이언트의 callback과 등록이 중앙 서버에서 허용되어야 한다. `unauthorized_client`나 redirect 오류가 나면 클라이언트 등록을 확인하며, 웹 콘솔의 `SSO_CLIENT_ID`나 `/auth/callback`을 임의로 복사하지 않는다.
+
+중앙 서버는 public 클라이언트의 동적 등록(DCR)을 제공한다. 콜백은 정확한 HTTPS URL 또는 `http://127.0.0.1:<port>/...`·`http://[::1]:<port>/...` 형식이어야 하며, loopback의 임시 포트 변경을 지원한다. `http://localhost/...`는 허용되지 않는다. 별도 MCP 클라이언트는 자신의 콜백으로 등록하며 서비스의 브라우저 클라이언트를 재사용하지 않는다. access token은 15분이며, 갱신에는 `offline_access` 동의와 `refresh_token` grant가 모두 필요하다. 클라이언트가 `offline_access`를 추가할 수 있으므로 실제 동의 화면에서 확인한다.
 
 SaaS는 중앙 access JWT의 서명, 정확한 issuer/audience와 만료를 검증한다. ID token이나 브라우저 쿠키는 MCP 인증 수단이 아니다. OAuth에는 `memory:read`가 필요하며 `memory:write`는 추가·수정 권한을 뜻한다. 삭제·내보내기는 별도 허용이 필요하며, 실제 요청 범위는 제공자의 지원·동의 정책을 따른다. PAT의 동작 권한과 OAuth scope 문자열은 서로 다른 형식이다.
 

@@ -2,7 +2,7 @@ import type { Brand } from './ui.ts';
 import type { AuthSettings } from './auth.ts';
 
 export const SERVICE_ID = 'allenlabs-memory';
-export const SERVICE_VERSION = '0.4.0-rc.1';
+export const SERVICE_VERSION = '0.4.0-rc.2';
 export const PUBLIC_ORIGIN = 'https://memory.allenlabs.org';
 export const AUTH_ISSUER = 'https://auth-api.allen.company';
 export type Settings = { origin: string; brand: Brand; auth: AuthSettings };

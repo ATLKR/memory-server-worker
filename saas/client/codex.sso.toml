@@ -1,4 +1,6 @@
 # Alternative to codex.pat.toml; configure this server once.
-# Then run: codex mcp login allenlabs-memory
+# Then run: codex mcp login allenlabs-memory --scopes openid,profile,email,memory:read,memory:write,memory:delete
+# For enforced read-only access, issue a read-only PAT; see docs/CONNECTING.md.
 [mcp_servers.allenlabs-memory]
 url = "https://memory.allenlabs.org/mcp"
+scopes = ["openid", "profile", "email", "memory:read", "memory:write", "memory:delete"]

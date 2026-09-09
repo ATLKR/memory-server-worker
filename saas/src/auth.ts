@@ -8,6 +8,11 @@ const FLOW_TTL = 600_000;
 const TOKEN_TTL = 900;
 const REQUEST_TIMEOUT = 8_000;
 const SCOPES = 'openid profile email memory:read memory:write memory:delete';
+class AuthUpstreamFailure extends IdentityDenied {
+  readonly status: number;
+  constructor(status: number) { super(); this.status = status; }
+}
+type AuthProgress = { phase: 'login' | 'callback_validation' | 'flow_claim' | 'token_exchange' | 'token_response' | 'token_verification' | 'workspace_sign_in' };
 
 export interface AuthSettings {
   origin: string;
@@ -87,8 +92,11 @@ async function boundedFetch(fetchFn: typeof fetch, url: string, init: RequestIni
   let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   try {
     return await Promise.race([timeout, (async () => {
-      const res = await fetchFn(url, { ...init, redirect: 'error', signal: controller.signal });
-      if (res.status !== 200 || res.redirected || (res.url && res.url !== url) ||
+      // workerd supports manual/follow only. Keep 3xx responses here and reject
+      // them below, before a code, verifier or key request can follow Location.
+      const res = await fetchFn(url, { ...init, redirect: 'manual', signal: controller.signal });
+      if (res.status !== 200) throw new AuthUpstreamFailure(res.status);
+      if (res.redirected || (res.url && res.url !== url) ||
           !res.headers.get('content-type')?.toLowerCase().includes('application/json')) throw new IdentityDenied();
       const length = res.headers.get('content-length');
       if (length && (!/^\d+$/.test(length) || Number(length) > maximum)) throw new IdentityDenied();
@@ -187,7 +195,7 @@ export function createAuthController(
       code_challenge: challenge, code_challenge_method: 'S256' })) destination.searchParams.set(key, value);
     return response(302, '', { Location: destination.href, 'Set-Cookie': cookie(FLOW_COOKIE, binding, 600) });
   }
-  async function callback(request: Request): Promise<Response> {
+  async function callback(request: Request, progress: AuthProgress): Promise<Response> {
     if (!isConfigured) return response(503, 'Sign-in is not configured.');
     const url = new URL(request.url);
     const at = now();
@@ -199,6 +207,7 @@ export function createAuthController(
         !/^[A-Za-z0-9_-]{43}$/.test(state) || !binding || issuer !== settings.issuer ||
         ['code', 'state', 'iss'].some(name => url.searchParams.getAll(name).length !== 1)) throw new IdentityDenied();
     const stateDigest = await digestToken(state);
+    progress.phase = 'flow_claim';
     const flow = await db.prepare(`UPDATE auth_flows SET consumed_at=?
       WHERE state_digest=? AND browser_digest=? AND consumed_at IS NULL AND expires_at>?
         AND created_at<=? AND issuer=? AND client_id=? AND redirect_uri=?
@@ -208,15 +217,19 @@ export function createAuthController(
     const erased = await db.prepare('UPDATE auth_flows SET verifier=NULL WHERE state_digest=? AND consumed_at=?')
       .bind(stateDigest, at).run();
     if (!erased.success || erased.meta.changes !== 1) throw new IdentityDenied();
+    progress.phase = 'token_exchange';
     const tokenResponse = await boundedFetch(fetchFn, settings.tokenEndpoint, {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
       body: new URLSearchParams({ grant_type: 'authorization_code', code,
         client_id: settings.clientId, redirect_uri: callbackUri, code_verifier: flow.verifier, resource: settings.origin }),
     }, 32_768);
+    progress.phase = 'token_response';
     const tokens = await tokenResponse.json() as Record<string, unknown>;
     if (typeof tokens.access_token !== 'string' || tokens.token_type !== 'Bearer') throw new IdentityDenied();
+    progress.phase = 'token_verification';
     const principal = await verify(tokens.access_token, true);
     // A token refresh is not fresh user reauthentication. No auth_time is supplied.
+    progress.phase = 'workspace_sign_in';
     const session = await workspaceSignIn(principal);
     if (!/^[A-Za-z0-9_-]{32,256}$/.test(session.token) || !Number.isSafeInteger(session.expiresAt) ||
         session.expiresAt > principal.expiresAt || session.expiresAt <= now()) throw new IdentityDenied();
@@ -246,13 +259,19 @@ export function createAuthController(
       if (url.origin !== settings.origin) return response(400, 'Request denied.');
       const method = url.pathname === '/auth/logout' ? 'POST' : 'GET';
       if (request.method !== method) return response(405, 'Method not allowed.', { Allow: method });
+      const progress: AuthProgress = { phase: url.pathname === '/auth/callback' ? 'callback_validation' : 'login' };
       try {
         if (url.pathname === '/auth/login') return await login();
-        if (url.pathname === '/auth/callback') return await callback(request);
+        if (url.pathname === '/auth/callback') return await callback(request, progress);
         return await logout(request);
-      } catch {
-        return response(400, 'Authentication failed. Please sign in again.',
-          url.pathname === '/auth/callback' ? { 'Set-Cookie': cookie(FLOW_COOKIE, '', 0) } : undefined);
+      } catch (error) {
+        // A fixed support code identifies the failed boundary without logging or
+        // reflecting authorization codes, JWTs, cookies, DB errors or provider bodies.
+        const diagnostic = `AUTH_${progress.phase.toUpperCase()}${error instanceof AuthUpstreamFailure ? `_${error.status}` : ''}`;
+        return response(400, `Authentication failed. Please sign in again. (${diagnostic})`, {
+          'X-Auth-Failure': diagnostic,
+          ...(url.pathname === '/auth/callback' ? { 'Set-Cookie': cookie(FLOW_COOKIE, '', 0) } : {}),
+        });
       }
     },
     async resolveBearer(token) {

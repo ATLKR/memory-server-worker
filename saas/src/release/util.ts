@@ -182,7 +182,9 @@ export async function remoteJson(fetcher: typeof fetch, url: string, init: Reque
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
     try {
-        const response = await fetcher(url, { ...init, redirect: 'error', signal: controller.signal });
+        // workerd rejects redirect:'error' before sending. Manual preserves
+        // the no-redirect policy: response.ok below rejects every 3xx.
+        const response = await fetcher(url, { ...init, redirect: 'manual', signal: controller.signal });
         if (!response.ok || !response.headers.get('content-type')?.includes('json'))
             fail(502, 'provider_unavailable');
         return object(JSON.parse(new TextDecoder().decode(await readBytes(response, max))));

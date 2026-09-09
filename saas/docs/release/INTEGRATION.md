@@ -1,4 +1,4 @@
-# Integrated release candidate: 0.4.0-rc.1
+# Integrated release candidate: 0.4.0-rc.2
 
 This is the maintained integration record. Other files in this folder originated
 in the supplied release kit and describe its proposed design and launch work.
@@ -11,7 +11,45 @@ It targeted commit `b94c434f2074ea975111cb4e3efd4371a9481ac1`; its 91 manifest
 entries verified. This proves archive consistency, not publisher identity.
 The integration retains the repository's MIT license and attribution.
 
-## Deployed pilot: 2026-09-09
+## 0.4.0-rc.2 source changes
+
+This update configures a five-minute cron for bounded expiry cleanup. The new
+index-only `0007_maintenance-schema.sql` supports expired ingest payload, export,
+domain/reauthentication challenge and mail-budget cleanup. Each category is
+limited to 100 rows per invocation; request-time expiry checks remain authoritative
+while a backlog is cleared. Deployed migrations 1–6 keep their exact bytes.
+
+`BACKGROUND_JOBS_ENABLED=false` separates this cleanup from AI, vector, ingestion
+and billing processing. `AUTO_ERASURE_ENABLED=false` continues to preserve retained
+memory bodies and history. The UI disables unavailable ingestion, index rebuild,
+billing and proof-mail controls based on server configuration. The ingestion and
+index-rebuild APIs reject disabled processing rather than accepting unusable work.
+The maintenance heartbeat window is 15 minutes for the five-minute schedule;
+`/ready` still requires all provider and operator-acceptance checks.
+
+Codex and Claude SSO templates explicitly request identity and memory read/write/
+delete scopes, avoiding a connection that unexpectedly has only read access.
+See [CONNECTING.md](../CONNECTING.md) for reauthentication and read-only options.
+Browser authentication failures now return a fixed phase code and, when available,
+an upstream HTTP status, without provider bodies, tokens, cookies or callback
+parameters. Actual workerd reproduced the failure before any outbound token
+request: `redirect: 'error'` is unsupported. Token, JWKS and provider HTTP requests
+now use manual redirects and explicitly reject 3xx. Native runtime tests verify
+PKCE exchange, signature validation, session issuance and refusal to forward
+credentials to a redirect target. Live login acceptance follows deployment.
+
+The legacy root dependency tree also uses patched sharp 0.35.4 and Vitest 4.1.11.
+Its local full audit reports zero vulnerabilities, and the existing 208 tests,
+typechecks, Worker/UI builds, generated types and deterministic plugin archive
+checks pass. Runtime dependencies and the legacy service version are unchanged.
+See the [sharp advisory](https://github.com/lovell/sharp/security/advisories/GHSA-rgj7-g3m4-5g8c)
+and [Vitest advisory](https://github.com/vitest-dev/vitest/security/advisories/GHSA-82fw-gwwq-j7x9).
+
+This section records source changes and the stated local checks. It does not
+establish rc.2 deployment, migration application, hosted CI completion or real-user
+provider acceptance.
+
+## Recorded 0.4.0-rc.1 deployment: 2026-09-09
 
 Release `0.4.0-rc.1` is deployed at `https://memory.allenlabs.org` from runtime
 commit `ca249c3bfdae1ab15f934717de4c7dd2e29adc30`, Worker version
@@ -57,14 +95,14 @@ Email Service binding and the existing verified `allenlabs.org` sending domain,
 with sender `memory@allenlabs.org`. Resend is removed. Provider errors/timeouts
 invalidate pending proof; delivery is not automatically retried. See [EMAIL.md](EMAIL.md).
 
-The deployment has no cron schedule. `AUTO_ERASURE_ENABLED=false` also prevents a
-future indexing schedule from silently activating retention-based memory erasure.
+The recorded rc.1 deployment had no cron schedule. The rc.2 source adds cleanup
+without enabling provider jobs or automatic memory erasure, as described above.
 An explicit erase request remains a separate interactive operation. Before
-enabling cron, configure/test providers, backlog capacity, retention, deletion and
-recovery behavior. `/ready` intentionally returns 503 until the full readiness
-requirements are met; `/health` remains a separate liveness endpoint.
+enabling provider processing, configure/test providers, backlog capacity,
+retention, deletion and recovery behavior. `/ready` intentionally returns 503 until
+the full readiness requirements are met; `/health` is a separate liveness endpoint.
 
-## Corrections made during integration
+## Corrections made during rc.1 integration
 
 Actual six-schema tests reproduce and prevent create-only supersession, repeated
 unmetered embedding calls, stale jobs deleting newer vectors, hidden current
@@ -108,8 +146,12 @@ the production Worker. [Maintainer advisory](https://github.com/lovell/sharp/sec
 ## Verification and remaining limits
 
 Run `npm run check`, `npm run test:d1`, and `npm run eval:lexical` from `saas`.
-The complete local check covers 171 existing tests, 143 release tests and five
-client/template tests, plus typechecking and migration source/hash consistency.
+The recorded rc.1 local check covered 171 existing tests, 143 release tests and
+five client/template tests, plus typechecking and migration source/hash consistency.
+The rc.2 source adds maintenance, disabled-feature, callback-diagnostic and
+client-scope regressions. Local checks pass: 174 baseline, 151 release and six
+client/template tests, plus seven native authentication/HTTP runtime tests and
+the populated workerd/D1 scheduled-cleanup integration test.
 The evaluation loads the supplied synthetic corpus through the real memory APIs.
 All 51 cases were evaluated locally: recall@5 0.62, MRR@5 0.60, forbidden hits 0,
 stale hits 0, and one negative query with irrelevant results. This measures lexical

@@ -12,7 +12,7 @@ const deployedHashes = [
   'af45edf2e5620b3c3412133405dae525e1b8ceb824305736574fece64b9956c4',
   '5e8412358d9096244720d21e5ae12f2c12c10a624dd2c5622c5f79b2fea15dac',
 ];
-const sources = ['schema.sql', 'memory-schema.sql', 'product-schema.sql', 'auth-schema.sql', 'hierarchy-schema.sql', 'release-schema.sql'];
+const sources = ['schema.sql', 'memory-schema.sql', 'product-schema.sql', 'auth-schema.sql', 'hierarchy-schema.sql', 'release-schema.sql', 'maintenance-schema.sql'];
 const out = new URL('../migrations/', import.meta.url);
 await mkdir(out, { recursive: true });
 for (const [index, source] of sources.entries()) {

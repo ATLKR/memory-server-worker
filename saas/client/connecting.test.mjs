@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fixture, at } from '../release-validation/tests/db.mjs';
+import { generateKeyPair, SignJWT } from 'jose';
+import { DB, fixture, at } from '../release-validation/tests/db.mjs';
 import { Admin } from '../src/release/admin.ts';
 import { createRelease } from '../src/release/extension.ts';
 import { createApplication } from '../src/app.ts';
@@ -57,7 +58,10 @@ test('SSO template relies on protected resource discovery and carries no token o
   const { db } = await fixture();
   try {
     const server = read('./claude.sso.json').mcpServers[SERVICE_ID];
-    assert.deepEqual(server, { type: 'http', url: config.url });
+    assert.deepEqual(Object.keys(server).sort(), ['oauth', 'type', 'url']);
+    assert.equal(server.type, 'http');
+    assert.equal(server.url, config.url);
+    assert.equal(typeof server.oauth.scopes, 'string');
     const app = createApplication(db, readSettings({ PUBLIC_ORIGIN: new URL(server.url).origin }), { clock: () => at });
     const response = await app(new Request(server.url, { method: 'POST' }));
     assert.equal(response.status, 401);
@@ -66,5 +70,52 @@ test('SSO template relies on protected resource discovery and carries no token o
     assert.equal(metadata.resource, new URL(server.url).origin);
     assert.deepEqual(metadata.authorization_servers, [AUTH_ISSUER]);
     assert.ok(metadata.scopes_supported.includes('memory:read'));
+  } finally { db.close(); }
+});
+
+test('SSO template requests scopes that permit memory writes after a read-only challenge', async () => {
+  const db = new DB(); db.migrate();
+  try {
+    const server = read('./claude.sso.json').mcpServers[SERVICE_ID];
+    const origin = new URL(server.url).origin;
+    const { privateKey, publicKey } = await generateKeyPair('RS256');
+    const env = { DB: db, PUBLIC_ORIGIN: origin, SSO_CLIENT_ID: 'browser-only-client' };
+    const app = createApplication(db, readSettings(env), {
+      clock: () => at, auth: { jwks: async () => publicKey }, release: createRelease(env, { clock: () => at }),
+    });
+    const challenge = await app(new Request(server.url, { method: 'POST' }));
+    assert.equal(challenge.status, 401);
+    const challengeScope = /(?:^|[, ])scope="([^"]+)"/.exec(challenge.headers.get('www-authenticate'))[1];
+    assert.equal(challengeScope, 'memory:read');
+    // Claude Code uses pinned oauth.scopes first, then the challenge scope.
+    // With the original template this grants read only, so memory_add fails.
+    const requestedScope = server.oauth?.scopes ?? challengeScope;
+    const sign = scope => new SignJWT({ token_use: 'access', client_id: 'template-client', azp: 'template-client', scope,
+      email: 'template-user@example.test', emailVerified: true })
+      .setProtectedHeader({ alg: 'RS256', typ: 'at+jwt' }).setIssuer(AUTH_ISSUER).setAudience(origin)
+      .setSubject('template-user').setJti(crypto.randomUUID()).setIssuedAt(at / 1000).setExpirationTime(at / 1000 + 900).sign(privateKey);
+    const accessToken = await sign(requestedScope);
+    let rpcId = 0;
+    const call = async (token, name, args = {}) => {
+      const reply = await jsonRpc(await app(new Request(server.url, { method: 'POST', headers: {
+        authorization: 'Bearer ' + token, 'content-type': 'application/json', accept: 'application/json, text/event-stream',
+        'mcp-protocol-version': '2025-11-25',
+      }, body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'tools/call', params: { name, arguments: args } }) })));
+      return { failed: reply.result.isError === true, value: JSON.parse(reply.result.content[0].text) };
+    };
+    const spaces = await call(accessToken, 'memory_spaces');
+    assert.equal(spaces.failed, false);
+    const spaceId = spaces.value.results[0].id;
+    const created = await call(accessToken, 'memory_add', { spaceId, body: 'Template-authorized write', operationId: 'sso-template-create' });
+    assert.equal(created.failed, false, JSON.stringify(created.value));
+    const memoryId = created.value.id;
+    assert.equal((await call(accessToken, 'memory_get', { spaceId, memoryId })).value.body, 'Template-authorized write');
+    const updated = await call(accessToken, 'memory_update', { spaceId, memoryId, body: 'Updated', expectedRevision: 1, operationId: 'sso-template-update' });
+    assert.equal(updated.failed, false, JSON.stringify(updated.value));
+    const readOnlyToken = await sign('memory:read');
+    assert.equal((await call(readOnlyToken, 'memory_get', { spaceId, memoryId })).failed, false);
+    const denied = await call(readOnlyToken, 'memory_add', { spaceId, body: 'Denied', operationId: 'sso-template-denied' });
+    assert.equal(denied.failed, true); assert.equal(denied.value.status, 403);
+    assert.equal((await call(accessToken, 'memory_delete', { spaceId, memoryId, expectedRevision: 2, operationId: 'sso-template-delete' })).failed, false);
   } finally { db.close(); }
 });

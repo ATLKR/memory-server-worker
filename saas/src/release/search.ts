@@ -100,6 +100,10 @@ export class Search {
         const db = this.env.DB, at = this.clock(), hash = await tokenHash(token);
         await interactive(db, token, at, true);
         await requireSpace(db, token, spaceId, 'update', at);
+        if (!this.env.AI || !this.env.MEMORY_INDEX)
+            fail(503, 'semantic_not_configured');
+        if (this.env.BACKGROUND_JOBS_ENABLED !== 'true')
+            fail(503, 'background_jobs_disabled');
         // One job per current revision. Resetting a leased job is forbidden; an
         // in-flight revision will finish or become reclaimable through its lease.
         await db.prepare(`INSERT INTO release_jobs(id,memory_id,space_id,revision,kind,available_at,created_at)

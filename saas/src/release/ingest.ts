@@ -35,6 +35,8 @@ export class Ingest {
     }, key: string) {
         if (!this.env.AI || !this.env.PAYLOAD_KEY)
             fail(503, 'ingestion_not_configured');
+        if (this.env.BACKGROUND_JOBS_ENABLED !== 'true')
+            fail(503, 'background_jobs_disabled');
         const source = messages(input.messages), jobId = crypto.randomUUID();
         const ciphertext = await encrypt(this.env.PAYLOAD_KEY, source, jobId);
         const result = await this.store.commit(token, spaceId, 'ingest', 'create', key, { messages: source }, null, null, 100, (op, actor, at) => [

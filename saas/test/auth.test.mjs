@@ -80,7 +80,7 @@ test('browser login binds PKCE to a single-use callback and stores only the opaq
   assert.equal(createHash('sha256').update(body.get('code_verifier')).digest('base64url'),
     flow.location.searchParams.get('code_challenge'));
   assert.equal(body.get('resource'), settings.origin);
-  assert.equal(f.exchanges[0].init.redirect, 'error');
+  assert.equal(f.exchanges[0].init.redirect, 'manual');
   assert.match(response.headers.get('set-cookie'), new RegExp(`__Host-memory_session=${f.localToken}`));
   assert.match(response.headers.get('set-cookie'), /Max-Age=900/);
   assert.equal(f.principals[0].emailVerified, true);
@@ -236,4 +236,29 @@ test('separate request controllers reuse public JWKS data and refresh an expired
     fetch: async () => Response.json({ keys: [publicJwk] }) });
   t.after(third.close);
   assert.match(await third.resolveBearer(token), /^mapped-machine-session-/);
+});
+
+test('callback exposes only a fixed failure stage and upstream HTTP status for support', async t => {
+  const f = await fixture({ fetch: async () => new Response('PRIVATE_PROVIDER_DETAIL code=secret', { status: 403 }) }); t.after(f.close);
+  const result = await f.callback(await f.begin());
+  assert.equal(result.status, 400);
+  assert.equal(result.headers.get('x-auth-failure'), 'AUTH_TOKEN_EXCHANGE_403');
+  assert.match(await result.text(), /AUTH_TOKEN_EXCHANGE_403/);
+  assert.doesNotMatch(JSON.stringify([...result.headers]), /PRIVATE_PROVIDER_DETAIL|code=secret/);
+  assert.equal(f.principals.length, 0);
+});
+
+test('callback distinguishes invalid tokens from exchange failures without exposing JWT data', async t => {
+  const f = await fixture({ claims: { aud: 'https://untrusted.example' } }); t.after(f.close);
+  const result = await f.callback(await f.begin());
+  assert.equal(result.headers.get('x-auth-failure'), 'AUTH_TOKEN_VERIFICATION');
+  assert.doesNotMatch(await result.text(), /untrusted|eyJ|one-time-provider-code/);
+});
+
+test('callback diagnostics remain request-local and expose no verifier or cookie', async t => {
+  const f = await fixture(); t.after(f.close); const flow = await f.begin();
+  const result = await f.callback(flow, { iss: 'https://untrusted.example' });
+  assert.equal(result.headers.get('x-auth-failure'), 'AUTH_CALLBACK_VALIDATION');
+  assert.doesNotMatch(await result.text(), new RegExp(flow.state));
+  assert.equal((await f.callback(flow)).status, 303);
 });

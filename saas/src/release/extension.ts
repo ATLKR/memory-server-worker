@@ -10,7 +10,7 @@ import { mcp } from './mcp.ts';
 import { authority, params, interactive, requireSpace, recentSql } from './authority.ts';
 import { ReleaseError, batch, body, canonical, capabilitiesFromScopes, fail, id, integer, json, object, one, rows, stmt, str, tokenHash, unbase64url } from './util.ts';
 import { renderManagement, managementScript, managementStyles } from './console.ts';
-import { readSettings } from '../config.ts';
+import { readSettings, SERVICE_VERSION } from '../config.ts';
 export interface IdentityAdapter {
     getAccount(token: string): Promise<unknown>;
     beginEmailLink(token: string, email: string, deliver: (mail: {
@@ -51,7 +51,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
         fail(403, 'origin_denied'); }
     async function ready(): Promise<Response> { const checks: Record<string, boolean> = {}; checks.schema = Boolean(await one(db, 'SELECT version FROM release_meta WHERE version=6')); checks.sso = Boolean(env.SSO_CLIENT_ID); checks.semantic = Boolean(env.AI && env.MEMORY_INDEX); checks.encryptedIngest = Boolean(env.PAYLOAD_KEY && env.AI); checks.mail = Boolean(env.EMAIL && env.MAIL_FROM); checks.deprovisioning = Boolean(env.IDENTITY_WEBHOOK_SECRET); checks.billing = Boolean(env.STRIPE_SECRET_KEY && env.STRIPE_WEBHOOK_SECRET && env.STRIPE_API_VERSION && Object.keys(billing.plans()).length); const heartbeat = await one<{
         at: number;
-    }>(db, "SELECT last_success_at AS at FROM release_heartbeats WHERE name='maintenance'"); checks.maintenance = Boolean(heartbeat && clock() - heartbeat.at < 300000); checks.operatorAcceptance = env.RELEASE_MODE === 'ga' && Boolean(env.LIVE_ACCEPTANCE_ID); const ready = Object.values(checks).every(Boolean); return json({ ready, stage: ready ? 'operator-enabled-ga' : 'release-candidate', checks, notice: 'Readiness is configuration/heartbeat checking, not independent security or production certification.' }, ready ? 200 : 503); }
+    }>(db, "SELECT last_success_at AS at FROM release_heartbeats WHERE name='maintenance'"); checks.maintenance = Boolean(heartbeat && clock() >= heartbeat.at && clock() - heartbeat.at < 900000); checks.backgroundJobs = env.BACKGROUND_JOBS_ENABLED === 'true'; checks.operatorAcceptance = env.RELEASE_MODE === 'ga' && Boolean(env.LIVE_ACCEPTANCE_ID); const ready = Object.values(checks).every(Boolean); return json({ ready, stage: ready ? 'operator-enabled-ga' : 'release-candidate', checks, notice: 'Readiness is configuration/heartbeat checking, not independent security or production certification.' }, ready ? 200 : 503); }
     const identity = () => { if (!options.identity)
         fail(503, 'identity_adapter_missing'); return options.identity; };
     return {
@@ -170,7 +170,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                     }
                     if (tail === 'ingests' && method === 'GET') {
                         const actor = await requireSpace(db, token, s, 'read', clock());
-                        const values = await rows(db, 'SELECT id,state,expires_at AS expiresAt FROM release_ingests WHERE account_id=? AND space_id=? ORDER BY created_at DESC,id LIMIT 50', [actor.accountId, s]);
+                        const values = await rows(db, `SELECT id,CASE WHEN expires_at<=? AND state NOT IN ('approved','cancelled') THEN 'expired' ELSE state END AS state,expires_at AS expiresAt FROM release_ingests WHERE account_id=? AND space_id=? ORDER BY created_at DESC,id LIMIT 50`, [clock(), actor.accountId, s]);
                         await requireSpace(db, token, s, 'read', clock());
                         return json({ results: values });
                     }
@@ -220,7 +220,8 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                 }
                 if (path === '/v1/release/config' && method === 'GET') {
                     await interactive(db, token, clock());
-                    return json({ version: '0.4.0-rc.1', mode: 'managed', prices: billing.plans(), features: { semantic: Boolean(env.AI && env.MEMORY_INDEX), ingestion: Boolean(env.AI && env.PAYLOAD_KEY), mail: Boolean(env.EMAIL && env.MAIL_FROM), billing: Boolean(env.STRIPE_SECRET_KEY) }, policy: { sourceRetentionHours: 24, defaultTrashDays: 30, scim: 'deprovisioning-only' } });
+                    const backgroundJobs = env.BACKGROUND_JOBS_ENABLED === 'true', prices = billing.plans();
+                    return json({ version: SERVICE_VERSION, mode: 'managed', prices, features: { semantic: Boolean(env.AI && env.MEMORY_INDEX), indexRebuild: Boolean(backgroundJobs && env.AI && env.MEMORY_INDEX), ingestion: Boolean(backgroundJobs && env.AI && env.PAYLOAD_KEY), mail: Boolean(env.EMAIL && env.MAIL_FROM), billing: Boolean(backgroundJobs && env.STRIPE_SECRET_KEY && env.STRIPE_API_VERSION && env.STRIPE_WEBHOOK_SECRET && Object.keys(prices).length), backgroundJobs }, policy: { sourceRetentionHours: 24, defaultTrashDays: 30, automaticErasure: env.AUTO_ERASURE_ENABLED === 'true', scim: 'deprovisioning-only' } });
                 }
                 if (path === '/v1/account/reauth' && method === 'POST') {
                     const input = await body(request, ['emailId']);
@@ -309,6 +310,6 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
             const at = clock();
             await db.prepare(`INSERT INTO release_credential_policies(credential_id,capabilities,space_ids,verified_oauth) SELECT c.id,?,NULL,1 FROM active_credentials c WHERE c.token_digest=? AND c.expires_at>? AND c.kind='session' AND c.id LIKE 'oauth:%' ON CONFLICT(credential_id) DO UPDATE SET capabilities=excluded.capabilities,verified_oauth=1 WHERE release_credential_policies.verified_oauth=0`).bind(canonical(caps), await tokenHash(session.token), at).run();
         },
-        async scheduled() { await jobs.drain(5); await jobs.maintain(); await billing.reconcile(); await billing.drain(3); await db.prepare("INSERT INTO release_heartbeats(name,last_success_at) VALUES('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at").bind(clock()).run(); }
+        async scheduled() { await jobs.maintain(); if (env.BACKGROUND_JOBS_ENABLED === 'true') { await jobs.drain(5); await billing.reconcile(); await billing.drain(3); } await db.prepare("INSERT INTO release_heartbeats(name,last_success_at) VALUES('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at").bind(clock()).run(); }
     };
 }

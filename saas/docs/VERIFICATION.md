@@ -1,12 +1,21 @@
 # Product verification — 2026-09-08
 
-This is the historical **0.3.0** deployment record. The current **0.4.0-rc.1**
-source has additional release suites and a populated sixth-migration workerd/D1
+This is the historical **0.3.0** deployment record. The **0.4.0-rc.1**
+integration added release suites and a populated sixth-migration workerd/D1
 test. Current evidence and activation limits are in
 [release/INTEGRATION.md](release/INTEGRATION.md). Local tests do not establish live
 provider or real-user SSO acceptance.
 
-## Current productization result
+The **0.4.0-rc.2** source adds bounded expiry cleanup, independent provider-job
+activation, unavailable-feature controls, sanitized callback diagnostics and
+explicit MCP SSO scopes. Run the full check and populated workerd/D1 migration
+test for that candidate; the historical totals below are not rc.2 results. Root
+development dependencies were separately patched and locally verified: full audit
+zero vulnerabilities, all 208 existing tests and builds pass, generated types and
+the deterministic plugin ZIP remain unchanged. No new hosted CI or deployment
+result is asserted here.
+
+## Historical 0.3.0 productization result
 
 The standalone module now contains real central OAuth authentication, account provisioning, organization invitations/offboarding, personal and organization API keys, a responsive Korean console, REST and an SDK 2 MCP server. The dedicated product origin is `https://memory.allenlabs.org`; central authentication stays under `allen.company`.
 

@@ -108,6 +108,7 @@ export interface ReleaseEnv {
     STRIPE_API_VERSION?: string;
     BILLING_PRICES_JSON?: string;
     RELEASE_MODE?: 'pilot' | 'ga';
+    BACKGROUND_JOBS_ENABLED?: 'true' | 'false'; // Provider processing is separately enabled from transient cleanup.
     AUTO_ERASURE_ENABLED?: 'true' | 'false'; // Explicit operator opt-in; absent/false preserves tombstones and history.
     LIVE_ACCEPTANCE_ID?: string; // Operator change record, not an automated certification.
     fetch?: typeof fetch;

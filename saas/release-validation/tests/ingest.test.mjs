@@ -2,7 +2,7 @@ import test from 'node:test';import assert from 'node:assert/strict';import {fix
 import {digest} from '../../src/release/util.ts';
 let Ingest;try{({Ingest}=await import('../../src/release/ingest.ts'));}catch{}
 for(const name of ['encrypted-source','extract-review','approval-retry','fabricated-evidence','revoked-actor','expiry'])test('ingest '+name,async()=>{
- assert.ok(Ingest,'ingest implementation missing');const {db,token}=await fixture();let time=at;const env={DB:db,PAYLOAD_KEY:Buffer.alloc(32,3).toString('base64url'),AI:{async run(){return {response:{memories:[{body:'연구 프로젝트를 진행한다.',kind:'fact',sourceMessageId:'msg1',quote:name==='fabricated-evidence'?'없는 문장':'연구 프로젝트'}]}};}}};const pipeline=new Ingest(env,()=>time),jobs=new Jobs(env,()=>time);jobs.ingest=j=>pipeline.process(j);
+ assert.ok(Ingest,'ingest implementation missing');const {db,token}=await fixture();let time=at;const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',PAYLOAD_KEY:Buffer.alloc(32,3).toString('base64url'),AI:{async run(){return {response:{memories:[{body:'연구 프로젝트를 진행한다.',kind:'fact',sourceMessageId:'msg1',quote:name==='fabricated-evidence'?'없는 문장':'연구 프로젝트'}]}};}}};const pipeline=new Ingest(env,()=>time),jobs=new Jobs(env,()=>time);jobs.ingest=j=>pipeline.process(j);
  try{const input={messages:[{id:'msg1',role:'user',content:'나는 연구 프로젝트를 진행한다.'}]};const started=await pipeline.submit(token,'s1',input,'ingest-one');
  if(name==='encrypted-source'){const row=db.raw.prepare('SELECT ciphertext FROM release_ingests').get();assert.ok(!row.ciphertext.includes('연구'));assert.equal((await pipeline.submit(token,'s1',input,'ingest-one')).id,started.id);return;}
  if(name==='revoked-actor')db.raw.exec("UPDATE credentials SET revoked_at="+at+" WHERE id='session:alice'");
@@ -22,7 +22,7 @@ for(const phase of ['queued','source-read','provider']) test('organization inges
   db.raw.prepare("INSERT INTO credentials(id,account_id,membership_id,email_id,kind,token_digest,expires_at,permission) VALUES('org-ingest-key','alice','m1','e1','api_key',?,?,'write')").run(await digest(key),at+900000);
   db.raw.exec("INSERT INTO release_credential_policies(credential_id,capabilities,space_ids) VALUES('org-ingest-key','[\"read\",\"create\"]','[\"so\"]')");
   const revoke=()=>db.raw.prepare('UPDATE memberships SET revoked_at=? WHERE id=?').run(at,'m1');
-  const env={DB:db,PAYLOAD_KEY:Buffer.alloc(32,3).toString('base64url'),AI:{async run(){calls++;if(phase==='provider')revoke();return {response:{memories:[{body:'Sensitive fact',kind:'fact',sourceMessageId:'u1',quote:'private source'}]}};}}};
+  const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',PAYLOAD_KEY:Buffer.alloc(32,3).toString('base64url'),AI:{async run(){calls++;if(phase==='provider')revoke();return {response:{memories:[{body:'Sensitive fact',kind:'fact',sourceMessageId:'u1',quote:'private source'}]}};}}};
   const ingest=new Ingest(env,()=>at),jobs=new Jobs(env,()=>at);jobs.ingest=job=>ingest.process(job);
   const submitted=await ingest.submit(key,'so',{messages:[{id:'u1',role:'user',content:'private source'}]},'ingest');
   if(phase==='queued')revoke();

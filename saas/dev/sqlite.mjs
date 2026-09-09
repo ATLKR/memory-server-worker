@@ -12,6 +12,7 @@ export function openLocalDatabase({ workspace = false, release = false } = {}) {
   if (release) {
     if (!workspace) throw Error('Release demo requires the workspace schemas');
     raw.exec(readFileSync(new URL('../release-schema.sql', import.meta.url), 'utf8'));
+    raw.exec(readFileSync(new URL('../maintenance-schema.sql', import.meta.url), 'utf8'));
   }
   function prepare(sql) {
     const statement = raw.prepare(sql);

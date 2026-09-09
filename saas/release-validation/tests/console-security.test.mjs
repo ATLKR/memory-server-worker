@@ -93,3 +93,11 @@ test('PAT issuance derives tenant from the selected Space and preserves selected
  assert.match(w.document.getElementById('key-form').closest('details').querySelector('summary').textContent,/PAT.*개인 액세스 토큰/);
  assert.match(w.document.getElementById('mcp-connection').textContent,/https:\/\/memory\.allenlabs\.org\/mcp/);
 });
+
+test('management disables unavailable provider actions and explains manual retention',async t=>{
+ const w=await page(t,path=>path==='/v1/release/config'?json({prices:{},features:{semantic:false,ingestion:false,mail:true,billing:false,backgroundJobs:false},policy:{automaticErasure:false}}):undefined);
+ for(const selector of ['#ingest-form button','#rebuild','#checkout-form button','#portal'])assert.equal(w.document.querySelector(selector).disabled,true,selector);
+ assert.equal(w.document.querySelector('#reauth-start button').disabled,false);
+ assert.match(w.document.getElementById('feature-status').textContent,/추출.*사용할 수 없/);
+ assert.match(w.document.getElementById('retention-status').textContent,/자동.*꺼져/);
+});

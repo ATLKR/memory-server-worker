@@ -11,6 +11,7 @@
   "vars": {
     "RELEASE_MODE": "pilot",
     "AUTO_ERASURE_ENABLED": "false",
+    "BACKGROUND_JOBS_ENABLED": "false",
     "MAIL_FROM": "memory@allenlabs.org",
     "LIVE_ACCEPTANCE_ID": "",
     "PUBLIC_ORIGIN": "https://memory.allenlabs.org",
@@ -30,6 +31,8 @@
   }],
   "ratelimits": [{ "name": "REQUEST_LIMITER", "namespace_id": "2086090801", "simple": { "limit": 120, "period": 60 } }],
   "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["memory@allenlabs.org"] }],
+  // Expired transient-state cleanup only; provider jobs and memory erasure stay off.
+  "triggers": { "crons": ["*/5 * * * *"] },
   // Auth callback URLs contain codes: invocation/request logs stay disabled.
   "observability": { "enabled": false },
   "limits": { "cpu_ms": 1000 }

@@ -44,6 +44,9 @@ try {
   const historical = await original.create(key.token, organization.spaceId, { body: 'Before release migration' });
   await original.update(key.token, organization.spaceId, historical.id, { body: 'Preserved populated revision', expectedRevision: 1 });
   await applySql(parser, db, readFileSync(new URL('../migrations/0006_release-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../migrations/0007_maintenance-schema.sql', import.meta.url), 'utf8'));
+  for (const name of ['release_ingests_expiry', 'release_exports_expiry', 'release_domains_expiry', 'release_reauth_expiry', 'release_mail_budget_day'])
+    assert.equal((await db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='index' AND name=?").bind(name).first()).n, 1);
   assert.equal((await db.prepare('SELECT body FROM memories WHERE id=?').bind(historical.id).first()).body, 'Preserved populated revision');
   assert.equal((await db.prepare('SELECT body FROM memory_versions WHERE memory_id=? AND revision=1').bind(historical.id).first()).body, 'Before release migration');
   assert.equal((await db.prepare('SELECT count(*) AS n FROM release_fts WHERE memory_id=?').bind(historical.id).first()).n, 1);
@@ -87,5 +90,61 @@ try {
   assert.equal((await db.prepare('PRAGMA foreign_key_check').all()).results.length, 0);
   const authStart = await request('/auth/login'); assert.equal(authStart.status, 302);
   assert.equal(new URL(authStart.headers.get('location')).origin, 'https://auth-api.allen.company');
-  console.log('PASS bundled Worker on local workerd/D1: populated migrations 5 and 6, FTS backfill/search, atomic idempotency, revisions, trash/restore, independent nested organizations, SSO bootstrap, invitations, keys, MCP, offboarding, readiness and integrity.');
+
+  // Exercise the deployed scheduled handler, including native D1 tuple cleanup
+  // and the forward indexes. This database and every identity below are synthetic.
+  assert.equal(config.vars.BACKGROUND_JOBS_ENABLED, 'false');
+  assert.equal(config.vars.AUTO_ERASURE_ENABLED, 'false');
+  const maintenanceAt = Date.now(), expiredAt = maintenanceAt - 60000, liveUntil = maintenanceAt + 600000;
+  const personalSpace = (await workspace.snapshot(owner.token)).spaces.find(space => space.organizationId === null);
+  assert.ok(personalSpace);
+  const oldStore = new MemoryService(db, () => maintenanceAt - 31 * 86400000);
+  const retained = await oldStore.create(owner.token, personalSpace.id, { body: 'Personal content beyond the restore window' });
+  await oldStore.remove(owner.token, personalSpace.id, retained.id, 1);
+  const ownerCredential = await db.prepare("SELECT id FROM credentials WHERE account_id=? AND kind='session' LIMIT 1").bind(owner.accountId).first();
+  for (let n = 0; n < 105; n++)
+    await db.prepare('INSERT INTO release_reauth_challenges(id,credential_id,email_id,token_digest,expires_at) VALUES(?,?,?,?,?)')
+      .bind(`scheduled-expired-${n}`, ownerCredential.id, ownerEmail.id, 'synthetic-proof-digest', expiredAt).run();
+  await db.prepare('INSERT INTO release_reauth_challenges(id,credential_id,email_id,token_digest,expires_at) VALUES(?,?,?,?,?)')
+    .bind('scheduled-live-proof', ownerCredential.id, ownerEmail.id, 'synthetic-live-digest', liveUntil).run();
+  for (const [id, expiry] of [['scheduled-expired-export', expiredAt], ['scheduled-live-export', liveUntil]])
+    await db.prepare('INSERT INTO release_export_sessions(id,account_id,space_id,watermark,expires_at,created_at) VALUES(?,?,?,0,?,?)')
+      .bind(id, owner.accountId, personalSpace.id, expiry, maintenanceAt - 120000).run();
+  await db.prepare('INSERT INTO email_challenges(id,account_id,address,domain,token_digest,expires_at) VALUES(?,?,?,?,?,?)')
+    .bind('scheduled-identity-audit', owner.accountId, 'scheduled-audit@example.org', 'example.org', 'd'.repeat(64), expiredAt).run();
+  await db.prepare("INSERT INTO release_jobs(id,space_id,revision,kind,available_at,created_at) VALUES('scheduled-source',?,0,'ingest',?,?)")
+    .bind(personalSpace.id, expiredAt, expiredAt).run();
+  await db.prepare("INSERT INTO release_ingests(id,account_id,space_id,actor_credential_id,ciphertext,proposals,expires_at,created_at) VALUES('scheduled-source',?,?,?,'synthetic-expired-ciphertext','[]',?,?)")
+    .bind(owner.accountId, personalSpace.id, ownerCredential.id, expiredAt, expiredAt).run();
+  const oldBudgetDay = new Date(maintenanceAt - 2 * 86400000).toISOString().slice(0, 10);
+  const futureBudgetDay = new Date(maintenanceAt + 2 * 86400000).toISOString().slice(0, 10);
+  for (const day of [oldBudgetDay, futureBudgetDay])
+    await db.prepare('INSERT INTO release_mail_budget(account_id,day,quantity) VALUES(?,?,20)').bind(owner.accountId, day).run();
+  const preservedTables = ['memories', 'memory_versions', 'memory_audit_events', 'email_challenges', 'email_consumptions', 'release_events', 'release_jobs'];
+  const beforeCleanup = new Map();
+  for (const table of preservedTables)
+    beforeCleanup.set(table, (await db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()).results);
+  const worker = await mf.getWorker();
+  const firstSweep = await worker.scheduled({ cron: config.triggers.crons[0] });
+  assert.equal(firstSweep.outcome, 'ok');
+  assert.equal((await db.prepare('SELECT count(*) AS n FROM release_reauth_challenges WHERE expires_at<=?').bind(maintenanceAt).first()).n, 5);
+  assert.equal((await db.prepare("SELECT count(*) AS n FROM release_reauth_challenges WHERE id='scheduled-live-proof'").first()).n, 1);
+  assert.equal((await db.prepare("SELECT count(*) AS n FROM release_export_sessions WHERE id='scheduled-expired-export'").first()).n, 0);
+  assert.equal((await db.prepare("SELECT count(*) AS n FROM release_export_sessions WHERE id='scheduled-live-export'").first()).n, 1);
+  assert.deepEqual(await db.prepare("SELECT ciphertext,proposals,state FROM release_ingests WHERE id='scheduled-source'").first(),
+    { ciphertext: null, proposals: null, state: 'expired' });
+  assert.equal((await db.prepare('SELECT count(*) AS n FROM release_mail_budget WHERE account_id=? AND day=?').bind(owner.accountId, oldBudgetDay).first()).n, 0);
+  assert.equal((await db.prepare('SELECT quantity FROM release_mail_budget WHERE account_id=? AND day=?').bind(owner.accountId, futureBudgetDay).first()).quantity, 20);
+  const secondSweep = await worker.scheduled({ cron: config.triggers.crons[0] });
+  assert.equal(secondSweep.outcome, 'ok');
+  assert.equal((await db.prepare('SELECT count(*) AS n FROM release_reauth_challenges WHERE expires_at<=?').bind(maintenanceAt).first()).n, 0);
+  for (const table of preservedTables)
+    assert.deepEqual((await db.prepare(`SELECT * FROM ${table} ORDER BY rowid`).all()).results, beforeCleanup.get(table), `${table} must survive cleanup unchanged`);
+  const heartbeat = await db.prepare("SELECT last_success_at FROM release_heartbeats WHERE name='maintenance'").first();
+  assert.ok(heartbeat.last_success_at >= maintenanceAt && heartbeat.last_success_at <= Date.now());
+  const afterCleanupReady = await (await request('/ready')).json();
+  assert.equal(afterCleanupReady.checks.maintenance, true);
+  assert.equal(afterCleanupReady.checks.backgroundJobs, false);
+  assert.equal((await db.prepare('PRAGMA foreign_key_check').all()).results.length, 0);
+  console.log('PASS bundled Worker on local workerd/D1: populated migrations 5-7, bounded scheduled cleanup and preserved personal memories/audit/jobs, maintenance heartbeat, FTS backfill/search, atomic idempotency, revisions, trash/restore, independent nested organizations, SSO bootstrap, invitations, keys, MCP, offboarding, readiness and integrity.');
 } finally { parser.close(); await mf.dispose(); }

@@ -20,9 +20,9 @@ export class Jobs {
         const at = this.clock(), token = crypto.randomUUID();
         return this.env.DB.prepare(`UPDATE release_jobs SET state='leased',lease_token=?,lease_until=?,attempt=attempt+1
     WHERE id=(SELECT id FROM release_jobs WHERE ((state='pending' AND available_at<=?) OR (state='leased' AND lease_until<=?))
-      AND (kind<>'upsert' OR ?=1) AND (kind<>'ingest' OR ?=1) ORDER BY available_at,id LIMIT 1)
+      AND (kind<>'upsert' OR ?=1) AND (kind<>'ingest' OR ?=1) AND (kind<>'delete' OR ?=1) ORDER BY available_at,id LIMIT 1)
     RETURNING id,memory_id AS memoryId,space_id AS spaceId,revision,kind,attempt,lease_token AS leaseToken`)
-            .bind(token, at + 120000, at, at, this.env.AI && this.env.MEMORY_INDEX ? 1 : 0, this.env.AI && this.ingest ? 1 : 0).first<Job>();
+            .bind(token, at + 120000, at, at, this.env.AI && this.env.MEMORY_INDEX ? 1 : 0, this.env.AI && this.env.PAYLOAD_KEY && this.ingest ? 1 : 0, this.env.MEMORY_INDEX ? 1 : 0).first<Job>();
     }
     async live(job: Job): Promise<boolean> { return Boolean(await one(this.env.DB, `SELECT id FROM release_jobs WHERE id=? AND lease_token=? AND state='leased' AND lease_until>?`, [job.id, job.leaseToken, this.clock()])); }
     async drain(limit = 5): Promise<void> {
@@ -121,10 +121,23 @@ export class Jobs {
             for (const row of expired)
                 await batch(db, erasureStatements(db, row.id, at, row.actor, `r.deleted_at+coalesce((SELECT retention_days FROM release_space_policies WHERE space_id=r.space_id),30)*86400000<=?`, [at]));
         }
-        await db.prepare("UPDATE release_ingests SET ciphertext=NULL,proposals=NULL,state=CASE WHEN state IN ('approved','cancelled') THEN state ELSE 'expired' END WHERE expires_at<=? AND state<>'expired'").bind(at).run();
-        await db.prepare('DELETE FROM release_export_sessions WHERE expires_at<=?').bind(at).run();
-        await db.prepare('DELETE FROM release_domain_challenges WHERE expires_at<=?').bind(at).run();
+        // Bound every transient cleanup to keep a large backlog from exhausting
+        // a scheduled invocation. Identity proofs referenced by immutable audit
+        // records are deliberately excluded; authorization checks expiry directly.
+        await db.prepare(`UPDATE release_ingests SET ciphertext=NULL,proposals=NULL,state=CASE WHEN state IN ('approved','cancelled') THEN state ELSE 'expired' END
+            WHERE id IN (SELECT id FROM release_ingests WHERE expires_at<=?
+                AND (ciphertext IS NOT NULL OR proposals IS NOT NULL OR state IN ('queued','review','failed'))
+                ORDER BY expires_at,id LIMIT 100)`).bind(at).run();
+        for (const table of ['release_export_sessions', 'release_domain_challenges', 'release_reauth_challenges'])
+            await db.prepare(`DELETE FROM ${table} WHERE id IN (SELECT id FROM ${table} WHERE expires_at<=? ORDER BY expires_at,id LIMIT 100)`).bind(at).run();
+        await db.prepare(`DELETE FROM release_mail_budget WHERE (account_id,day) IN
+            (SELECT account_id,day FROM release_mail_budget WHERE day<? ORDER BY day,account_id LIMIT 100)`).bind(new Date(at).toISOString().slice(0, 10)).run();
         // A daily sweep also cleans a provider request that completed after a local timeout.
-        await db.prepare(`UPDATE release_jobs SET state='pending',attempt=0,available_at=? WHERE kind='delete' AND state='done' AND memory_id IN (SELECT memory_id FROM release_erasure_ledger WHERE vector_erased_at IS NULL OR vector_erased_at<?) AND revision=(SELECT revision FROM memories WHERE id=release_jobs.memory_id)`).bind(at, at - 86400000).run();
+        if (this.env.BACKGROUND_JOBS_ENABLED === 'true' && this.env.MEMORY_INDEX)
+            await db.prepare(`UPDATE release_jobs SET state='pending',attempt=0,available_at=? WHERE id IN (
+                SELECT j.id FROM release_jobs j JOIN release_erasure_ledger e ON e.memory_id=j.memory_id
+                JOIN memories m ON m.id=j.memory_id AND m.revision=j.revision
+                WHERE j.kind='delete' AND j.state='done' AND (e.vector_erased_at IS NULL OR e.vector_erased_at<?)
+                ORDER BY e.erased_at,j.id LIMIT 100)`).bind(at, at - 86400000).run();
     }
 }

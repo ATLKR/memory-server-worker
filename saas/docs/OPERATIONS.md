@@ -1,11 +1,44 @@
 # Operations runbook
 
-The record below describes the 0.3.0 deployment. The integrated 0.4.0-rc.1 source,
-its sixth migration, changed feature limits and provider activation defaults are
-documented in [release/INTEGRATION.md](release/INTEGRATION.md). Cloudflare Email
+The deployment record below describes 0.3.0. The latest recorded 0.4.0-rc.1
+deployment and the 0.4.0-rc.2 source changes are documented in
+[release/INTEGRATION.md](release/INTEGRATION.md). Cloudflare Email
 proof delivery is covered in [release/EMAIL.md](release/EMAIL.md). Treat these
 current documents as the source of truth for release behavior; retain this prior
 deployment record for recovery context.
+
+## 0.4.0-rc.2 maintenance and diagnosis
+
+The source configures `*/5 * * * *` for expired transient-state cleanup. Each
+invocation processes at most 100 rows per cleanup category: ingest payloads,
+export sessions, domain/reauthentication challenges and past-day mail budgets.
+Expiry is checked by request authorization independently of the sweep, so a
+backlog does not extend a credential or challenge lifetime. Immutable identity
+and audit records are retained. Apply the index-only forward migration
+`0007_maintenance-schema.sql` before deploying this code; migrations 1–6 remain
+byte-frozen. This section does not assert that migration 7 or this code is live.
+
+Keep `BACKGROUND_JOBS_ENABLED=false` and `AUTO_ERASURE_ENABLED=false` for the
+current pilot configuration. The cron does not dispatch AI/vector/ingestion or
+billing jobs with the first switch off, and does not erase retained memories with
+the second switch off. Explicit, recently reauthenticated erasure is separate.
+Enabling provider processing requires its bindings/secrets and acceptance checks;
+unconfigured ingestion, index rebuild and billing controls remain disabled.
+`/ready` accepts a successful maintenance heartbeat younger than 15 minutes but
+still requires provider processing and all other readiness checks for HTTP 200.
+A cleanup heartbeat alone is not GA readiness.
+
+Browser authentication failures return HTTP 400 with an `X-Auth-Failure` code such
+as `AUTH_CALLBACK_VALIDATION`, `AUTH_FLOW_CLAIM`, `AUTH_TOKEN_EXCHANGE_403`,
+`AUTH_TOKEN_RESPONSE`, `AUTH_TOKEN_VERIFICATION` or `AUTH_WORKSPACE_SIGN_IN`.
+Record the fixed code and time when diagnosing a failed attempt. The optional
+numeric suffix is an upstream HTTP status; it is not the callback response status.
+Do not collect authorization codes, JWTs, cookies or full callback URLs. Request
+logging remains disabled. The observed real-user SSO failure is still under
+investigation; these diagnostics do not establish or fix its cause. MCP client
+scope configuration is covered in [CONNECTING.md](CONNECTING.md).
+
+## Historical 0.3.0 runbook
 
 This runbook covers the Standard memory Worker in `saas/`, deployed at `https://memory.allenlabs.org`. Release 0.3.0 and its fifth migration are deployed; the service remains a hosted pilot rather than production GA. Real-user browser login remains unverified. The 0.3.0 public HTTP smoke check passed on 2026-09-08 at 09:22 UTC. Central-auth upstream CI is green; that result is separate from this SaaS module's passing local checks.
 

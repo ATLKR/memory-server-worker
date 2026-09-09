@@ -1,6 +1,6 @@
 {
   "name": "@allenlabs/memory-saas-foundation",
-  "version": "0.4.0-rc.1",
+  "version": "0.4.0-rc.2",
   "private": true,
   "type": "module",
   "description": "Allen Labs Standard memory SaaS with central SSO, workspaces, REST and MCP",
@@ -20,7 +20,7 @@
     "db:remote": "npm run preflight && wrangler d1 migrations apply DB --remote",
     "preflight": "node --experimental-strip-types scripts/preflight.mjs",
     "build": "wrangler deploy --dry-run --outdir .local/build",
-    "test:d1": "npm run build && node --experimental-strip-types --experimental-sqlite test/d1.integration.mjs",
+    "test:d1": "npm run build && node --experimental-strip-types --experimental-sqlite test/d1.integration.mjs && node --experimental-strip-types --experimental-sqlite test/auth-runtime.integration.mjs",
     "deploy": "npm run check && npm run preflight && wrangler deploy",
     "test:release": "node --experimental-strip-types --experimental-sqlite --test release-validation/tests/*.test.mjs",
     "eval:lexical": "node --experimental-strip-types --experimental-sqlite release-validation/tools/run-lexical-eval.mjs",
@@ -28,6 +28,7 @@
   },
   "devDependencies": {
     "@types/node": "24.3.0",
+    "esbuild": "0.28.1",
     "jsdom": "26.1.0",
     "jsonc-parser": "3.3.1",
     "miniflare": "5.20260907.0-alpha",
