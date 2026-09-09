@@ -72,9 +72,17 @@ The release test fixture now loads the actual migrations 1–5, including their
 immutable and revocation triggers. Existing remote migration bytes remain frozen;
 all changes use migration 6. The bundled workerd test applies it to populated D1
 and checks old revisions, FTS backfill, current ACLs and atomic writes.
-The harness also uses the installed Wrangler statement splitter: a compact
-`+CASE` expression exposed a deployment-only split error and was corrected with
-whitespace. The first remote attempt rolled back before migration 6 applied.
+The harness also exercises the installed Wrangler statement splitter. Its local
+path misparsed a compact `+CASE` expression; adding whitespace reproduced and
+resolved that separate issue. Remote migrations send the whole script to D1's
+REST parser, where an isolated database reproduced `incomplete input` for the
+unparenthesized `CASE` in `release_operation_budget`. All five unparenthesized
+trigger `CASE` expressions are now enclosed in parentheses without changing their
+SQL semantics, following the [reported workaround](https://github.com/cloudflare/workers-sdk/issues/4727).
+Both failed production attempts rolled back migration 6 completely; the existing
+five migrations and production Worker remained intact.
+The corrected whole script subsequently passed on an isolated remote D1 database,
+including final-schema and foreign-key checks; that temporary database was removed.
 Email timeout tests wait for the actual provider invocation before advancing
 their fake clock, avoiding a platform-dependent event-loop race.
 

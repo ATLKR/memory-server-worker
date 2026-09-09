@@ -50,10 +50,10 @@ CREATE TABLE release_usage_events(
  account_id TEXT NOT NULL REFERENCES accounts(id),period TEXT NOT NULL,units INTEGER NOT NULL,created_at INTEGER NOT NULL
 );
 CREATE TRIGGER release_operation_budget BEFORE INSERT ON release_operations WHEN NEW.units>0 BEGIN
- SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM release_space_pools sp JOIN release_pools p ON p.id=sp.pool_id
+ SELECT (CASE WHEN NOT EXISTS(SELECT 1 FROM release_space_pools sp JOIN release_pools p ON p.id=sp.pool_id
  LEFT JOIN release_usage_counters u ON u.pool_id=p.id AND u.period=NEW.period
  WHERE sp.space_id=NEW.space_id AND p.state='active' AND coalesce(u.units,0)+NEW.units<=p.monthly_units)
- THEN RAISE(ABORT,'release_quota') END;
+ THEN RAISE(ABORT,'release_quota') END);
 END;
 CREATE TRIGGER release_operation_meter AFTER INSERT ON release_operations BEGIN
  INSERT INTO release_usage_events SELECT NEW.id,sp.pool_id,NEW.account_id,NEW.period,NEW.units,NEW.created_at FROM release_space_pools sp WHERE sp.space_id=NEW.space_id;
@@ -136,22 +136,22 @@ CREATE VIEW release_memory_sizes AS SELECT id,space_id,CASE WHEN erased_at IS NU
 CREATE VIEW release_version_sizes AS SELECT memory_id,revision,space_id,length(CAST(body AS BLOB))+coalesce(length(CAST(source AS BLOB)),0)+length(CAST(provenance AS BLOB)) AS bytes FROM memory_versions;
 UPDATE release_pools SET storage_bytes=coalesce((SELECT sum(x.bytes) FROM (SELECT space_id,bytes FROM release_memory_sizes UNION ALL SELECT space_id,bytes FROM release_version_sizes) x JOIN release_space_pools sp ON sp.space_id=x.space_id WHERE sp.pool_id=release_pools.id),0);
 CREATE TRIGGER release_storage_guard_insert BEFORE INSERT ON memories BEGIN
- SELECT CASE WHEN EXISTS(SELECT 1 FROM release_space_pools sp JOIN release_pools p ON p.id=sp.pool_id WHERE sp.space_id=NEW.space_id AND p.storage_bytes+length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB))>p.storage_limit_bytes) THEN RAISE(ABORT,'release_storage') END;
+ SELECT (CASE WHEN EXISTS(SELECT 1 FROM release_space_pools sp JOIN release_pools p ON p.id=sp.pool_id WHERE sp.space_id=NEW.space_id AND p.storage_bytes+length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB))>p.storage_limit_bytes) THEN RAISE(ABORT,'release_storage') END);
 END;
 CREATE TRIGGER release_storage_guard_update BEFORE UPDATE ON memories WHEN NEW.deleted_at IS NULL AND NEW.erased_at IS NULL BEGIN
- SELECT CASE WHEN EXISTS(SELECT 1 FROM release_space_pools sp JOIN release_pools p ON p.id=sp.pool_id WHERE sp.space_id=NEW.space_id AND p.storage_bytes+length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB))>p.storage_limit_bytes) THEN RAISE(ABORT,'release_storage') END;
+ SELECT (CASE WHEN EXISTS(SELECT 1 FROM release_space_pools sp JOIN release_pools p ON p.id=sp.pool_id WHERE sp.space_id=NEW.space_id AND p.storage_bytes+length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB))>p.storage_limit_bytes) THEN RAISE(ABORT,'release_storage') END);
 END;
 CREATE TRIGGER release_storage_insert AFTER INSERT ON memories BEGIN UPDATE release_pools SET storage_bytes=storage_bytes+length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB)) WHERE id=(SELECT pool_id FROM release_space_pools WHERE space_id=NEW.space_id); END;
-CREATE TRIGGER release_storage_update AFTER UPDATE ON memories BEGIN UPDATE release_pools SET storage_bytes=storage_bytes-length(CAST(OLD.body AS BLOB))-coalesce(length(CAST(OLD.source AS BLOB)),0)-length(CAST(OLD.provenance AS BLOB))+ CASE WHEN NEW.erased_at IS NULL THEN length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB)) ELSE 0 END WHERE id=(SELECT pool_id FROM release_space_pools WHERE space_id=NEW.space_id); END;
+CREATE TRIGGER release_storage_update AFTER UPDATE ON memories BEGIN UPDATE release_pools SET storage_bytes=storage_bytes-length(CAST(OLD.body AS BLOB))-coalesce(length(CAST(OLD.source AS BLOB)),0)-length(CAST(OLD.provenance AS BLOB))+ (CASE WHEN NEW.erased_at IS NULL THEN length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB)) ELSE 0 END) WHERE id=(SELECT pool_id FROM release_space_pools WHERE space_id=NEW.space_id); END;
 CREATE TRIGGER release_storage_version_insert AFTER INSERT ON memory_versions BEGIN UPDATE release_pools SET storage_bytes=storage_bytes+length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB)) WHERE id=(SELECT pool_id FROM release_space_pools WHERE space_id=NEW.space_id); END;
 CREATE TRIGGER release_storage_version_delete AFTER DELETE ON memory_versions BEGIN UPDATE release_pools SET storage_bytes=storage_bytes-length(CAST(OLD.body AS BLOB))-coalesce(length(CAST(OLD.source AS BLOB)),0)-length(CAST(OLD.provenance AS BLOB)) WHERE id=(SELECT pool_id FROM release_space_pools WHERE space_id=OLD.space_id); END;
 CREATE TRIGGER release_operation_revision BEFORE INSERT ON release_operations
  WHEN NEW.action IN ('update','delete','restore','erase') BEGIN
- SELECT CASE WHEN NOT EXISTS(SELECT 1 FROM memories r WHERE r.id=NEW.memory_id AND r.space_id=NEW.space_id AND r.revision=NEW.expected_revision AND r.erased_at IS NULL
+ SELECT (CASE WHEN NOT EXISTS(SELECT 1 FROM memories r WHERE r.id=NEW.memory_id AND r.space_id=NEW.space_id AND r.revision=NEW.expected_revision AND r.erased_at IS NULL
  AND ((NEW.action IN ('update','delete') AND r.deleted_at IS NULL)
   OR (NEW.action IN ('restore','erase') AND r.deleted_at IS NOT NULL))
  AND (NEW.action<>'restore' OR r.deleted_at+coalesce((SELECT retention_days FROM release_space_policies WHERE space_id=r.space_id),30)*86400000>NEW.created_at))
- THEN RAISE(ABORT,'release_conflict') END;
+ THEN RAISE(ABORT,'release_conflict') END);
 END;
 CREATE TABLE release_reauth_challenges(id TEXT PRIMARY KEY,credential_id TEXT NOT NULL REFERENCES credentials(id),email_id TEXT NOT NULL REFERENCES account_emails(id),token_digest TEXT NOT NULL,expires_at INTEGER NOT NULL,used_at INTEGER);
 CREATE TABLE release_external_email_blocks(account_id TEXT REFERENCES accounts(id),address TEXT NOT NULL,created_at INTEGER NOT NULL,PRIMARY KEY(account_id,address));
