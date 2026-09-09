@@ -162,8 +162,8 @@ export async function readBytes(response: Response | Request, maximum = 65536): 
         void reader.cancel().catch(() => { });
     }
 }
-export async function body(request: Request, allowed?: string[], max = 65536): Promise<Record<string, unknown>> {
-    if (request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() !== 'application/json')
+export async function body(request: Request, allowed?: string[], max = 65536, mediaTypes: readonly string[] = ['application/json']): Promise<Record<string, unknown>> {
+    if (!mediaTypes.includes(request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? ''))
         fail(415, 'json_required');
     let out: Record<string, unknown>;
     try {

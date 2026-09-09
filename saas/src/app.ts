@@ -149,7 +149,9 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
       const code = error instanceof HttpError || error instanceof WorkspaceError ? error.code : status === 400 ? 'invalid_request' : status === 403 ? 'access_denied' : status === 409 ? 'revision_conflict' : 'internal_error';
       response = json({ error: code }, status);
     }
-    if (response.status === 401) response.headers.set('www-authenticate', `Bearer resource_metadata="${settings.origin}/.well-known/oauth-protected-resource", scope="memory:read"`);
+    if (response.status === 401) response.headers.set('www-authenticate', new URL(request.url).pathname.startsWith('/scim/')
+      ? 'Bearer realm="scim"'
+      : `Bearer resource_metadata="${settings.origin}/.well-known/oauth-protected-resource", scope="memory:read"`);
     if (response.status === 429) response.headers.set('retry-after', '60');
     return protect(response);
   };

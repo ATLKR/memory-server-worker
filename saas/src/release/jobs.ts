@@ -25,6 +25,16 @@ export class Jobs {
             .bind(token, at + 120000, at, at, this.env.AI && this.env.MEMORY_INDEX ? 1 : 0, this.env.AI && this.env.PAYLOAD_KEY && this.ingest ? 1 : 0, this.env.MEMORY_INDEX ? 1 : 0).first<Job>();
     }
     async live(job: Job): Promise<boolean> { return Boolean(await one(this.env.DB, `SELECT id FROM release_jobs WHERE id=? AND lease_token=? AND state='leased' AND lease_until>?`, [job.id, job.leaseToken, this.clock()])); }
+    async renew(job: Job): Promise<void> {
+        const at = this.clock();
+        // Extend only a lease this worker still holds. An expired or reclaimed
+        // worker must not resume external work under a new owner's lease.
+        const result = await this.env.DB.prepare(`UPDATE release_jobs SET lease_until=MAX(lease_until,?)
+            WHERE id=? AND lease_token=? AND state='leased' AND lease_until>?`)
+            .bind(at + 120000, job.id, job.leaseToken, at).run();
+        if (!result.success || result.meta.changes !== 1)
+            throw Error('lease_lost');
+    }
     async drain(limit = 5): Promise<void> {
         for (let i = 0; i < limit; i++) {
             const job = await this.claim();
@@ -60,14 +70,14 @@ export class Jobs {
         }>(db, 'SELECT id,body,revision,deleted_at AS deletedAt,erased_at AS erasedAt FROM memories WHERE id=? AND space_id=?', [job.memoryId, job.spaceId]);
         if (!current || current.revision !== job.revision)
             return;
+        await this.renew(job);
         if (current.deletedAt !== null) {
             const refs = await rows<{
                 vectorId: string;
             }>(db, 'SELECT vector_id AS vectorId FROM release_vector_refs WHERE memory_id=? AND revision<=?', [current.id, current.revision]);
             for (let i = 0; i < refs.length; i += 100) {
                 const ids = refs.slice(i, i + 100).map(r => r.vectorId);
-                if (!await this.live(job))
-                    throw Error('lease_lost');
+                await this.renew(job);
                 await deadline(index.deleteByIds(ids));
                 if ((await deadline(index.getByIds(ids))).length)
                     throw Error('delete_not_visible_yet');
@@ -82,6 +92,9 @@ export class Jobs {
             chunks.push(chars.slice(offset, offset + 1800).join(''));
         const prefix = (await digest(current.id)).slice(0, 36), namespace = await digest(job.spaceId);
         for (let n = 0; n < chunks.length; n++) {
+            // A full memory may need more than two minutes across many bounded
+            // provider calls, so renew between chunks rather than restarting it.
+            await this.renew(job);
             const values = await embed(this.env, chunks[n]!);
             const vectorId = `${prefix}:${current.revision}:${n}`;
             const valid = await one(db, 'SELECT id FROM memories WHERE id=? AND revision=? AND deleted_at IS NULL AND erased_at IS NULL', [current.id, current.revision]);
@@ -104,8 +117,7 @@ export class Jobs {
             id: string;
         }>(db, 'SELECT vector_id AS id FROM release_vector_refs WHERE memory_id=? AND revision<?', [current.id, current.revision]);
         for (let i = 0; i < old.length; i += 100) {
-            if (!await this.live(job))
-                throw Error('lease_lost');
+            await this.renew(job);
             await deadline(index.deleteByIds(old.slice(i, i + 100).map(x => x.id)));
         }
     }

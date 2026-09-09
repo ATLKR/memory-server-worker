@@ -82,3 +82,34 @@ test('recipient email reverification does not inherit the old share and parent g
   f.db.raw.prepare('INSERT INTO account_emails(id,account_id,address,domain,verified_at) VALUES(?,?,?,?,?)').run('new-recipient-claim',f.recipient.accountId,'recipient@corp.example','corp.example',at);
   await denied(()=>f.memory.get(f.recipient.token,'so',record.id));
 });
+
+test('retrying share acceptance preserves original consent time and still enforces live authority',async t=>{
+ const f=await setup(t);let now=at;const transfer=new Transfers(f.db,()=>now);
+ const share=await transfer.share(f.token,'so','recipient@corp.example');
+ await transfer.accept(f.recipient.token,share.id);
+ const acceptedAt=f.db.raw.prepare('SELECT accepted_at FROM release_shares WHERE id=?').get(share.id).accepted_at;
+ now+=60000;await transfer.accept(f.recipient.token,share.id);
+ assert.equal(f.db.raw.prepare('SELECT accepted_at FROM release_shares WHERE id=?').get(share.id).accepted_at,acceptedAt);
+ await denied(()=>transfer.accept(f.token,share.id));
+ f.db.raw.prepare("UPDATE memberships SET revoked_at=? WHERE id='m1'").run(now);
+ await denied(()=>transfer.accept(f.recipient.token,share.id));
+});
+
+for(const change of ['credential','share'])test('memory get rechecks authority when '+change+' is revoked after its data query',async t=>{
+ const f=await setup(t),record=await f.memory.create(f.token,'so',{body:'Never return after observed revocation'},'record');
+ const share=await f.transfer.share(f.token,'so','recipient@corp.example');await f.transfer.accept(f.recipient.token,share.id);
+ const prepare=f.db.prepare.bind(f.db),recipientHash=await digest(f.recipient.token);let captured=false;
+ f.db.prepare=sql=>{
+  const statement=prepare(sql);
+  if(sql.startsWith('SELECT r.id,r.space_id AS spaceId,r.body')){
+   const first=statement.first.bind(statement);
+   statement.first=async()=>{const row=await first();assert.equal(row.body,'Never return after observed revocation');captured=true;
+    if(change==='credential')f.db.raw.prepare('UPDATE credentials SET revoked_at=? WHERE token_digest=?').run(at,recipientHash);
+    else f.db.raw.prepare('UPDATE release_shares SET revoked_at=? WHERE id=?').run(at,share.id);
+    return row;
+   };
+  }
+  return statement;
+ };
+ await denied(()=>f.memory.get(f.recipient.token,'so',record.id));assert.equal(captured,true);
+});

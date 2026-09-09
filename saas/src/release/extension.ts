@@ -38,12 +38,14 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
     const clock = options.clock ?? Date.now, db = env.DB, store = new MemoryStore(db, clock), search = new Search(env, clock), ingest = new Ingest(env, clock), transfers = new Transfers(db, clock), admin = new Admin(env, clock), billing = new Billing(env, clock), jobs = new Jobs(env, clock);
     jobs.ingest = j => ingest.process(j);
     const settings = readSettings(env), origin = settings.origin;
-    const guarded = async (run: () => Promise<Response | null>): Promise<Response | null> => { try {
+    const guarded = async (run: () => Promise<Response | null>, scim = false): Promise<Response | null> => { try {
         return await run();
     }
     catch (e) {
         const identityDenied = e instanceof Error && (e.name === 'IdentityDenied' || e.constructor.name === 'IdentityDenied');
         const status = e instanceof ReleaseError ? e.status : identityDenied ? 403 : 500;
+        if (scim) return json({ schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], status: String(status), detail: e instanceof ReleaseError ? e.code : identityDenied ? 'access_denied' : 'internal_error' }, status,
+            { 'content-type': 'application/scim+json; charset=utf-8', ...(status === 401 ? { 'www-authenticate': 'Bearer realm="scim"' } : {}), ...(status === 429 ? { 'retry-after': '60' } : {}) });
         return json({ error: e instanceof ReleaseError ? e.code : identityDenied ? 'access_denied' : 'internal_error' }, status, status === 429 ? { 'retry-after': '60' } : {});
     } };
     function originCheck(request: Request) { if (new URL(request.url).origin !== origin)
@@ -80,7 +82,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                     return json({ error: 'not_found' }, 404);
                 }
                 return null;
-            });
+            }, new URL(request.url).pathname.startsWith('/scim/'));
         },
         route(request, token) {
             return guarded(async () => {

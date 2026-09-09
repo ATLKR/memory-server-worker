@@ -93,3 +93,29 @@ for(const flag of [undefined,'false','true']) test('automatic memory erasure req
   assert.equal(db.raw.prepare('SELECT count(*) n FROM release_export_sessions').get().n,0);
  } finally {db.close();}
 });
+
+test('indexing renews a live lease across many individually successful provider calls',async()=>{
+ const {db,token}=await fixture();let now=at,embeddings=0;const vectors=new Map();
+ try {
+  const memory=await new MemoryStore(db,()=>at).create(token,'s1',{body:'x'.repeat(16000)},'long-memory');
+  const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',AI:{run:async()=>{embeddings++;now+=19000;return{data:[Array(1024).fill(.1)]};}},MEMORY_INDEX:{upsert:async values=>values.forEach(v=>vectors.set(v.id,v)),deleteByIds:async ids=>ids.forEach(id=>vectors.delete(id)),getByIds:async ids=>ids.flatMap(id=>vectors.has(id)?[{id}]:[])}};
+  await new Jobs(env,()=>now).drain(1);
+  const job=db.raw.prepare('SELECT state,attempt,last_error FROM release_jobs WHERE memory_id=?').get(memory.id);
+  assert.equal(job.state,'done');assert.equal(job.attempt,1);assert.equal(job.last_error,null);
+  assert.equal(embeddings,10);assert.equal(vectors.size,10);assert.ok(now-at>120000);
+ }finally{db.close();}
+});
+
+test('an expired or replaced indexing lease cannot be renewed or send another provider request',async()=>{
+ for(const scenario of ['expired','replaced']){
+  const {db,token}=await fixture();let now=at,calls=0;
+  try {
+   await new MemoryStore(db,()=>at).create(token,'s1',{body:'index fixture'},'memory');
+   const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',AI:{run:async()=>{calls++;return{data:[Array(1024).fill(.1)]};}},MEMORY_INDEX:{upsert:async()=>{},deleteByIds:async()=>{},getByIds:async()=>[]}};
+   const jobs=new Jobs(env,()=>now),job=await jobs.claim();
+   if(scenario==='expired')now+=120001;
+   else db.raw.prepare('UPDATE release_jobs SET lease_token=? WHERE id=?').run('new-owner',job.id);
+   await assert.rejects(()=>jobs.index(job),e=>e.message==='lease_lost');assert.equal(calls,0,scenario);
+  }finally{db.close();}
+ }
+});

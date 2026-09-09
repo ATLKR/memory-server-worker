@@ -73,6 +73,7 @@ export class MemoryStore {
             await requireSpace(this.db, token, spaceId, 'read', this.clock());
             return fail(404, 'memory_not_found');
         }
+        await requireSpace(this.db, token, spaceId, 'read', this.clock());
         return memoryRow(row);
     }
     async commit(token: string, spaceId: string, action: string, cap: Capability, key: string, input: unknown, memoryId: string | null, expectedRevision: number | null, units: number, build: (op: string, actorId: string, at: number) => Statement[], recent = false, additionalCap?: Capability): Promise<{

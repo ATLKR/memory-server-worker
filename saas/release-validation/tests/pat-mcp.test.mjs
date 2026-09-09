@@ -149,3 +149,53 @@ test('real signed OAuth remains an MCP alternative with verified scopes and no m
   assert.equal((await f.request('/mcp',{method:'POST',token:parts.join('.'),data:{jsonrpc:'2.0',id:2,method:'tools/list'}})).status,401);
   assert.equal((await f.request('/mcp',{method:'POST',cookie:f.cookie,data:{jsonrpc:'2.0',id:3,method:'tools/list'}})).status,401);
 });
+
+test('partial OAuth scopes preserve permitted MCP writes without granting delete or Space management',async t=>{
+  const f=await fixture(t),writer=await signedToken({client:'write-without-delete',scope:'memory:read memory:write'});
+  const created=permitted(await f.tool(writer,'memory_add',{spaceId:f.spaceIds[0],body:'Scoped writer',operationId:'partial-create'}));
+  const updated=permitted(await f.tool(writer,'memory_update',{spaceId:f.spaceIds[0],memoryId:created.id,body:'Scoped update',expectedRevision:1,operationId:'partial-update'}));
+  assert.equal(updated.body,'Scoped update');assert.equal(updated.revision,2);
+  denied(await f.tool(writer,'memory_delete',{spaceId:f.spaceIds[0],memoryId:created.id,expectedRevision:2,operationId:'partial-delete-denied'}));
+  const deleter=await signedToken({client:'delete-without-write',scope:'memory:read memory:delete'});
+  denied(await f.tool(deleter,'memory_add',{spaceId:f.spaceIds[0],body:'No create',operationId:'delete-create-denied'}));
+  denied(await f.tool(deleter,'memory_update',{spaceId:f.spaceIds[0],memoryId:created.id,body:'No update',expectedRevision:2,operationId:'delete-update-denied'}));
+  permitted(await f.tool(deleter,'memory_delete',{spaceId:f.spaceIds[0],memoryId:created.id,expectedRevision:2,operationId:'partial-delete'}));
+  const orgResponse=await f.browser('/v1/organizations',{method:'POST',data:{name:'Owner organization',emailId:f.snapshot.account.emails[0].id}});
+  assert.equal(orgResponse.status,201);const org=await orgResponse.json();
+  const count=f.db.raw.prepare('SELECT count(*) n FROM spaces').get().n;
+  for(const token of [writer,deleter,await signedToken({client:'full-memory-grant'})]){
+    for(const data of [{name:'Unauthorized personal Space'},{name:'Unauthorized organization Space',organizationId:org.id}]){
+      assert.equal((await f.request('/v1/spaces',{method:'POST',token,data})).status,403);
+    }
+  }
+  assert.equal(f.db.raw.prepare('SELECT count(*) n FROM spaces').get().n,count);
+});
+
+test('organization PATs retain exact Space and membership boundaries across hierarchy and role changes',async t=>{
+  const f=await fixture(t),emailId=f.snapshot.account.emails[0].id;
+  async function organization(name,parentOrganizationId){
+    const response=await f.browser('/v1/organizations',{method:'POST',data:{name,emailId,...(parentOrganizationId?{parentOrganizationId}:{})}});
+    assert.equal(response.status,201);return response.json();
+  }
+  const parent=await organization('Parent'),child=await organization('Child',parent.id);
+  const secondResponse=await f.browser('/v1/spaces',{method:'POST',data:{name:'Second parent Space',organizationId:parent.id}});
+  assert.equal(secondResponse.status,201);const second=await secondResponse.json();
+  async function issue(spaceIds){
+    const response=await f.browser('/v1/keys',{method:'POST',data:{label:'Organization connector',organizationId:parent.id,capabilities:['read','create'],expiresInDays:1,...(spaceIds?{spaceIds}:{})}});
+    assert.equal(response.status,201);return response.json();
+  }
+  const selected=await issue([parent.spaceId]),all=await issue();
+  assert.deepEqual(permitted(await f.tool(selected.token,'memory_spaces')).results.map(space=>space.id),[parent.spaceId]);
+  assert.deepEqual(permitted(await f.tool(all.token,'memory_spaces')).results.map(space=>space.id).sort(),[parent.spaceId,second.id].sort());
+  for(const spaceId of [second.id,child.spaceId,f.spaceIds[0]])denied(await f.tool(selected.token,'memory_add',{spaceId,body:'Out of scope',operationId:'outside-'+spaceId}));
+  for(const spaceId of [child.spaceId,f.spaceIds[0]])denied(await f.tool(all.token,'memory_list',{spaceId}));
+  const created=permitted(await f.tool(selected.token,'memory_add',{spaceId:parent.spaceId,body:'Organization memory',operationId:'org-create'}));
+  const membership=f.db.raw.prepare('SELECT membership_id AS id FROM credentials WHERE id=?').get(selected.id);
+  f.db.raw.prepare("UPDATE memberships SET role='member' WHERE id=?").run(membership.id);
+  assert.equal(permitted(await f.tool(selected.token,'memory_get',{spaceId:parent.spaceId,memoryId:created.id})).body,'Organization memory');
+  denied(await f.tool(selected.token,'memory_add',{spaceId:parent.spaceId,body:'Demoted writer',operationId:'demoted-create'}));
+  // A still-active child membership must not keep the parent-bound PAT alive.
+  f.db.raw.prepare('UPDATE memberships SET expires_at=? WHERE id=?').run(at,membership.id);
+  assert.equal((await f.request('/mcp',{method:'POST',token:selected.token,data:{jsonrpc:'2.0',id:1,method:'tools/list'}})).status,401);
+  assert.equal(f.db.raw.prepare('SELECT count(*) n FROM active_memberships WHERE organization_id=? AND expires_at>?').get(child.id,at).n,1);
+});

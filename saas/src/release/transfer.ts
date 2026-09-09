@@ -89,7 +89,9 @@ export class Transfers {
     async accept(token: string, shareId: string): Promise<void> {
         const at = this.clock(), hash = await tokenHash(token);
         await interactive(this.db, token, at);
-        const r = await this.db.prepare(`UPDATE release_shares SET accepted_at=? WHERE id=? AND revoked_at IS NULL AND expires_at>? AND accepted_at IS NULL
+        // A lost success response may be retried. Preserve the original consent
+        // timestamp while rechecking the recipient and grantor on every attempt.
+        const r = await this.db.prepare(`UPDATE release_shares SET accepted_at=coalesce(accepted_at,?) WHERE id=? AND revoked_at IS NULL AND expires_at>?
             AND EXISTS(SELECT 1 FROM account_emails e JOIN active_credentials c ON c.account_id=e.account_id
                 WHERE e.id=release_shares.recipient_email_id AND e.revoked_at IS NULL AND c.token_digest=? AND c.expires_at>?
                     AND ${INTERACTIVE} AND c.permission='write')

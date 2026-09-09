@@ -1,6 +1,6 @@
 {
   "name": "@allenlabs/memory-saas-foundation",
-  "version": "0.4.0-rc.2",
+  "version": "0.4.0-rc.3",
   "private": true,
   "type": "module",
   "description": "Allen Labs Standard memory SaaS with central SSO, workspaces, REST and MCP",

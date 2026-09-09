@@ -6,6 +6,7 @@ import assert from 'node:assert/strict';
 import { parse } from 'jsonc-parser';
 import { WorkspaceService } from '../src/workspace.ts';
 import { MemoryService } from '../src/memory.ts';
+import { Jobs } from '../src/release/jobs.ts';
 import { applySql } from './apply-sql.mjs';
 
 const config = parse(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'));
@@ -146,5 +147,55 @@ try {
   assert.equal(afterCleanupReady.checks.maintenance, true);
   assert.equal(afterCleanupReady.checks.backgroundJobs, false);
   assert.equal((await db.prepare('PRAGMA foreign_key_check').all()).results.length, 0);
-  console.log('PASS bundled Worker on local workerd/D1: populated migrations 5-7, bounded scheduled cleanup and preserved personal memories/audit/jobs, maintenance heartbeat, FTS backfill/search, atomic idempotency, revisions, trash/restore, independent nested organizations, SSO bootstrap, invitations, keys, MCP, offboarding, readiness and integrity.');
+
+  // Management requests use synthetic recently verified sessions. Confirm native
+  // D1 counts an idempotent acceptance update and never changes its consent time.
+  await db.prepare('UPDATE credentials SET reauthenticated_at=? WHERE id=?').bind(Date.now(), ownerCredential.id).run();
+  const shareResponse = await request(`/v1/spaces/${personalSpace.id}/shares`, {
+    method: 'POST', token: owner.token, data: { email: 'guest@example.org', days: 7 },
+  });
+  assert.equal(shareResponse.status, 201); const shared = await shareResponse.json();
+  const acceptPath = `/v1/shares/${shared.id}/accept`;
+  assert.equal((await request(acceptPath, { method: 'POST', token: guest.token, data: {} })).status, 200);
+  const consent = await db.prepare('SELECT accepted_at FROM release_shares WHERE id=?').bind(shared.id).first();
+  assert.equal((await request(acceptPath, { method: 'POST', token: guest.token, data: {} })).status, 200);
+  assert.equal((await db.prepare('SELECT accepted_at FROM release_shares WHERE id=?').bind(shared.id).first()).accepted_at, consent.accepted_at);
+  assert.equal((await request(acceptPath, { method: 'POST', token: owner.token, data: {} })).status, 403);
+  assert.equal((await request(`/v1/spaces/${personalSpace.id}/shares/${shared.id}`, { method: 'DELETE', token: owner.token })).status, 204);
+  assert.equal((await request(acceptPath, { method: 'POST', token: guest.token, data: {} })).status, 403);
+
+  const scimKeyResponse = await request(`/v1/organizations/${organization.id}/scim-keys`, { method: 'POST', token: owner.token, data: {} });
+  assert.equal(scimKeyResponse.status, 201); const scimKey = await scimKeyResponse.json();
+  const scimPath = `/scim/v2/${organization.id}/Users`;
+  const scimCountResponse = await request(scimPath + '?count=0', { token: scimKey.token });
+  assert.equal(scimCountResponse.status, 200); assert.match(scimCountResponse.headers.get('content-type'), /^application\/scim\+json/);
+  const scimCount = await scimCountResponse.json();
+  assert.equal(scimCount.totalResults, 2); assert.equal(scimCount.itemsPerPage, 0); assert.deepEqual(scimCount.Resources, []);
+  const ownerMember = members.find(member => member.accountId === owner.accountId);
+  const scimDenied = await request(scimPath + '/' + ownerMember.id, {
+    method: 'PATCH', token: scimKey.token, headers: { 'content-type': 'application/scim+json; charset=utf-8' },
+    data: { schemas: ['urn:ietf:params:scim:api:messages:2.0:PatchOp'], Operations: [{ op: 'replace', path: 'active', value: false }] },
+  });
+  assert.equal(scimDenied.status, 403); assert.match(scimDenied.headers.get('content-type'), /^application\/scim\+json/);
+  const scimError = await scimDenied.json();
+  assert.equal(scimError.status, '403'); assert.deepEqual(scimError.schemas, ['urn:ietf:params:scim:api:messages:2.0:Error']);
+  assert.equal((await db.prepare('SELECT revoked_at FROM memberships WHERE id=?').bind(ownerMember.id).first()).revoked_at, null);
+
+  // The production cron keeps provider jobs disabled. Exercise lease SQL against
+  // this native D1 database directly, with no provider or outbound API calls.
+  await db.prepare("INSERT INTO release_jobs(id,space_id,revision,kind,available_at,created_at) VALUES('native-lease-fixture',?,1,'upsert',0,0)").bind(personalSpace.id).run();
+  let leaseAt = Date.now();
+  const leaseJobs = new Jobs({ DB: db, AI: {}, MEMORY_INDEX: {} }, () => leaseAt);
+  const lease = await leaseJobs.claim(); assert.equal(lease.id, 'native-lease-fixture');
+  await leaseJobs.renew(lease); // Same timestamp/value still reports one matched D1 row.
+  leaseAt += 30000; await leaseJobs.renew(lease);
+  const leaseRow = await db.prepare('SELECT lease_until,lease_token FROM release_jobs WHERE id=?').bind(lease.id).first();
+  assert.equal(leaseRow.lease_until, leaseAt + 120000); assert.equal(leaseRow.lease_token, lease.leaseToken);
+  await db.prepare("UPDATE release_jobs SET lease_token='replacement-worker' WHERE id=?").bind(lease.id).run();
+  await assert.rejects(() => leaseJobs.renew(lease), error => error.message === 'lease_lost');
+  assert.equal((await db.prepare('SELECT lease_token FROM release_jobs WHERE id=?').bind(lease.id).first()).lease_token, 'replacement-worker');
+  leaseAt = leaseRow.lease_until + 1;
+  await assert.rejects(() => leaseJobs.renew({ ...lease, leaseToken: 'replacement-worker' }), error => error.message === 'lease_lost');
+  assert.equal((await db.prepare('PRAGMA foreign_key_check').all()).results.length, 0);
+  console.log('PASS bundled Worker on local workerd/D1: populated migrations 5-7, bounded scheduled cleanup and preserved personal memories/audit/jobs, maintenance heartbeat, lease fencing/renewal, retryable share consent, SCIM media type/count/owner protection, FTS backfill/search, atomic idempotency, revisions, trash/restore, independent nested organizations, SSO bootstrap, invitations, keys, MCP, offboarding, readiness and integrity.');
 } finally { parser.close(); await mf.dispose(); }

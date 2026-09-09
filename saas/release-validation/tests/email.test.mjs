@@ -4,6 +4,17 @@ import { fixture, at } from './db.mjs';
 import { Admin } from '../../src/release/admin.ts';
 import { createRelease } from '../../src/release/extension.ts';
 import { IdentityService } from '../../src/identity.ts';
+
+test('a mistyped email proof does not turn a valid session into an authentication failure',async()=>{
+ const {db,token}=await fixture();let delivered;
+ try{
+  const admin=new Admin({DB:db,MAIL_FROM:'memory@allenlabs.org',EMAIL:{send:async message=>{delivered=message;return {messageId:'cf-test'};}}},()=>at);
+  const challenge=await admin.startReauth(token,'e1');
+  await assert.rejects(()=>admin.completeReauth(token,challenge.id,'123456'),e=>e.status===403&&e.code==='reauthentication_failed');
+  const proof=delivered.text.match(/Proof: ([A-Za-z0-9_-]+)/)[1];
+  await admin.completeReauth(token,challenge.id,proof);
+ }finally{db.close();}
+});
 test('Cloudflare EMAIL binding sends proof mail and proof remains session-bound and single-use',async()=>{
  const {db,token,other}=await fixture();let sent;
  try {

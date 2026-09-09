@@ -124,8 +124,11 @@ export class Admin {
         return { id: challengeId, expiresAt: at + 600000 };
     }
     async completeReauth(token: string, challengeId: string, proof: string): Promise<void> {
-        const at = this.clock(), hash = await tokenHash(token), proofHash = await tokenHash(proof);
+        const at = this.clock(), hash = await tokenHash(token);
         await interactive(this.db, token, at);
+        // A mistyped proof is not a failed session credential. Keep it retryable
+        // without making the console discard the valid browser session.
+        const proofHash = await digest(str(proof, 256));
         // UPDATE RETURNING consumes the proof exactly once. The credential update is
         // part of the same batch and only sees that consumption's unique timestamp
         // and a per-attempt marker (token digest is replaced by a random digest).
@@ -305,35 +308,39 @@ export class Admin {
         await this.scimAuthority(bearer, org);
         const url = new URL(request.url);
         if (request.method === 'GET') {
-            const start = integer(Number(url.searchParams.get('startIndex') ?? 1), 1), count = integer(Number(url.searchParams.get('count') ?? 100), 1, 200);
+            const start = membershipId ? 1 : integer(Number(url.searchParams.get('startIndex') ?? 1), 1), count = membershipId ? 1 : integer(Number(url.searchParams.get('count') ?? 100), 0, 200);
             if (url.searchParams.has('filter'))
                 fail(400, 'scim_filter_not_supported');
             const values = await rows<{
                 id: string;
                 userName: string;
-                revokedAt: number | null;
-                emailRevokedAt: number | null;
-            }>(this.db, `SELECT m.id,e.address AS userName,m.revoked_at AS revokedAt,e.revoked_at AS emailRevokedAt FROM memberships m JOIN account_emails e ON e.id=m.email_id WHERE m.organization_id=? ${membershipId ? 'AND m.id=?' : ''} ORDER BY m.id LIMIT ? OFFSET ?`, [org, ...(membershipId ? [id(membershipId)] : []), count, start - 1]);
-            await this.scimAuthority(bearer, org);
-            const resources = values.map(v => ({ schemas: ['urn:ietf:params:scim:schemas:core:2.0:User'], id: v.id, userName: v.userName, active: v.revokedAt === null && v.emailRevokedAt === null }));
+                active: number;
+            }>(this.db, `SELECT m.id,e.address AS userName,EXISTS(SELECT 1 FROM active_memberships live WHERE live.id=m.id AND live.expires_at>?) AS active FROM memberships m JOIN account_emails e ON e.id=m.email_id WHERE m.organization_id=? ${membershipId ? 'AND m.id=?' : ''} ORDER BY m.id LIMIT ? OFFSET ?`, [this.clock(), org, ...(membershipId ? [id(membershipId)] : []), count, start - 1]);
+            const resources = values.map(v => ({ schemas: ['urn:ietf:params:scim:schemas:core:2.0:User'], id: v.id, userName: v.userName, active: Boolean(v.active) }));
             if (membershipId) {
+                await this.scimAuthority(bearer, org);
                 if (!resources[0])
                     fail(404, 'scim_user_not_found');
-                return json(resources[0]);
+                return json(resources[0], 200, { 'content-type': 'application/scim+json; charset=utf-8' });
             }
             const total = await one<{
                 n: number;
             }>(this.db, 'SELECT count(*) AS n FROM memberships WHERE organization_id=?', [org]);
-            return json({ schemas: ['urn:ietf:params:scim:api:messages:2.0:ListResponse'], totalResults: total?.n ?? 0, startIndex: start, itemsPerPage: resources.length, Resources: resources });
+            await this.scimAuthority(bearer, org);
+            return json({ schemas: ['urn:ietf:params:scim:api:messages:2.0:ListResponse'], totalResults: total?.n ?? 0, startIndex: start, itemsPerPage: resources.length, Resources: resources }, 200, { 'content-type': 'application/scim+json; charset=utf-8' });
         }
         if (!membershipId)
             fail(405, 'deprovisioning_only');
         if (request.method === 'PATCH') {
-            const input = await body(request);
+            const input = await body(request, ['schemas', 'Operations'], 65536, ['application/json', 'application/scim+json']);
+            if (input.schemas !== undefined && (!Array.isArray(input.schemas) || input.schemas.length !== 1 || input.schemas[0] !== 'urn:ietf:params:scim:api:messages:2.0:PatchOp'))
+                fail(400, 'unsupported_scim_patch');
             if (!Array.isArray(input.Operations) || input.Operations.length !== 1)
                 fail(400, 'unsupported_scim_patch');
             const op = object(input.Operations[0]);
-            if (String(op.op).toLowerCase() !== 'replace' || !((op.path === 'active' && op.value === false) || (op.path === undefined && object(op.value).active === false)))
+            if (Object.keys(op).some(k => !['op', 'path', 'value'].includes(k)) || String(op.op).toLowerCase() !== 'replace' ||
+                !((typeof op.path === 'string' && op.path.toLowerCase() === 'active' && op.value === false) ||
+                    (op.path === undefined && object(op.value).active === false && Object.keys(object(op.value)).length === 1)))
                 fail(400, 'unsupported_scim_patch');
         }
         else if (request.method !== 'DELETE')

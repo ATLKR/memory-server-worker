@@ -101,3 +101,50 @@ test('management disables unavailable provider actions and explains manual reten
  assert.match(w.document.getElementById('feature-status').textContent,/추출.*사용할 수 없/);
  assert.match(w.document.getElementById('retention-status').textContent,/자동.*꺼져/);
 });
+
+test('management clears prior account drafts and proof fields after the browser account changes',async t=>{
+ let account='alice';
+ const w=await page(t,path=>path==='/v1/workspace'?json({account:{id:account,emails:[{id:'email-'+account,address:account+'@example.org'}]},organizations:[]}):undefined);
+ const form=w.document.getElementById('add-form');
+ form.elements.body.value='PRIVATE ALICE UNSAVED DRAFT';
+ w.document.getElementById('reauth-complete').elements.proof.value='PRIVATE ALICE PROOF';
+ w.document.getElementById('reauth-id').value='alice-challenge';
+ w.document.getElementById('key-form').elements.label.value='Alice private key label';
+ account='bob';w.document.getElementById('reload').click();await tick();await tick();await tick();
+ assert.equal(form.elements.body.value,'');
+ assert.equal(w.document.getElementById('reauth-complete').elements.proof.value,'');
+ assert.equal(w.document.getElementById('reauth-id').value,'');
+ assert.equal(w.document.getElementById('key-form').elements.label.value,'');
+ assert.equal(w.document.getElementById('email-select').value,'email-bob');
+ assert.equal(w.document.getElementById('status').textContent,'완료');
+});
+
+test('management retains typing made while its workspace refresh is pending',async t=>{
+ let refresh=false;const late=deferred();
+ const w=await page(t,path=>refresh&&path==='/v1/workspace'?late.promise:undefined);
+ const form=w.document.getElementById('add-form');form.elements.body.value='original draft';
+ refresh=true;w.document.getElementById('reload').click();await tick();
+ form.elements.body.value='new text typed during refresh';
+ late.resolve(json({account:{id:'alice',emails:[]},organizations:[]}));await tick();await tick();
+ assert.equal(form.elements.body.value,'new text typed during refresh');
+});
+
+test('management ignores an older ingest refresh after a newer refresh finishes',async t=>{
+ let reads=0;const old=deferred();
+ const w=await page(t,path=>path==='/v1/spaces/s1/ingests'?(++reads===1?old.promise:json({results:[{id:'current-ingest',state:'queued'}]})):undefined);
+ w.document.getElementById('ingests').click();await tick();
+ w.document.getElementById('ingests').click();await tick();await tick();
+ old.resolve(json({results:[{id:'stale-ingest',state:'queued'}]}));await tick();await tick();
+ assert.match(w.document.getElementById('proposals').textContent,/current-ingest/);
+ assert.doesNotMatch(w.document.getElementById('proposals').textContent,/stale-ingest/);
+});
+
+test('management ignores an older invitation refresh after a newer refresh finishes',async t=>{
+ let reads=0;const old=deferred();
+ const w=await page(t,path=>path==='/v1/shares'?(++reads===1?old.promise:json({results:[{id:'current-invite'}]})):undefined);
+ w.document.getElementById('invitations').click();await tick();
+ w.document.getElementById('invitations').click();await tick();await tick();
+ old.resolve(json({results:[{id:'stale-invite'}]}));await tick();await tick();
+ assert.match(w.document.getElementById('shares').textContent,/current-invite/);
+ assert.doesNotMatch(w.document.getElementById('shares').textContent,/stale-invite/);
+});
