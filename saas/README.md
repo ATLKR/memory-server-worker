@@ -1,11 +1,9 @@
 # Memory by Allen Labs — hosted pilot
 
-The source includes **0.4.0-rc.2** maintenance and connection fixes on top of the
-integrated release kit. This source update is not a deployment or CI result. See the maintained
-[release integration record](docs/release/INTEGRATION.md) for current features,
-verification, activation defaults and remaining work. The latest recorded pilot
-deployment there is 0.4.0-rc.1. The sections below retain the historical 0.3.0
-baseline; the integration record supersedes its feature limits.
+**0.4.0-rc.2** is deployed at [memory.allenlabs.org](https://memory.allenlabs.org).
+Real-account SSO now reaches the authenticated management console. The maintained
+[release integration record](docs/release/INTEGRATION.md) records the current
+features, verification and remaining work. The 0.3.0 notes below are historical.
 
 The candidate adds atomic retry receipts, capability/Space-scoped PATs, FTS5,
 trash/restore, exports, explicit sharing, pooled quotas and a `/manage` console.
@@ -16,15 +14,14 @@ adapters and tests but require live provider configuration. A five-minute cron
 performs bounded expiry cleanup; `BACKGROUND_JOBS_ENABLED=false` keeps provider
 processing off and `AUTO_ERASURE_ENABLED=false` preserves retained memories.
 Unavailable ingestion, index rebuild and billing controls are disabled in the UI.
-The seventh, index-only migration supports cleanup; deployed migrations 1–6 retain
+The seventh, index-only migration supports cleanup; all seven deployed migrations retain
 their exact bytes. Run `npm run check`, `npm run test:d1` and
 `npm run eval:lexical` to verify the candidate. SSO templates now request their
 intended identity/read/write/delete scopes explicitly. Callback failure codes
 identify a fixed processing stage without exposing credentials. A Workers-only
 login failure was reproduced and fixed: unsupported `redirect: 'error'` prevented
 token/JWKS requests from being sent. Manual redirects with explicit 3xx rejection
-now pass the actual workerd PKCE/token/JWKS/session tests; live acceptance follows
-deployment.
+pass the actual workerd PKCE/token/JWKS/session tests and live SSO acceptance.
 
 The `saas/` module provides a Korean browser console, central sign-in, personal/team Spaces, versioned memory, organization administration, REST, and MCP on a Cloudflare Worker with dedicated D1 storage. The display name is provisional and configurable. The existing personal Worker, UI, plugins, and database remain separate.
 
@@ -32,7 +29,11 @@ Product origin: [memory.allenlabs.org](https://memory.allenlabs.org). Central au
 
 The pilot's **0.3.0** release is deployed at [memory.allenlabs.org](https://memory.allenlabs.org) as Worker version `16f1ae09-9280-4cff-942f-4a8b90644367`. All five remote migrations are applied to dedicated D1 database `a186c3b4-9092-4619-97b0-cda5b99d9b5d`. The central SSO origin/resource allowlists are configured on the existing authentication platform, and its durable source/configuration change has passing upstream CI. This is not a GA-readiness claim. Operational credentials are restricted to the approved personal Cloudflare account. Never copy credentials into this repository or logs.
 
-A complete real-user SSO login has **not** passed. The latest attempt recorded approved provider consent and an issued but unconsumed authorization code. The controlled in-app browser and Chrome reported `ERR_BLOCKED_BY_CLIENT` for `/auth/callback`, including requests with no parameters or synthetic credentials. This observed client-side request block does not establish a server-side SSO defect. An ordinary Chrome test outside the controlled browser session is pending; no security protections were disabled. The 0.3.0 public HTTP smoke check passed on 2026-09-08 at 09:22 UTC: 200 for the home page, health, and assets, 401 for protected endpoints, and a 302 login redirect to the correct issuer.
+Real-account SSO was verified on 2026-09-09 after the rc.2 fix: approval returned
+to Memory and loaded the authenticated personal Space and verified email. Earlier
+controlled-browser failures are superseded by this result. No browser or provider
+security protection was disabled. Live email receipt and PAT issuance after email
+proof remain to be verified.
 
 ## Run and verify
 

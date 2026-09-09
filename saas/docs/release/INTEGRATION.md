@@ -17,7 +17,7 @@ This update configures a five-minute cron for bounded expiry cleanup. The new
 index-only `0007_maintenance-schema.sql` supports expired ingest payload, export,
 domain/reauthentication challenge and mail-budget cleanup. Each category is
 limited to 100 rows per invocation; request-time expiry checks remain authoritative
-while a backlog is cleared. Deployed migrations 1–6 keep their exact bytes.
+while a backlog is cleared. All seven deployed migrations now have frozen byte hashes.
 
 `BACKGROUND_JOBS_ENABLED=false` separates this cleanup from AI, vector, ingestion
 and billing processing. `AUTO_ERASURE_ENABLED=false` continues to preserve retained
@@ -36,7 +36,7 @@ parameters. Actual workerd reproduced the failure before any outbound token
 request: `redirect: 'error'` is unsupported. Token, JWKS and provider HTTP requests
 now use manual redirects and explicitly reject 3xx. Native runtime tests verify
 PKCE exchange, signature validation, session issuance and refusal to forward
-credentials to a redirect target. Live login acceptance follows deployment.
+credentials to a redirect target. Real-account login passed after deployment.
 
 The legacy root dependency tree also uses patched sharp 0.35.4 and Vitest 4.1.11.
 Its local full audit reports zero vulnerabilities, and the existing 208 tests,
@@ -45,9 +45,26 @@ checks pass. Runtime dependencies and the legacy service version are unchanged.
 See the [sharp advisory](https://github.com/lovell/sharp/security/advisories/GHSA-rgj7-g3m4-5g8c)
 and [Vitest advisory](https://github.com/vitest-dev/vitest/security/advisories/GHSA-82fw-gwwq-j7x9).
 
-This section records source changes and the stated local checks. It does not
-establish rc.2 deployment, migration application, hosted CI completion or real-user
-provider acceptance.
+## Recorded 0.4.0-rc.2 deployment: 2026-09-09
+
+Runtime commit `34d55c46977dec357369b710d39547d77f1cec71` is deployed as Worker
+version `2caf8509-de0e-48af-9e5a-10d60b3c6f6b`. The index-only migration 7 is
+applied to the existing dedicated D1; all seven migration hashes are frozen.
+Migration 7 SHA-256: `f31ebfb8bd1e811e9c2582cc1e08433444d99b22e61775d66469f94dbbb1fec9`.
+The pre-migration-7 bookmark is
+`0000000f-00000000-000050e1-e7d77f3a4c41f4ea234df1659abff6e8`.
+
+Real-account browser acceptance passed: existing central SSO, approval, token
+exchange and signature verification completed, then the authenticated management
+console loaded the personal Space and verified email. No security protections
+were disabled. Mail delivery and real-client PAT/SSO connection acceptance remain
+separate checks.
+
+Public HTTPS checks passed: rc.2 liveness and management return 200; unauthenticated
+REST/MCP return 401; discovery uses the central issuer. Cleanup cron is deployed
+every five minutes with both provider-processing and automatic-erasure switches
+false. `/ready` remains 503 for the inactive provider and launch requirements.
+All four workflows passed for the runtime commit: SaaS push/PR, legacy CI, CodeQL.
 
 ## Recorded 0.4.0-rc.1 deployment: 2026-09-09
 

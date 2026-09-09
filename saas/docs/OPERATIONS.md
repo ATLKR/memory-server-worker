@@ -1,6 +1,6 @@
 # Operations runbook
 
-The deployment record below describes 0.3.0. The latest recorded 0.4.0-rc.1
+The deployment record below describes 0.3.0. The latest recorded 0.4.0-rc.2
 deployment and the 0.4.0-rc.2 source changes are documented in
 [release/INTEGRATION.md](release/INTEGRATION.md). Cloudflare Email
 proof delivery is covered in [release/EMAIL.md](release/EMAIL.md). Treat these

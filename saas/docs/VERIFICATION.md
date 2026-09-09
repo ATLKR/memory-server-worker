@@ -1,6 +1,6 @@
 # Product verification — 2026-09-08
 
-This is the historical **0.3.0** deployment record. The **0.4.0-rc.1**
+This is the historical **0.3.0** deployment record. The **0.4.0-rc.2**
 integration added release suites and a populated sixth-migration workerd/D1
 test. Current evidence and activation limits are in
 [release/INTEGRATION.md](release/INTEGRATION.md). Local tests do not establish live
