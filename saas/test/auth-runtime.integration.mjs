@@ -9,16 +9,18 @@ import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 
 const origin = 'https://memory.example.test', issuer = 'https://auth.example.test';
-const now = 1788868800000;
 const session = 'synthetic-runtime-session-' + 'a'.repeat(40);
 const settings = { origin, issuer, authorizationEndpoint: issuer + '/oauth/authorize',
   tokenEndpoint: issuer + '/oauth/token', jwksUri: issuer + '/.well-known/jwks.json', clientId: 'runtime-browser-client' };
 const { privateKey, publicKey } = await generateKeyPair('RS256');
 const jwk = { ...await exportJWK(publicKey), kid: 'runtime-key', alg: 'RS256', use: 'sig' };
+// JWT NumericDates and the Worker's default Date.now clock must share the real
+// wall clock with native D1's execution-time expiry predicates.
+const issuedAt = Math.floor(Date.now() / 1000);
 const accessToken = await new SignJWT({ token_use: 'access', client_id: settings.clientId, azp: settings.clientId,
   scope: 'openid profile email memory:read memory:write memory:delete', email: 'synthetic@example.test', emailVerified: true })
   .setProtectedHeader({ alg: 'RS256', typ: 'at+jwt', kid: jwk.kid }).setIssuer(issuer).setAudience(origin)
-  .setSubject('synthetic-runtime-user').setJti('synthetic-runtime-jti').setIssuedAt(now / 1000).setExpirationTime(now / 1000 + 900).sign(privateKey);
+  .setSubject('synthetic-runtime-user').setJti('synthetic-runtime-jti').setIssuedAt(issuedAt).setExpirationTime(issuedAt + 900).sign(privateKey);
 const { outputFiles } = await build({ stdin: {
   contents: `import {createAuthController} from './src/auth.ts';
     import {remoteJson} from './src/release/util.ts';
@@ -30,7 +32,7 @@ const { outputFiles } = await build({ stdin: {
       }
       return await createAuthController(env.DB,${JSON.stringify(settings)},async principal=>({
         token:${JSON.stringify(session)},accountId:'synthetic-account',expiresAt:principal.expiresAt
-      }),{clock:()=>${now}}).handle(request)??new Response(null,{status:404});
+      })).handle(request)??new Response(null,{status:404});
     }}`,
   resolveDir: fileURLToPath(new URL('../', import.meta.url)), sourcefile: 'auth-runtime-test-worker.mjs', loader: 'js',
 }, bundle: true, format: 'esm', platform: 'browser', target: 'es2022', write: false });

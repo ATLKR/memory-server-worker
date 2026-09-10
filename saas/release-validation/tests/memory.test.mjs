@@ -4,6 +4,7 @@ import {fixture,at,DB} from './db.mjs';
 import {DatabaseSync} from 'node:sqlite';
 import {readFileSync,readdirSync} from 'node:fs';
 import {WorkspaceService} from '../../src/workspace.ts';
+import {sqliteClock} from '../../dev/sqlite-clock.mjs';
 let MemoryStore;try{({MemoryStore}=await import('../../src/release/memory.ts'));}catch{}
 const input={body:'사용자 선호: 짧은 설명',provenance:{originKind:'user'}};
 test('memory implementation exists',()=>assert.ok(MemoryStore,'MemoryStore is missing'));
@@ -25,7 +26,7 @@ for(const scenario of ['idempotent','conflict','isolation','scope','revision','q
 });
 
 async function productionFixture() {
- const db=Object.create(DB.prototype);db.raw=new DatabaseSync(':memory:');
+ const db=Object.create(DB.prototype);db.raw=new DatabaseSync(':memory:');db.setClock=sqliteClock(db.raw,()=>at);
  for(const file of readdirSync(new URL('../../migrations/',import.meta.url)).filter(name=>/^000[1-6]_.*\.sql$/.test(name)).sort())
   db.raw.exec(readFileSync(new URL('../../migrations/'+file,import.meta.url),'utf8'));
  const workspace=new WorkspaceService(db,()=>at);
@@ -71,4 +72,24 @@ for(const action of ['create','update','restore']) test('committed '+action+' re
   db.raw.exec("UPDATE credentials SET revoked_at=1 WHERE id='session:alice'");
   await assert.rejects(replay,e=>e.status===403);
  } finally {db.close();}
+});
+
+for(const race of [false,true])test('superseding an already replaced memory returns a conflict'+(race?' during commit':''),async()=>{
+ const {db,token}=await fixture();
+ try {
+  const store=new MemoryStore(db,()=>at),original=await store.create(token,'s1',{body:'Original fact'},'original');
+  const replacement={body:'Replacement fact',supersedesMemoryId:original.id};let winner;
+  if(race){
+   const runBatch=db.batch.bind(db);
+   db.batch=async statements=>{db.batch=runBatch;winner=await store.create(token,'s1',replacement,'winner');return runBatch(statements);};
+  }else winner=await store.create(token,'s1',replacement,'winner');
+  await assert.rejects(()=>store.create(token,'s1',{body:'Competing fact',supersedesMemoryId:original.id},'contender'),error=>error.status===409&&error.code==='revision_conflict');
+  assert.deepEqual((await store.list(token,'s1')).results.map(row=>row.id),[winner.id]);
+  assert.equal(db.raw.prepare('SELECT count(*) n FROM release_operations').get().n,2);
+  assert.equal(db.raw.prepare('SELECT sum(units) n FROM release_usage_counters').get().n,2);
+  const replay=await store.create(token,'s1',replacement,'winner');assert.equal(replay.id,winner.id);assert.equal(replay.replayed,true);assert.equal(replay.committedRevision,1);
+  await assert.rejects(()=>store.create(token,'s1',{...replacement,body:'Different fact'},'winner'),error=>error.status===409&&error.code==='idempotency_conflict');
+  await store.remove(token,'s1',winner.id,1,'delete-winner');
+  const receipt=await store.create(token,'s1',replacement,'winner');assert.equal(receipt.representation,'receipt');assert.equal(receipt.id,winner.id);assert.equal(receipt.replayed,true);
+ }finally{db.close();}
 });

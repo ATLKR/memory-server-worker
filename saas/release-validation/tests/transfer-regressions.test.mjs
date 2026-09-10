@@ -31,7 +31,7 @@ for(const change of ['membership','email','account','organization','role','expir
   };
   f.db.raw.prepare(mutations[change]).run(at);
   await denied(()=>f.memory.get(f.recipient.token,'so',record.id));
-  assert.deepEqual(await f.transfer.invitations(f.recipient.token),[]);
+  assert.deepEqual((await f.transfer.invitations(f.recipient.token)).results,[]);
   await denied(()=>f.transfer.accept(f.recipient.token,pending.id));
 });
 
@@ -53,7 +53,7 @@ for(const space of ['s1','so'])test('grantor session expiry and logout preserve 
   const f=await setup(t),record=await f.memory.create(f.token,space,{body:'Durable grant'},'record');
   const share=await f.transfer.share(f.token,space,'recipient@corp.example');
   f.db.raw.prepare("UPDATE credentials SET expires_at=?,revoked_at=? WHERE id='session:alice'").run(at,at);
-  const invitations=await f.transfer.invitations(f.recipient.token);assert.equal(invitations[0].id,share.id);
+  const invitations=await f.transfer.invitations(f.recipient.token);assert.equal(invitations.results[0].id,share.id);
   await f.transfer.accept(f.recipient.token,share.id);
   assert.equal((await f.memory.get(f.recipient.token,space,record.id)).body,'Durable grant');
 });

@@ -1,5 +1,7 @@
+import { sqlNow } from './sql-clock.ts';
 import { digestToken } from './identity.ts';
 import type { IdentityDatabase, SqlValue } from './identity.ts';
+import type { ToolAuthority } from './mcp-auth.ts';
 
 export type Space = {
   id: string;
@@ -60,14 +62,14 @@ async function tokenDigest(token: string): Promise<string> {
 // clock-independent; credential and membership expiry is checked in SQL here.
 // The aliases s (Space) and c (credential) are local to the querying statement.
 function authority(write: boolean): string {
-  return `c.token_digest=? AND c.expires_at>? AND c.membership_expires_at>?
+  return `c.token_digest=? AND c.expires_at>${sqlNow()} AND c.membership_expires_at>${sqlNow()}
     ${write ? "AND c.permission='write'" : ''}
     AND s.security_mode='managed' AND (
       (s.organization_id IS NULL AND s.account_id=c.account_id
         AND c.kind IN ('session','personal_key') AND c.membership_id IS NULL)
       OR (s.organization_id IS NOT NULL AND EXISTS (
         SELECT 1 FROM active_memberships m
-        WHERE m.account_id=c.account_id AND m.organization_id=s.organization_id AND m.expires_at>?
+        WHERE m.account_id=c.account_id AND m.organization_id=s.organization_id AND m.expires_at>${sqlNow()}
           AND ((c.kind='session' AND c.membership_id IS NULL) OR (c.kind='api_key' AND c.membership_id=m.id))
           ${write ? "AND m.role IN ('owner','admin')" : ''}
       )))`;
@@ -75,11 +77,31 @@ function authority(write: boolean): string {
 const memoryColumns = `r.id,r.space_id AS spaceId,r.body,r.source,r.revision,
   r.created_at AS createdAt,r.updated_at AS updatedAt`;
 const spaceColumns = `s.id,s.name,s.organization_id AS organizationId,s.security_mode AS securityMode`;
+type ExpiryFacts = { credentialExpiresAt: number; grantExpiresAt: number };
+function grantExpiry(write = false): string {
+  return `CASE WHEN s.organization_id IS NULL AND s.account_id=c.account_id THEN 9007199254740991 ELSE
+      coalesce((SELECT MAX(m.expires_at) FROM active_memberships m WHERE m.account_id=c.account_id
+        AND m.organization_id=s.organization_id
+        AND ((c.kind='session' AND c.membership_id IS NULL) OR (c.kind='api_key' AND c.membership_id=m.id))
+        ${write ? "AND m.role IN ('owner','admin')" : ''}),0) END`;
+}
+function expiryColumns(write = false): string {
+  return `min(c.expires_at,c.membership_expires_at) AS credentialExpiresAt,${grantExpiry(write)} AS grantExpiresAt`;
+}
+export const memoryResponseAuthority: ToolAuthority = {
+  sql: action => authority(action !== 'read'), values: (hash, at) => [hash, at, at, at],
+  expiry: action => grantExpiry(action !== 'read'), liveMemory: 'r.deleted_at IS NULL',
+};
+function checked<T>(row: T & ExpiryFacts, at: number): T {
+  if (Math.min(row.credentialExpiresAt, row.grantExpiresAt) <= at) throw new MemoryDenied();
+  const { credentialExpiresAt, grantExpiresAt, ...value } = row;
+  return value as T;
+}
 
 /** Canonical managed memory storage. Authorization is never cached. */
 export class MemoryService {
-  private readonly db: IdentityDatabase;
-  private readonly clock: () => number;
+  readonly db: IdentityDatabase;
+  readonly clock: () => number;
   constructor(db: IdentityDatabase, clock: () => number = Date.now) {
     this.db = db;
     this.clock = clock;
@@ -100,12 +122,12 @@ export class MemoryService {
   private async readMemory(hash: string, spaceId: string, memoryId: string, write = false): Promise<Memory> {
     const at = this.now();
     const row = await this.db.withSession('first-primary').prepare(`
-      SELECT ${memoryColumns} FROM memories r JOIN spaces s ON s.id=r.space_id
+      SELECT ${memoryColumns},${expiryColumns(write)} FROM memories r JOIN spaces s ON s.id=r.space_id
       CROSS JOIN active_credentials c
       WHERE r.id=? AND s.id=? AND r.deleted_at IS NULL AND ${authority(write)}`)
-      .bind(memoryId, spaceId, hash, at, at, at).first<Memory>();
+      .bind(memoryId, spaceId, hash, at, at, at).first<Memory & ExpiryFacts>();
     if (!row) throw new MemoryDenied();
-    return row;
+    return checked<Memory>(row, this.now());
   }
   private async conflict(hash: string, spaceId: string, memoryId: string, expectedRevision: number): Promise<never> {
     // Read permission alone is insufficient to disclose a write conflict: a
@@ -136,10 +158,10 @@ export class MemoryService {
     if (!inserted) throw new MemoryDenied();
     const fresh = this.now();
     const row = await this.db.withSession('first-primary').prepare(`
-      SELECT ${spaceColumns} FROM spaces s CROSS JOIN active_credentials c
-      WHERE s.id=? AND ${authority(false)}`).bind(id, hash, fresh, fresh, fresh).first<Space>();
+      SELECT ${spaceColumns},${expiryColumns()} FROM spaces s CROSS JOIN active_credentials c
+      WHERE s.id=? AND ${authority(false)}`).bind(id, hash, fresh, fresh, fresh).first<Space & ExpiryFacts>();
     if (!row) throw new MemoryDenied();
-    return row;
+    return checked<Space>(row, this.now());
   }
 
   async create(token: string, spaceId: string, input: { body: string; source?: string | null }): Promise<Memory> {
@@ -169,12 +191,20 @@ export class MemoryService {
     const hash = await tokenDigest(token);
     const at = this.now();
     const rows = await this.db.withSession('first-primary').prepare(`
-      SELECT ${spaceColumns} FROM active_credentials c LEFT JOIN spaces s ON ${authority(false)}
-      WHERE c.token_digest=? AND c.expires_at>? AND c.membership_expires_at>?
+      SELECT ${spaceColumns},${expiryColumns()} FROM active_credentials c LEFT JOIN spaces s ON s.id IN (
+        SELECT owned.id FROM spaces owned WHERE owned.account_id=c.account_id AND c.kind IN ('session','personal_key')
+        UNION SELECT managed.id FROM account_emails claim JOIN active_memberships member
+          ON member.email_id=claim.id AND member.account_id=claim.account_id
+          JOIN spaces managed ON managed.organization_id=member.organization_id
+          WHERE claim.account_id=c.account_id AND ((c.kind='session' AND c.membership_id IS NULL)
+            OR (c.kind='api_key' AND c.membership_id=member.id))
+      ) AND ${authority(false)}
+      WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND c.membership_expires_at>${sqlNow()}
       ORDER BY s.created_at,s.id LIMIT 100`)
-      .bind(hash, at, at, at, hash, at, at).all<Space & { id: string | null }>();
-    if (!rows.success || !rows.results.length) throw new MemoryDenied();
-    return rows.results.filter(row => row.id !== null);
+      .bind(hash, at, at, at, hash, at, at).all<Space & ExpiryFacts & { id: string | null }>();
+    const checkedAt = this.now();
+    if (!rows.success || !rows.results.length || rows.results[0]!.credentialExpiresAt <= checkedAt) throw new MemoryDenied();
+    return rows.results.filter(row => row.id !== null && row.grantExpiresAt > checkedAt).map(row => checked<Space>(row, checkedAt));
   }
 
   async update(token: string, spaceId: string, memoryId: string, input: { body: string; source?: string | null; expectedRevision: number }): Promise<Memory> {
@@ -235,15 +265,16 @@ export class MemoryService {
     const hash = await tokenDigest(token);
     const at = this.now();
     const rows = await this.db.withSession('first-primary').prepare(`
-      SELECT ${memoryColumns} FROM spaces s CROSS JOIN active_credentials c
+      SELECT ${memoryColumns},${expiryColumns()} FROM spaces s CROSS JOIN active_credentials c
       LEFT JOIN memories r ON r.space_id=s.id AND r.deleted_at IS NULL
         AND (r.updated_at<? OR (r.updated_at=? AND r.id>?))
       WHERE s.id=? AND ${authority(false)}
       ORDER BY r.updated_at DESC,r.id ASC LIMIT ?`)
       .bind(before, before, afterId, spaceId, hash, at, at, at, limit + 1)
-      .all<Memory & { id: string | null }>();
+      .all<Memory & ExpiryFacts & { id: string | null }>();
     if (!rows.success || !rows.results.length) throw new MemoryDenied();
-    const present = rows.results.filter(row => row.id !== null);
+    const checkedAt = this.now();
+    const present = rows.results.map(row => checked<Memory>(row, checkedAt)).filter(row => row.id !== null);
     const results = present.slice(0, limit);
     const last = results.at(-1);
     return { results, nextCursor: present.length > limit && last ? btoa(JSON.stringify([last.updatedAt, last.id])) : null };
@@ -261,14 +292,15 @@ export class MemoryService {
     // no hits; zero rows always means denial. No separate stale auth pre-read.
     const rows = await this.db.withSession('first-primary').prepare(`
       SELECT r.id,s.id AS spaceId,
-        substr(r.body,MAX(1,instr(lower(r.body),lower(?))-100),500) AS snippet,r.revision,r.source
+        substr(r.body,MAX(1,instr(lower(r.body),lower(?))-100),500) AS snippet,r.revision,r.source,${expiryColumns()}
       FROM spaces s CROSS JOIN active_credentials c LEFT JOIN memories r
         ON r.space_id=s.id AND r.deleted_at IS NULL AND instr(lower(r.body),lower(?))>0
       WHERE s.id=? AND ${authority(false)} ORDER BY r.updated_at DESC,r.id ASC LIMIT ?`)
       .bind(input.query, input.query, spaceId, hash, at, at, at, limit)
-      .all<MemoryHit & { id: string | null; snippet: string | null }>();
+      .all<MemoryHit & ExpiryFacts & { id: string | null; snippet: string | null }>();
     if (!rows.success || rows.results.length === 0) throw new MemoryDenied();
-    return rows.results.flatMap(row => {
+    const checkedAt = this.now();
+    return rows.results.map(row => checked<MemoryHit>(row, checkedAt)).flatMap(row => {
       if (row.id === null || row.snippet === null) return [];
       // Keep the wire representation bounded even for astral Unicode symbols,
       // without cutting a surrogate pair at the truncation boundary.

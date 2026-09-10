@@ -1,6 +1,6 @@
 # Memory의 D1 10GB 제한과 확장 경로
 
-확인일: 2026-09-08. 공식 Cloudflare 문서와 현재 `saas/` 소스의 읽기 전용 검토이며, 구현·배포·계정 한도 변경은 하지 않았다.
+플랫폼 한도 확인일: 2026-09-08. 소스 설명 갱신일: 2026-09-09, PR의 rc.4 후보 기준. 이 문서는 확장 설계 검토이며, 물리 샤딩·R2 이관·계정 한도 변경은 구현하거나 적용하지 않았다. 운영 배포와 PR 소스의 구분은 [통합 기록](release/INTEGRATION.md)을 따른다.
 
 **서비스 전체가 10GB에서 멈출 필요는 없다. 다만 D1 데이터베이스 한 개의 10GB 제한은 상향할 수 없다.** 여러 DB에 데이터를 나누고, 오래된 본문은 R2로 옮기는 방식이 가능하다. 이는 물리적 한도와 비용이 있는 수평 확장이며, 무제한 저장을 보장한다는 뜻은 아니다. [D1 공식 한도](https://developers.cloudflare.com/d1/platform/limits/)
 
@@ -23,10 +23,11 @@ Paid 일반 Worker 수는 계정당 500개이며, 문서는 더 큰 규모에 Wo
 
 ## 현재 코드가 분할에 요구하는 것
 
-- `saas/src/memory.ts:62`의 권한 SQL은 `spaces`, `active_credentials`, `active_memberships`를 함께 확인한다. 읽기는 primary에서 시작하고, 변경은 같은 SQL 안에서 현재 권한을 다시 검사한다. 현재 `MemoryService`는 DB 하나를 받는다.
-- `saas/product-schema.sql:6`은 `(issuer, subject)`를 안정적인 계정 ID에 연결한다. 세션·이메일·멤버십·API 키의 관계 및 회수 처리는 중앙 관리 대상이다. 서비스 이름·도메인·조직 위치가 바뀌어도 이 식별자는 바꾸면 안 된다.
-- `saas/memory-schema.sql:4`부터 Space·Memory·이력·감사 기록이 계정, 조직, credential을 같은 DB의 외래 키로 참조한다. `:100`의 트리거는 수정 전 본문 전체를 이력에 복사한다. 이력은 현재 수정·삭제가 금지된다.
-- `saas/src/memory.ts:262` 검색은 현재 본문에 `instr(lower(body), lower(query))`를 적용한다. 전문검색 인덱스가 아니며, 본문을 R2로 옮기는 것만으로 현재 검색이 유지되지는 않는다.
+- [릴리스 권한 SQL](../src/release/authority.ts)은 Space, 현재 credential, 명시적 멤버십·공유를 함께 확인한다. [MemoryStore](../src/release/memory.ts)는 DB 하나를 받으며, 변경 SQL과 최종 본문 공개 조회에서 현재 권한을 검사한다. 최종 조회는 본문의 리비전·삭제 상태도 확인한다.
+- [계정 스키마](../product-schema.sql)는 `(issuer, subject)`를 안정적인 계정 ID에 연결한다. 세션·이메일·멤버십·API 키의 관계 및 회수 처리는 중앙 관리 대상이다. 서비스 이름·도메인·조직 위치가 바뀌어도 이 식별자는 바꾸면 안 된다.
+- [기반 메모리 스키마](../memory-schema.sql)와 [릴리스 스키마](../release-schema.sql)의 Space·Memory·이력·감사 기록은 계정, 조직, credential을 같은 DB의 외래 키로 참조한다. 변경 전 본문은 이력에 보관된다. 일반 변경으로 이력을 수정·삭제할 수 없으며, 릴리스의 명시적 영구 삭제 절차는 허가된 본문·이력 제거와 삭제 기록을 함께 처리한다.
+- [현재 릴리스 검색](../src/release/search.ts)은 Space별 FTS5 `unicode61` 토큰 접두어 검색이다. `alphabet`에 `alph`는 일치하지만 `pha`는 일치하지 않는다. 예전 foundation의 `instr(lower(body), lower(query))` 부분문자열 검색은 현재 릴리스의 검색 계약이 아니다. AI와 Vectorize가 모두 연결되면 의미 검색 후보도 결합하며, 반환 본문은 D1의 현재 권한·리비전·삭제 상태를 검사한다.
+- [마이그레이션 14의 검색 인덱스](../tenant-queue-schema.sql)는 지원 토큰 길이 1–31의 접두어와 Space 식별 항목을 색인한다. FTS가 보유하는 본문과 접두어 인덱스도 D1 물리 용량을 차지한다. 본문을 R2로 옮기는 것만으로 현재 검색이 유지되거나 인덱스 용량이 사라지지는 않는다. 재구축 여유와 인덱스 증가량은 [운영 가이드](release/OPERATIONS.ko.md)를 참고한다.
 
 따라서 DB 바인딩만 추가해서는 분할이 끝나지 않는다. D1의 `batch()`는 한 데이터베이스의 SQL 트랜잭션이며, 중앙 DB와 다른 DB/R2를 묶는 원자적 커밋 보장으로 해석할 수 없다. 분산 외래 키와 여러 저장소 사이의 일관성은 별도 설계가 필요하다. [D1 Database API](https://developers.cloudflare.com/d1/worker-api/d1-database/#batch)
 
@@ -68,7 +69,7 @@ R2 공식 한도에서 버킷 저장량과 객체 수는 Unlimited이다. 그러
 
 R2의 객체 쓰기·삭제는 강한 일관성을 제공하지만, 이것이 D1 변경까지 원자적으로 묶지는 않는다. D1 outbox → 불변 객체 업로드 → 무결성 검증 → 보관 완료 표시 → 승인된 보존 절차 순서로 처리하고 재시도·고아 객체 청소를 설계한다. [R2 Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/)
 
-현재 본문까지 R2에 옮길 때는 별도 검색 인덱스가 필요하다. R2 기본 API의 목록 조회는 키·prefix 중심이며 본문 부분문자열 검색을 대신하지 않는다. D1에 검색용 전체 텍스트를 그대로 복제하면 그 텍스트는 계속 D1 용량을 차지한다. 인덱스 종류, 갱신 지연, 삭제 반영, 결과별 최신 권한 확인을 함께 설계해야 한다. [R2 Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#r2listoptions)
+현재 본문까지 R2에 옮길 때는 검색 인덱스를 유지하거나 대체해야 한다. R2 기본 API의 목록 조회는 객체 키·prefix 중심이며 현재의 본문 토큰 검색을 대신하지 않는다. D1에 검색용 전체 텍스트를 그대로 복제하면 그 텍스트는 계속 D1 용량을 차지한다. 인덱스 종류, 갱신 지연, 삭제 반영, 결과별 최신 권한 확인을 함께 설계해야 한다. [R2 Workers API](https://developers.cloudflare.com/r2/api/workers/workers-api-reference/#r2listoptions)
 
 R2 SQL도 존재하지만 현재는 R2 Data Catalog의 Apache Iceberg 테이블을 조회하는 분석용 open beta이다. 일반 R2 객체의 현재 검색 API를 그대로 대체하는 기능으로 간주하지 않는다. [R2 SQL](https://developers.cloudflare.com/r2-sql/)
 

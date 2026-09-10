@@ -1,6 +1,7 @@
 import { DatabaseSync } from 'node:sqlite';
 import { readFileSync } from 'node:fs';
 import { IdentityService, digestToken } from '../src/identity.ts';
+import { sqliteClock } from '../dev/sqlite-clock.mjs';
 
 export const NOW = 1_700_000_000_000;
 export const tokens = Object.freeze({
@@ -11,8 +12,9 @@ export const tokens = Object.freeze({
 });
 
 /** Real SQLite adapter for the same small D1 contract consumed by services. */
-export function createDatabase({ memory = false, workspace = false } = {}) {
+export function createDatabase({ memory = false, workspace = false, clock = () => NOW } = {}) {
   const raw = new DatabaseSync(':memory:');
+  const setClock = sqliteClock(raw, clock);
   raw.exec('PRAGMA foreign_keys=ON; PRAGMA recursive_triggers=ON;');
   raw.exec(readFileSync(new URL('../schema.sql', import.meta.url), 'utf8'));
   if (memory || workspace) raw.exec(readFileSync(new URL('../memory-schema.sql', import.meta.url), 'utf8'));
@@ -20,6 +22,7 @@ export function createDatabase({ memory = false, workspace = false } = {}) {
     raw.exec(readFileSync(new URL(`../${schema}`, import.meta.url), 'utf8'));
   const primaryReads = [];
   const db = {
+    setClock,
     prepare(sql) {
       const statement = raw.prepare(sql);
       let values = [];
@@ -39,7 +42,7 @@ export function createDatabase({ memory = false, workspace = false } = {}) {
       return { prepare: sql => db.prepare(sql) };
     },
   };
-  return { raw, db, primaryReads, close: () => raw.close() };
+  return { raw, db, setClock, primaryReads, close: () => raw.close() };
 }
 
 export async function seedCredential(raw, {
@@ -57,6 +60,7 @@ export async function createFixture(options) {
   const result = createDatabase(options);
   const { raw, db } = result;
   let now = NOW;
+  result.setClock(() => now);
   raw.exec(`
     INSERT INTO accounts(id) VALUES ('alice'),('bob'),('admin');
     INSERT INTO account_emails(id,account_id,address,domain,verified_at) VALUES

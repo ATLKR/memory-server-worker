@@ -96,11 +96,12 @@ test('SSO template requests scopes that permit memory writes after a read-only c
       .setSubject('template-user').setJti(crypto.randomUUID()).setIssuedAt(at / 1000).setExpirationTime(at / 1000 + 900).sign(privateKey);
     const accessToken = await sign(requestedScope);
     let rpcId = 0;
-    const call = async (token, name, args = {}) => {
-      const reply = await jsonRpc(await app(new Request(server.url, { method: 'POST', headers: {
+    const request = (token, name, args = {}) => app(new Request(server.url, { method: 'POST', headers: {
         authorization: 'Bearer ' + token, 'content-type': 'application/json', accept: 'application/json, text/event-stream',
         'mcp-protocol-version': '2025-11-25',
-      }, body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'tools/call', params: { name, arguments: args } }) })));
+      }, body: JSON.stringify({ jsonrpc: '2.0', id: ++rpcId, method: 'tools/call', params: { name, arguments: args } }) }));
+    const call = async (token, name, args = {}) => {
+      const reply = await jsonRpc(await request(token, name, args));
       return { failed: reply.result.isError === true, value: JSON.parse(reply.result.content[0].text) };
     };
     const spaces = await call(accessToken, 'memory_spaces');
@@ -114,8 +115,11 @@ test('SSO template requests scopes that permit memory writes after a read-only c
     assert.equal(updated.failed, false, JSON.stringify(updated.value));
     const readOnlyToken = await sign('memory:read');
     assert.equal((await call(readOnlyToken, 'memory_get', { spaceId, memoryId })).failed, false);
-    const denied = await call(readOnlyToken, 'memory_add', { spaceId, body: 'Denied', operationId: 'sso-template-denied' });
-    assert.equal(denied.failed, true); assert.equal(denied.value.status, 403);
+    const denied = await request(readOnlyToken, 'memory_add', { spaceId, body: 'Denied', operationId: 'sso-template-denied' });
+    assert.equal(denied.status, 403);
+    assert.match(denied.headers.get('www-authenticate'), /Bearer.*error="insufficient_scope"/);
+    assert.match(denied.headers.get('www-authenticate'), /scope="memory:read memory:write"/);
+    assert.deepEqual(await denied.json(), { error: 'insufficient_scope' });
     assert.equal((await call(accessToken, 'memory_delete', { spaceId, memoryId, expectedRevision: 2, operationId: 'sso-template-delete' })).failed, false);
   } finally { db.close(); }
 });

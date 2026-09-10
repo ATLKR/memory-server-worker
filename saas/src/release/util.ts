@@ -157,10 +157,41 @@ export async function readBytes(response: Response | Request, maximum = 65536): 
         }
         return out;
     }
+    catch (error) {
+        // Cancelling an incoming workerd body rejects its pending read.
+        if (timedOut)
+            fail(408, 'read_timeout');
+        throw error;
+    }
     finally {
         clearTimeout(timer);
         void reader.cancel().catch(() => { });
     }
+}
+/** Decode request bytes without relabelling stream, size, or timeout failures. */
+export async function requestText(request: Request, max: number): Promise<string> {
+    const bytes = await readBytes(request, max);
+    try {
+        return new TextDecoder('utf-8', { fatal: true }).decode(bytes);
+    }
+    catch (error) {
+        if (error instanceof TypeError)
+            fail(400, 'invalid_json');
+        throw error;
+    }
+}
+/** Signed webhooks call this only after verifying the unchanged request text. */
+export function requestObject(raw: string): Record<string, unknown> {
+    let value: unknown;
+    try {
+        value = JSON.parse(raw);
+    }
+    catch (error) {
+        if (error instanceof SyntaxError)
+            fail(400, 'invalid_json');
+        throw error;
+    }
+    return object(value);
 }
 export async function body(request: Request, allowed?: string[], max = 65536, mediaTypes: readonly string[] = ['application/json']): Promise<Record<string, unknown>> {
     if (!mediaTypes.includes(request.headers.get('content-type')?.split(';')[0]?.trim().toLowerCase() ?? ''))

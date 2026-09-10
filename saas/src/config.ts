@@ -1,8 +1,9 @@
 import type { Brand } from './ui.ts';
 import type { AuthSettings } from './auth.ts';
+import { canonicalEmail } from './identity.ts';
 
 export const SERVICE_ID = 'allenlabs-memory';
-export const SERVICE_VERSION = '0.4.0-rc.3';
+export const SERVICE_VERSION = '0.4.0-rc.4';
 export const PUBLIC_ORIGIN = 'https://memory.allenlabs.org';
 export const AUTH_ISSUER = 'https://auth-api.allen.company';
 export type Settings = { origin: string; brand: Brand; auth: AuthSettings };
@@ -21,7 +22,9 @@ export function readSettings(env: Variables): Settings {
   const url = new URL(origin);
   if (url.origin !== origin || url.protocol !== 'https:' || url.username || url.password) throw new Error('Invalid public origin');
   const supportEmail = text(env.PRODUCT_SUPPORT_EMAIL, 'support@allenlabs.org', 254);
-  if (!/^[A-Za-z0-9._+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}$/.test(supportEmail)) throw new Error('Invalid support email');
+  if (supportEmail.trim() !== supportEmail) throw new Error('Invalid support email');
+  // Validate the mailbox without replacing its configured display spelling.
+  try { canonicalEmail(supportEmail); } catch { throw new Error('Invalid support email'); }
   const accentColor = env.PRODUCT_ACCENT_COLOR ?? '#276747';
   if (!/^#[0-9a-f]{6}$/i.test(accentColor)) throw new Error('Invalid brand color');
   const clientId = env.SSO_CLIENT_ID ?? '';

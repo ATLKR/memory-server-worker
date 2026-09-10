@@ -1,6 +1,6 @@
 import type { IdentityDatabase } from './identity.ts';
-import { digestToken, IdentityDenied } from './identity.ts';
-import { createMemoryApi, body, json, HttpError, textField, optionalText } from './api.ts';
+import { digestToken, IdentityDenied, IdentityInvalid } from './identity.ts';
+import { createMemoryApi, body, json, HttpError, textField, optionalText, pathIdentifier, requireMethod } from './api.ts';
 import { MemoryService, MemoryInvalid, MemoryDenied, MemoryConflict } from './memory.ts';
 import { WorkspaceService, WorkspaceError } from './workspace.ts';
 import { createAuthController, SESSION_COOKIE } from './auth.ts';
@@ -59,8 +59,9 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     if (request.headers.has('origin') && request.headers.get('origin') !== settings.origin) throw new HttpError(403, 'origin_denied');
     const publicResponse = await options.release?.publicRoute(request);
     if (publicResponse) return publicResponse;
+    if (['/', '/assets/app.js', '/assets/app.css', '/health', '/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'].includes(url.pathname)) requireMethod(request, 'GET');
     if (request.method === 'GET') {
-      if (url.pathname === '/') return new Response(options.release ? renderPage(settings.brand).replace(/<body([^>]*)>/, '<body$1><p><a href="/manage">Memory 서비스 관리</a></p>') : renderPage(settings.brand), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+      if (url.pathname === '/') return new Response(options.release ? renderPage(settings.brand, true, settings.origin).replace(/<body([^>]*)>/, '<body$1><p><a href="/manage">서비스 관리</a></p>') : renderPage(settings.brand, false, settings.origin), { headers: { 'content-type': 'text/html; charset=utf-8' } });
       if (url.pathname === '/assets/app.js') return new Response(appScript, { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
       if (url.pathname === '/assets/app.css') return new Response(renderStyles(settings.brand), { headers: { 'content-type': 'text/css; charset=utf-8' } });
       if (url.pathname === '/health') return json({ status: 'ok', version: SERVICE_VERSION, mode: 'managed' });
@@ -72,6 +73,14 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     }
     if (url.pathname.startsWith('/auth/')) {
       if (options.limit && !await options.limit(`auth:${request.headers.get('cf-connecting-ip') ?? 'local'}`).then(r => r.success)) throw new HttpError(429, 'rate_limited');
+      const expectedAccount = request.headers.get('x-memory-account-id');
+      if (url.pathname === '/auth/logout' && expectedAccount !== null) {
+        const token = cookieToken(request);
+        const credential = token ? await db.withSession('first-primary').prepare(
+          "SELECT account_id AS accountId FROM credentials WHERE token_digest=? AND kind='session' AND membership_id IS NULL"
+        ).bind(await digestToken(token)).first<{ accountId: string }>() : null;
+        if (credential && credential.accountId !== expectedAccount) throw new HttpError(409, 'account_mismatch');
+      }
       const response = await auth.handle(request);
       if (response) return response;
       throw new HttpError(404, 'not_found');
@@ -88,28 +97,34 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     const external = Boolean(bearer?.includes('.'));
     if (external) {
       if (url.pathname !== '/mcp' && !url.pathname.startsWith('/v1/spaces')) throw new HttpError(403, 'scope_denied');
-      try { token = await auth.resolveBearer(token); } catch { throw new HttpError(401, 'authentication_required'); }
+      try { token = await auth.resolveBearer(token); } catch { throw new HttpError(401, 'invalid_token'); }
     }
     if (!bearer && !['GET', 'HEAD'].includes(request.method) && request.headers.get('origin') !== settings.origin) throw new HttpError(403, 'origin_required');
     let hash: string;
     try { hash = await digestToken(token); } catch { throw new HttpError(401, 'authentication_required'); }
     const at = clock();
     const credential = await db.withSession('first-primary').prepare(`
-      SELECT account_id AS accountId,kind FROM active_credentials
+      SELECT account_id AS accountId,kind,min(expires_at,membership_expires_at) AS expiresAt FROM active_credentials
       WHERE token_digest=? AND expires_at>? AND membership_expires_at>?`)
-      .bind(hash, at, at).first<{ accountId: string; kind: string }>();
-    if (!credential || (!bearer && credential.kind !== 'session')) throw new HttpError(401, 'authentication_required');
+      .bind(hash, at, at).first<{ accountId: string; kind: string; expiresAt: number }>();
+    if (!credential || credential.expiresAt <= clock() || (!bearer && credential.kind !== 'session')) throw new HttpError(401, external ? 'invalid_token' : 'authentication_required');
+    // Bind browser intent to the credential used by this exact request. A
+    // separate workspace preflight cannot prevent another tab replacing cookies.
+    const expectedAccount = request.headers.get('x-memory-account-id');
+    if (expectedAccount !== null && expectedAccount !== credential.accountId) throw new HttpError(409, 'account_mismatch');
     if (options.limit && !(await options.limit(`account:${credential.accountId}`)).success) throw new HttpError(429, 'rate_limited');
+    if (credential.expiresAt <= clock()) throw new HttpError(401, external ? 'invalid_token' : 'authentication_required');
     const releaseResponse = await options.release?.route(request, token);
     if (releaseResponse) return releaseResponse;
-    if (url.pathname === '/mcp') return handleMcp(request, memory, token, settings.brand.name);
+    if (url.pathname === '/mcp') return handleMcp(request, memory, token, settings.brand.name, db, clock);
     if (url.pathname.startsWith('/v1/spaces')) {
+      if (url.pathname === '/v1/spaces') requireMethod(request, 'GET', 'POST');
       if (url.pathname === '/v1/spaces' && request.method === 'GET') return json({ results: await memory.listSpaces(token) });
       const headers = new Headers(request.headers); headers.set('authorization', `Bearer ${token}`); headers.delete('cookie');
       return memoryApi(new Request(request, { headers }));
     }
-    if (url.pathname === '/v1/workspace' && request.method === 'GET') return json(await workspace.snapshot(token));
-    if (url.pathname === '/v1/organizations' && request.method === 'POST') {
+    if (url.pathname === '/v1/workspace' && requireMethod(request, 'GET')) return json(await workspace.snapshot(token, options.release?.workspaceSpaceAccess));
+    if (url.pathname === '/v1/organizations' && requireMethod(request, 'POST')) {
       const input = await body(request, ['name', 'emailId', 'parentOrganizationId']);
       return json(await workspace.createOrganization(token, {
         name: textField(input.name), emailId: textField(input.emailId),
@@ -117,41 +132,42 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
       }), 201);
     }
     const invite = /^\/v1\/organizations\/([^/]+)\/invites$/.exec(url.pathname);
-    if (invite && request.method === 'POST') {
+    if (invite && requireMethod(request, 'POST')) {
       const input = await body(request, ['email', 'role']);
-      return json(await workspace.createInvite(token, invite[1]!, { email: textField(input.email), role: role(input.role) }), 201);
+      return json(await workspace.createInvite(token, pathIdentifier(invite[1]!), { email: textField(input.email), role: role(input.role) }), 201);
     }
     const members = /^\/v1\/organizations\/([^/]+)\/members$/.exec(url.pathname);
-    if (members && request.method === 'GET') return json({ results: await workspace.listMembers(token, members[1]!) });
-    if (url.pathname === '/v1/invitations/accept' && request.method === 'POST') {
+    if (members && requireMethod(request, 'GET')) return json({ results: await workspace.listMembers(token, pathIdentifier(members[1]!)) });
+    if (url.pathname === '/v1/invitations/accept' && requireMethod(request, 'POST')) {
       const input = await body(request, ['token']);
       return json(await workspace.acceptInvite(token, textField(input.token)));
     }
     const membership = /^\/v1\/organizations\/([^/]+)\/memberships\/([^/]+)$/.exec(url.pathname);
-    if (membership && request.method === 'DELETE') {
-      await workspace.revokeMembership(token, membership[1]!, membership[2]!); return json(null, 204);
+    if (membership && requireMethod(request, 'DELETE')) {
+      await workspace.revokeMembership(token, pathIdentifier(membership[1]!), pathIdentifier(membership[2]!)); return json(null, 204);
     }
-    if (url.pathname === '/v1/keys' && request.method === 'POST') {
+    if (url.pathname === '/v1/keys' && requireMethod(request, 'POST')) {
       const input = await body(request, ['label', 'organizationId', 'permission', 'expiresInDays']);
       if (typeof input.expiresInDays !== 'number') throw new MemoryInvalid();
       return json(await workspace.issueKey(token, { label: textField(input.label), organizationId: optionalText(input.organizationId), permission: permission(input.permission), expiresInDays: input.expiresInDays }), 201);
     }
     const key = /^\/v1\/keys\/([^/]+)$/.exec(url.pathname);
-    if (key && request.method === 'DELETE') { await workspace.revokeKey(token, key[1]!); return json(null, 204); }
+    if (key && requireMethod(request, 'DELETE')) { await workspace.revokeKey(token, pathIdentifier(key[1]!)); return json(null, 204); }
     throw new HttpError(404, 'not_found');
   }
   return async (request: Request): Promise<Response> => {
-    let response: Response;
+    let response: Response, invalidToken = false;
     try { response = await route(request); }
     catch (error) {
-      const status = error instanceof HttpError || error instanceof WorkspaceError ? error.status :
+      const status = error instanceof HttpError || error instanceof WorkspaceError || error instanceof IdentityInvalid ? error.status :
         error instanceof MemoryInvalid ? 400 : error instanceof MemoryDenied || error instanceof IdentityDenied ? 403 : error instanceof MemoryConflict ? 409 : 500;
-      const code = error instanceof HttpError || error instanceof WorkspaceError ? error.code : status === 400 ? 'invalid_request' : status === 403 ? 'access_denied' : status === 409 ? 'revision_conflict' : 'internal_error';
-      response = json({ error: code }, status);
+      const code = error instanceof HttpError || error instanceof WorkspaceError || error instanceof IdentityInvalid ? error.code : status === 400 ? 'invalid_request' : status === 403 ? 'access_denied' : status === 409 ? 'revision_conflict' : 'internal_error';
+      invalidToken = status === 401 && code === 'invalid_token';
+      response = json({ error: code }, status, error instanceof HttpError && error.allow ? { allow: error.allow } : {});
     }
-    if (response.status === 401) response.headers.set('www-authenticate', new URL(request.url).pathname.startsWith('/scim/')
+    if (response.status === 401 && !response.headers.get('www-authenticate')?.includes('resource_metadata=')) response.headers.set('www-authenticate', new URL(request.url).pathname.startsWith('/scim/')
       ? 'Bearer realm="scim"'
-      : `Bearer resource_metadata="${settings.origin}/.well-known/oauth-protected-resource", scope="memory:read"`);
+      : `Bearer ${invalidToken ? 'error="invalid_token", ' : ''}resource_metadata="${settings.origin}/.well-known/oauth-protected-resource", scope="memory:read"`);
     if (response.status === 429) response.headers.set('retry-after', '60');
     return protect(response);
   };

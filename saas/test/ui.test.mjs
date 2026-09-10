@@ -45,6 +45,16 @@ async function browser(t, handler = () => null, customWorkspace = workspace) {
   return { dom, window, document: window.document, calls, byId, submit, change };
 }
 
+for(const control of ['new-space','new-organization','invite-members','accept-invite','manage-keys'])test(control+' locks every pending dialog field and restores it after failure',async t=>{
+ let release,reached;const pending=new Promise(resolve=>{release=resolve;}),waiting=new Promise(resolve=>{reached=resolve;});
+ const f=await browser(t,call=>{if(call.method==='POST'){reached();return pending;}return null;},{...workspace,spaces:[{...workspace.spaces[0],organizationId:'o-one'}]});
+ f.byId(control).click();const fields=[...f.byId('dialog-form').querySelectorAll('input,select,textarea')];assert.ok(fields.length);
+ for(const field of fields)if(field.tagName!=='SELECT')field.value=field.type==='email'?'recipient@example.org':'Submitted value';
+ const values=fields.map(field=>field.value);f.submit('dialog-form');await waiting;
+ try{for(const field of fields)assert.equal(field.disabled,true,control+': '+field.id);}finally{release({status:500,body:{error:'temporary_failure'}});await settle();}
+ await settle();assert.equal(f.byId('memory-dialog').open,true);for(const [index,field]of fields.entries()){assert.equal(field.disabled,false);assert.equal(field.value,values[index]);}assert.equal(f.byId('dialog-close').disabled,false);assert.equal(f.byId('dialog-cancel').disabled,false);assert.equal(f.byId('memory-dialog').dispatchEvent(new f.window.Event('cancel',{cancelable:true})),true);
+});
+
 test('brand configuration is escaped, CSP-compatible, and has a validated color boundary', () => {
   assert.ok(ui?.renderPage, 'UI exports are required');
   const hostile = { ...brand, name: '<img src=x onerror=alert(1)>', shortName: '<svg onload=alert(1)>', description: '"><script>alert(1)</script>', supportEmail: 'x" onclick="alert(1)@example.com' };
@@ -60,6 +70,8 @@ test('brand configuration is escaped, CSP-compatible, and has a validated color 
   assert.ok(ui.renderStyles({ ...brand, accentColor: '#abc' }).includes('#abc'));
   dom.window.close();
 });
+
+test('foundation search retains its256-character input contract',async t=>{const f=await browser(t);assert.equal(f.byId('search-query').maxLength,256);});
 
 test('external application script parses independently and signed-out users get an SSO entry', async t => {
   assert.ok(ui?.appScript, 'UI exports are required');
@@ -95,6 +107,84 @@ test('editing sends current revision and conflict preserves unsaved text', async
   assert.equal(f.byId('memory-body').value, '수정한 초안');
   assert.match(f.byId('app-error').textContent, /다른|변경|충돌/);
   assert.equal(f.byId('save-memory').disabled, false);
+});
+
+test('a pending memory selection preserves edits entered before its response arrives', async t => {
+  const other = { ...memory, id: 'm-two', body: '두 번째 기억', revision: 1 };
+  let resolveDetail;
+  const detail = new Promise(resolve => { resolveDetail = resolve; });
+  const f = await browser(t, call => {
+    if (call.path === '/v1/spaces/s-one/memories') return { body: { results: [memory, other] } };
+    if (call.path.endsWith('/m-two')) return detail;
+    if (call.method === 'PATCH') return { body: { ...memory, body: call.body.body, revision: 4 } };
+    return null;
+  });
+  f.document.querySelectorAll('#memory-list button')[1].click();
+  f.change('memory-body', '불러오는 동안 작성한 초안');
+  f.change('memory-source', '새 출처');
+  resolveDetail({ body: other }); await settle();
+  assert.equal(f.byId('memory-body').value, '불러오는 동안 작성한 초안');
+  assert.equal(f.byId('memory-source').value, '새 출처');
+  assert.equal(f.byId('save-memory').disabled, false);
+  f.submit('editor-form'); await settle();
+  const patch = f.calls.find(call => call.method === 'PATCH');
+  assert.equal(patch.path, '/v1/spaces/s-one/memories/m-one');
+  assert.equal(patch.body.expectedRevision, 3);
+  assert.equal(patch.body.body, '불러오는 동안 작성한 초안');
+  f.document.querySelectorAll('#memory-list button')[1].click(); await settle();
+  assert.equal(f.byId('memory-body').value, other.body, 'A subsequent deliberate selection can replace the saved editor');
+});
+
+test('failed memory selection leaves the original edited memory usable', async t => {
+  const other = { ...memory, id: 'm-two' };
+  let resolveDetail;
+  const detail = new Promise(resolve => { resolveDetail = resolve; });
+  const f = await browser(t, call => {
+    if (call.path === '/v1/spaces/s-one/memories') return { body: { results: [memory, other] } };
+    if (call.path.endsWith('/m-two')) return detail;
+    return null;
+  });
+  f.document.querySelectorAll('#memory-list button')[1].click();
+  f.change('memory-body', '연결 오류 중에도 보존할 초안');
+  resolveDetail({ status: 500 }); await settle();
+  assert.equal(f.byId('memory-body').value, '연결 오류 중에도 보존할 초안');
+  assert.equal(f.byId('memory-body').readOnly, false);
+  assert.equal(f.byId('save-memory').disabled, false);
+  assert.equal(f.byId('app-error').hidden, false);
+});
+
+for (const outcome of ['success', 'network failure', 'logout']) test('workspace refresh protects editor intent until ' + outcome, async t => {
+  let reads = 0, resolveRefresh;
+  const pending = new Promise(resolve => { resolveRefresh = resolve; });
+  const f = await browser(t, call => {
+    if (call.path === '/v1/workspace' && ++reads > 1) return pending;
+    if (call.path === '/v1/spaces' && call.method === 'POST') return { body: { id: 's-new' } };
+    if (call.path === '/auth/logout') return { status: 200 };
+    return null;
+  });
+  f.change('memory-body', '보존할 초안');
+  f.byId('new-space').click(); f.byId('field-name').value = '새 공간'; f.submit('dialog-form'); await settle();
+  assert.equal(f.byId('memory-dialog').open, false);
+  for (const id of ['memory-body', 'memory-source']) assert.equal(f.byId(id).readOnly, true, id + ' cannot accept edits before destination selection');
+  for (const id of ['save-memory', 'new-memory', 'new-space']) assert.equal(f.byId(id).disabled, true);
+  assert.equal(f.byId('memory-body').value, '보존할 초안');
+  if (outcome === 'logout') { f.byId('logout').click(); await settle(); }
+  resolveRefresh(outcome === 'network failure' ? { status: 500 } : { body: { ...workspace, spaces: [...workspace.spaces, { ...workspace.spaces[0], id: 's-new', name: '새 공간' }] } });
+  await settle();
+  if (outcome === 'logout') {
+    assert.equal(f.byId('workspace').hidden, true);
+    assert.equal(f.byId('memory-body').value, '');
+  } else {
+    assert.equal(f.byId('workspace').hidden, false);
+    assert.equal(f.byId('new-memory').disabled, false);
+    assert.equal(f.byId('memory-body').readOnly, false);
+    if (outcome === 'success') assert.equal(f.byId('space-title').textContent, '새 공간');
+    else {
+      assert.equal(f.byId('memory-body').value, '보존할 초안');
+      assert.equal(f.byId('save-memory').disabled, false);
+      assert.equal(f.byId('app-error').hidden, false);
+    }
+  }
 });
 
 test('read-only spaces keep content accessible and disable all memory mutations', async t => {
@@ -182,7 +272,7 @@ test('logout accepts the redirected HTML response and clears the private workspa
   assert.equal(f.byId('memory-body').value, '');
 });
 
-test('closing a pending issuance dialog cannot reveal its late secret in another dialog', async t => {
+test('pending key issuance keeps its dialog and secret until the response can be copied', async t => {
   let finishIssue;
   const f = await browser(t, call => call.path === '/v1/keys' && call.method === 'POST' ? new Promise(resolve => { finishIssue = resolve; }) : null);
   f.byId('manage-keys').click();
@@ -193,9 +283,10 @@ test('closing a pending issuance dialog cannot reveal its late secret in another
   f.byId('accept-invite').click();
   finishIssue({ body: { id: 'key-late', token: 'late-secret-value', expiresAt: 1800000000000 } });
   await settle();
-  assert.equal(f.byId('issued-secret'), null);
-  assert.ok(f.byId('field-token'));
-  assert.ok(!f.document.documentElement.textContent.includes('late-secret-value'));
+  assert.equal(f.byId('issued-secret')?.value, 'late-secret-value');
+  assert.equal(f.byId('field-token'), null);
+  assert.equal(f.byId('dialog-close').disabled,false);
+  f.byId('dialog-close').click();assert.equal(f.byId('memory-dialog').open,false);assert.equal(f.byId('issued-secret'),null);
 });
 
 test('organization admins can remove an explicit membership and ordinary members cannot open controls', async t => {
@@ -213,6 +304,41 @@ test('organization admins can remove an explicit membership and ordinary members
   assert.equal(member.byId('manage-members').hidden, true);
   member.byId('manage-members').click();
   assert.equal(member.byId('memory-dialog').open, false);
+});
+
+test('owner controls retain a pending removal lock when another membership removal finishes', async t => {
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  const members = [{ id: 'self', accountId: 'a-one', role: 'owner' }, { id: 'other-owner', accountId: 'bob', role: 'owner' }, { id: 'ordinary', accountId: 'carol', role: 'member' }];
+  const f = await browser(t, call => call.path.endsWith('/members') ? { body: { results: members } } : call.path.endsWith('/memberships/other-owner') ? held : call.method === 'DELETE' ? { body: {} } : null, { ...workspace, organizations: [{ ...workspace.organizations[0], role: 'owner' }] });
+  f.byId('manage-members').click(); await settle();
+  const buttons = [...f.byId('members-list').querySelectorAll('button')], owner = buttons.find(button => button.getAttribute('aria-label').startsWith('bob')), ordinary = buttons.find(button => button.getAttribute('aria-label').startsWith('carol'));
+  owner.click(); await settle(); ordinary.click(); await settle();
+  try { assert.equal(owner.disabled, true); } finally { release({ body: {} }); }
+  await settle();
+});
+
+for (const discard of [false, true]) test('self-removal requires explicit draft discard: ' + discard, async t => {
+  let revoked = false;
+  const f = await browser(t, call => {
+    if (call.path === '/v1/organizations/o-one/members') return { body: { results: [{ id: 'membership-self', accountId: workspace.account.id, email: 'alice@example.com', role: 'admin' }] } };
+    if (call.method === 'DELETE') { revoked = true; return { body: {} }; }
+    if (call.path === '/v1/workspace' && revoked) return { body: { ...workspace, organizations: [] } };
+    return null;
+  });
+  f.change('memory-body', '다른 개인 공간의 저장하지 않은 초안');
+  f.change('memory-source', '저장하지 않은 출처');
+  const prompts = [];
+  f.window.confirm = message => { prompts.push(message); return message.includes('저장하지 않은') ? discard : true; };
+  f.byId('manage-members').click(); await settle();
+  f.byId('members-list').querySelector('button').click(); await settle();
+  assert.ok(prompts.some(message => message.includes('저장하지 않은')), 'Self-removal refresh must explicitly confirm discarding the unrelated personal draft');
+  assert.equal(f.calls.filter(call => call.method === 'DELETE').length, discard ? 1 : 0);
+  assert.equal(f.byId('memory-body').value, discard ? memory.body : '다른 개인 공간의 저장하지 않은 초안');
+  assert.equal(f.byId('memory-source').value, discard ? memory.source : '저장하지 않은 출처');
+  assert.equal(f.byId('memory-dialog').open, !discard);
+  assert.equal(f.byId('manage-members').hidden, discard);
+  assert.equal(f.byId('save-memory').disabled, false);
 });
 
 test('space creation chooses an explicit organization and always requests managed storage', async t => {
@@ -243,7 +369,7 @@ test('admin invitation creation returns a manually shared code for the explicit 
   assert.equal(f.byId('issued-secret'), null);
 });
 
-test('existing machine keys can be revoked and last-owner denial leaves member controls usable', async t => {
+test('existing machine keys can be revoked and known last-owner removal is explained without a doomed request', async t => {
   const withKey = { ...workspace, keys: [{ id: 'key-old', label: 'Old agent', permission: 'read', expiresAt: 1800000000000, revokedAt: null }] };
   const f = await browser(t, call => call.path === '/v1/keys/key-old' && call.method === 'DELETE' ? { body: {} } : call.path === '/v1/organizations/o-one/members' ? { body: { results: [{ id: 'm-owner', accountId: 'a-one', email: 'owner@example.com', role: 'owner', expiresAt: Number.MAX_SAFE_INTEGER }] } } : call.path.endsWith('/memberships/m-owner') ? { status: 403 } : null, withKey);
   f.byId('manage-keys').click();
@@ -257,8 +383,10 @@ test('existing machine keys can be revoked and last-owner denial leaves member c
   const remove = f.byId('members-list').querySelector('button');
   remove.click();
   await settle();
-  assert.equal(remove.disabled, false);
-  assert.equal(f.byId('dialog-error').hidden, false);
+  assert.equal(remove.disabled, true);
+  assert.equal(f.byId('dialog-error').hidden, true);
+  assert.equal(f.calls.some(call => call.path.endsWith('/memberships/m-owner')), false);
+  assert.match(f.byId('members-list').textContent, /마지막 소유자/);
   assert.match(f.byId('members-list').textContent, /owner@example\.com/);
 });
 

@@ -1,4 +1,4 @@
-# Integrated release candidate: 0.4.0-rc.3
+# Integrated release candidate: 0.4.0-rc.4
 
 This is the maintained integration record. Other files in this folder originated
 in the supplied release kit and describe its proposed design and launch work.
@@ -10,6 +10,105 @@ SHA-256: `18e0155b8362d285867fbbb34f0db3a88208de20b4e91801924bbd0bbd671d69`.
 It targeted commit `b94c434f2074ea975111cb4e3efd4371a9481ac1`; its 91 manifest
 entries verified. This proves archive consistency, not publisher identity.
 The integration retains the repository's MIT license and attribution.
+
+## PR #22 follow-up review
+
+Additional source corrections and independent fresh-agent review rounds are
+tracked in [REVIEW_LOOP.md](REVIEW_LOOP.md). These PR changes are separate from
+the recorded rc.3 deployment below; a code review is not a deployment record.
+The rc.4 source requires forward migrations `0008_checkout-schema.sql`,
+`0009_job-progress-schema.sql`, `0010_protocol-schema.sql`,
+`0011_pagination-schema.sql`, `0012_lookup-schema.sql`,
+`0013_key-lookup-schema.sql`, `0014_tenant-queue-schema.sql`,
+`0015_workspace-lookup-schema.sql`, `0016_retrieval-progress-schema.sql`,
+`0017_vector-reconciliation-schema.sql`, `0018_outbound-share-schema.sql`,
+`0019_execution-time-schema.sql`, `0020_domain-verification-schema.sql` and
+`0021_domain-retention-schema.sql` before
+deployment. It preserves existing checkout records conservatively and freezes
+retry parameters once Checkout may have been attempted. Indexing/vector cleanup
+checkpoints let bounded work continue across invocations while retaining erasure
+identifiers. Confirmed checkout-closure receipts prevent duplicate purchases while
+payment events are queued; SCIM deletion tombstones preserve internal history.
+Migration 16 adds per-Space operational lookup and durable confirmation of accepted
+asynchronous vector deletions. Migration 17 adds bounded retries for pending
+deletion pages when older upserts finish late. Migration 18 indexes retained
+outbound shares by Space and newest creation time for bounded recovery lists.
+Migration 19 and the SQL helpers use the later of the application-bound time and
+database execution time for deadline admission. A queued statement cannot use an
+expired credential, membership, recent proof, restoration window, ingest lifetime
+or lease to authorize a later mutation. Historical timestamps and immutable
+records remain intact. Proof consumption and the corresponding credential's
+reauthentication timestamp update execute atomically through one statement and
+its triggers. Migration 20 atomically records DNS verification, consumes its
+challenge, creates or renews the domain, and assigns the exact manager. A replay
+checks the same account's current session, recent proof, original live membership,
+nonrevoked manager assignment and domain/receipt validity; it returns the original
+`verifiedUntil` without DNS or an extension. Accepted provider email revocation
+invalidates pending proofs for that exact account/address, and standing blocks
+deny further issuance or consumption. The migration backfills only unused,
+not-yet-invalidated blocked proofs at database execution time. Migration 21
+indexes unused DNS proof expiry for cleanup of at most 100 unused expired
+challenges per invocation; consumed proofs and immutable receipts remain.
+The candidate readiness check now requires schema 21.
+Migrations 8–21 are currently PR-only; production
+still has migrations 1–7 and the rc.3 Worker.
+
+The current UI keeps pending one-time issuance dialogs open until their outcome
+is available, preserves account/Space-bound drafts and receipts, and reconciles
+approved/cancelled extraction cards even when a refresh replaces the original
+card. Mutation transport/body-read failures and 5xx responses are treated as
+uncertain outcomes: organization/Space creation asks for workspace inspection,
+and sharing offers retained outgoing history and revocation before another POST.
+Expired trash uses server retention metadata to disable Restore and explain
+`restore_expired`. Release search accepts valid queries up to 1,024 UTF-8 bytes
+with the existing 31-character term limit; the foundation input retains 256
+characters. Both support links encode mailbox contents while preserving the
+literal `@` separator and configured spelling.
+Edit completion owns only its submitted draft: a newer failed draft survives an
+older response, and an older receipt-only submission is retained separately.
+Confirmed share revocations survive delayed list snapshots without inventing a
+revocation timestamp; a fresh read can supply the stored `revokedAt`.
+SCIM, export and billing-portal issuance buttons stay locked while a request is
+pending; intentional later issuances retain their own receipts.
+
+The full local check on 2026-09-10 passed 1,410 tests:
+208 foundation, 1,196 release and six client/template tests. Strict typechecking,
+all 21 migration source comparisons and the seven frozen production hashes also
+passed. `npm audit --audit-level=low` reported zero vulnerabilities. The final
+native run passed the build and bundled workerd/D1 checks, including populated
+upgrades from schema 5 through migration 21, encoded PAT revocation and job retries, checkout recovery, SCIM
+qualified deactivation/deletion/projection/pagination, account-bound invitation
+pages, lost-response outbound grant recovery across browser sessions and resumable
+cleanup of 1,001 vector references.
+Lookup migrations preserve identity, source, history and audit rows, retain stable
+FTS mapping and preserve exact foundation-key membership/email bindings.
+Native checks also cover all eight configured job-claim candidate branches,
+the 31-code-point search-prefix boundary, identical fullwidth/ligature/private-use
+and combining-mark words, 11 pages of accepted asynchronous vector deletions,
+and durable re-deletion after a late upsert without losing the propagation window
+or prior failure count across worker restarts.
+It also passed 20 Unicode exact-body search cases and OR-separator punctuation
+controls after the final Unicode correction.
+The final MCP response check suppresses buffered memory when membership expires
+or is revoked, and a superseding write checks all three required actions without
+exceeding native D1's query-depth limit. Seven native authentication/HTTP runtime
+tests passed in that native run. Six native queued-expiry cases also passed for
+credential, membership, recent proof, retention, ingest and lease admission.
+Ten native domain checks passed for atomic verification, current-authority replay,
+queued expiry, rollback, provider proof revocation and bounded cleanup that
+retains consumed DNS proofs and immutable receipts.
+Eight native interleavings additionally commit erasure, cancellation
+or approval immediately before the final REST content/state snapshot. Native
+checks preserve empty-page cursor progress, distinguish expired restoration from
+a true revision conflict, and reflect a changed retention policy. The latest
+51-case lexical evaluation returns recall@5 0.62 and MRR@5 0.59,
+with zero forbidden or stale hits and one negative-query false positive. Its
+32.6078 ms p95 was measured while other checks were running; it is not a benchmark.
+The
+tenant-local ranking change lowers MRR by 0.01 against the preceding implementation
+on this small fixture. These are local results; independent
+follow-up review and the exact final revision's CI are recorded separately in
+[REVIEW_LOOP.md](REVIEW_LOOP.md) and the PR.
 
 ## Recorded 0.4.0-rc.3 deployment: 2026-09-09
 
@@ -180,12 +279,12 @@ the production Worker. [Maintainer advisory](https://github.com/lovell/sharp/sec
 Run `npm run check`, `npm run test:d1`, and `npm run eval:lexical` from `saas`.
 The recorded rc.1 local check covered 171 existing tests, 143 release tests and
 five client/template tests, plus typechecking and migration source/hash consistency.
-The rc.2 source adds maintenance, disabled-feature, callback-diagnostic and
-client-scope regressions. Local checks pass: 174 baseline, 151 release and six
+The rc.2 source added maintenance, disabled-feature, callback-diagnostic and
+client-scope regressions. Its historical local checks passed: 174 baseline, 151 release and six
 client/template tests, plus seven native authentication/HTTP runtime tests and
 the populated workerd/D1 scheduled-cleanup integration test.
 The evaluation loads the supplied synthetic corpus through the real memory APIs.
-All 51 cases were evaluated locally: recall@5 0.62, MRR@5 0.60, forbidden hits 0,
+That historical 51-case evaluation returned recall@5 0.62, MRR@5 0.60, forbidden hits 0,
 stale hits 0, and one negative query with irrelevant results. This measures lexical
 retrieval, not semantic quality; local latency excludes the network.
 
@@ -195,9 +294,9 @@ provider under `allen.company`. External OAuth clients have independent client I
 and are verified against the service resource, while browser callbacks retain the
 exact configured browser client binding. See [CONNECTING.md](../CONNECTING.md).
 
-Real-user OAuth callback completion remains unverified after the previously
-observed client navigation block. Live Stripe/mail/AI/webhook integration, load
-testing and recovery drills are still outstanding. The service is a pilot, not GA.
+Real-user OAuth callback completion passed after the rc.2 transport fix and again
+on rc.3. Live Stripe/mail/AI/webhook integration, external MCP clients, load testing
+and recovery drills remain outstanding. The service is a pilot, not GA.
 
 Storage still uses one D1 database. This kit does not implement R2 offload or
 physical sharding; the per-database 10 GB limit still applies. See

@@ -1,3 +1,4 @@
+import { sqlNow } from './sql-clock.ts';
 /** Central OAuth access-token authentication; the provider does not issue ID tokens. */
 import { createRemoteJWKSet, customFetch, jwksCache, jwtVerify, type JWTVerifyGetKey, type JWKSCacheInput } from 'jose';
 import { digestToken, IdentityDenied, type IdentityDatabase } from './identity.ts';
@@ -146,12 +147,12 @@ export function createAuthController(
   }
   async function verify(token: string, browser: boolean): Promise<AuthPrincipal> {
     if (!isConfigured || typeof token !== 'string' || token.length > 8_192 || token.split('.').length !== 3) throw new IdentityDenied();
-    const at = now();
     const { payload, protectedHeader } = await jwtVerify(token, keyResolver(), {
       issuer: settings.issuer, audience: settings.origin, algorithms: ['RS256'], typ: 'at+jwt',
-      currentDate: new Date(at), clockTolerance: 0,
+      currentDate: new Date(now()), clockTolerance: 0,
       requiredClaims: ['iss', 'aud', 'sub', 'iat', 'exp', 'jti', 'client_id', 'azp', 'scope', 'token_use'],
     });
+    const at = now();
     const { sub, jti, iat, exp } = payload;
     if (protectedHeader.typ !== 'at+jwt' || payload.aud !== settings.origin || payload.token_use !== 'access' ||
         typeof sub !== 'string' || !sub || sub.length > 256 ||
@@ -176,14 +177,14 @@ export function createAuthController(
   }
   async function login(): Promise<Response> {
     if (!isConfigured) return response(503, 'Sign-in is not configured.');
-    const at = now();
     const state = randomToken();
     const binding = randomToken();
     const verifier = randomToken();
     const challenge = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
     const stateDigest = await digestToken(state);
     const browserDigest = await digestToken(binding);
-    await db.prepare('DELETE FROM auth_flows WHERE expires_at<=?').bind(at).run();
+    await db.prepare('DELETE FROM auth_flows WHERE expires_at<=?').bind(now()).run();
+    const at = now();
     const inserted = await db.prepare(`INSERT INTO auth_flows
       (state_digest,browser_digest,verifier,issuer,client_id,redirect_uri,created_at,expires_at)
       VALUES (?,?,?,?,?,?,?,?)`).bind(stateDigest, browserDigest, verifier, settings.issuer,
@@ -198,7 +199,6 @@ export function createAuthController(
   async function callback(request: Request, progress: AuthProgress): Promise<Response> {
     if (!isConfigured) return response(503, 'Sign-in is not configured.');
     const url = new URL(request.url);
-    const at = now();
     const code = url.searchParams.get('code');
     const state = url.searchParams.get('state');
     const issuer = url.searchParams.get('iss');
@@ -207,16 +207,18 @@ export function createAuthController(
         !/^[A-Za-z0-9_-]{43}$/.test(state) || !binding || issuer !== settings.issuer ||
         ['code', 'state', 'iss'].some(name => url.searchParams.getAll(name).length !== 1)) throw new IdentityDenied();
     const stateDigest = await digestToken(state);
+    const browserDigest = await digestToken(binding);
+    const at = now();
     progress.phase = 'flow_claim';
     const flow = await db.prepare(`UPDATE auth_flows SET consumed_at=?
-      WHERE state_digest=? AND browser_digest=? AND consumed_at IS NULL AND expires_at>?
+      WHERE state_digest=? AND browser_digest=? AND consumed_at IS NULL AND expires_at>${sqlNow()}
         AND created_at<=? AND issuer=? AND client_id=? AND redirect_uri=?
-      RETURNING verifier`).bind(at, stateDigest, await digestToken(binding), at, at,
-      settings.issuer, settings.clientId, callbackUri).first<{ verifier: string | null }>();
+      RETURNING verifier,expires_at AS expiresAt`).bind(at, stateDigest, browserDigest, at, at,
+      settings.issuer, settings.clientId, callbackUri).first<{ verifier: string | null; expiresAt: number }>();
     if (!flow?.verifier) throw new IdentityDenied();
     const erased = await db.prepare('UPDATE auth_flows SET verifier=NULL WHERE state_digest=? AND consumed_at=?')
       .bind(stateDigest, at).run();
-    if (!erased.success || erased.meta.changes !== 1) throw new IdentityDenied();
+    if (!erased.success || erased.meta.changes !== 1 || flow.expiresAt <= now()) throw new IdentityDenied();
     progress.phase = 'token_exchange';
     const tokenResponse = await boundedFetch(fetchFn, settings.tokenEndpoint, {
       method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded', Accept: 'application/json' },
@@ -242,9 +244,10 @@ export function createAuthController(
     if (request.headers.get('origin') !== settings.origin) return response(403, 'Request denied.');
     const token = readCookie(request, SESSION_COOKIE);
     if (token) {
+      const hash = await digestToken(token);
       const revoked = await db.prepare(`UPDATE credentials SET revoked_at=?
         WHERE token_digest=? AND kind='session' AND membership_id IS NULL AND revoked_at IS NULL`)
-        .bind(now(), await digestToken(token)).run();
+        .bind(now(), hash).run();
       if (!revoked.success) throw new IdentityDenied();
     }
     const headers = new Headers({ Location: '/' });

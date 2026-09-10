@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createDatabase } from './helpers.mjs';
 import { digestToken } from '../src/identity.ts';
-import { createMemoryApi } from '../src/api.ts';
+import { body as readBody, createMemoryApi } from '../src/api.ts';
 
 const NOW = 1_800_000_000_000;
 const TOKEN = 'synthetic-api-session-token-0000000000000000';
@@ -121,4 +121,135 @@ test('HTTP rejects NUL text as invalid input without storing broken search conte
   }
   assert.equal((await request(`${base}?query=${encodeURIComponent('hid\u0000den')}`)).res.status, 400);
   assert.deepEqual((await request(`${base}?query=hidden`)).data, { results: [] });
+});
+
+const turn = () => new Promise(resolve => setImmediate(resolve));
+for (const releaseEnabled of [false, true]) for (const path of ['/v1/spaces', '/v1/organizations', '/v1/invitations/accept'])
+test('foundation body deadline cancels stalled HTTP '+path+'; release='+releaseEnabled, async t => {
+  const { createFixture } = await import('./helpers.mjs');
+  const { createApplication } = await import('../src/app.ts');
+  const { readSettings, PUBLIC_ORIGIN } = await import('../src/config.ts');
+  const { createRelease } = await import('../src/release/extension.ts');
+  const f = await createFixture({ workspace: true }); t.after(f.close);
+  const env = { DB: f.db, REQUEST_LIMITER: { limit: async () => ({ success: true }) } };
+  const app = createApplication(f.db, readSettings(env), { clock: f.clock,
+    ...(releaseEnabled ? { release: createRelease(env, { clock: f.clock }) } : {}) });
+  let controller, cancelled = 0, started;
+  const reading = new Promise(resolve => { started = resolve; });
+  const stream = new ReadableStream({ start(value) { controller = value; value.enqueue(new TextEncoder().encode('{')); },
+    pull() { started(); }, cancel() { cancelled++; } });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const request = new Request(PUBLIC_ORIGIN + path, { method: 'POST', duplex: 'half', body: stream,
+    headers: { authorization: 'Bearer ' + f.tokens.alice, 'content-type': 'application/json' } });
+  let response;
+  const pending = app(request).then(value => { response = value; });
+  await reading;
+  await turn();
+  t.mock.timers.tick(9999); await turn();
+  assert.equal(response, undefined); assert.equal(cancelled, 0);
+  t.mock.timers.tick(1); await turn();
+  const timedOut = response !== undefined;
+  // Release the intentionally stalled body even on the unfixed implementation.
+  if (!timedOut) controller.close();
+  await pending;
+  assert.equal(timedOut, true, 'request must settle at its body deadline');
+  assert.equal(response.status, 408); assert.deepEqual(await response.json(), { error: 'read_timeout' });
+  assert.equal(cancelled, 1);
+});
+
+for (const cancellation of ['stalls', 'rejects']) test('foundation deadline also settles when stream cancellation '+cancellation, async t => {
+  let cancelled = 0, controller, finishCancel;
+  const request = new Request('http://localhost/v1/spaces', { method: 'POST', duplex: 'half',
+    headers: { 'content-type': 'application/json' },
+    body: new ReadableStream({ start(value) { controller = value; }, cancel() {
+      cancelled++; return cancellation === 'rejects' ? Promise.reject(new Error('synthetic cancel failure')) : new Promise(resolve => { finishCancel = resolve; });
+    } }) });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let outcome;
+  const pending = readBody(request, ['name']).then(value => { outcome = value; }, error => { outcome = error; });
+  t.mock.timers.tick(10000); await turn();
+  const timedOut = outcome !== undefined;
+  if (!timedOut) controller.error(new Error('release stalled test body'));
+  finishCancel?.();
+  await pending;
+  assert.equal(timedOut, true);
+  assert.equal(outcome.status, 408); assert.equal(outcome.code, 'read_timeout'); assert.equal(cancelled, 1);
+  assert.equal(request.body.locked, false);
+});
+
+test('foundation oversize rejection does not await an uncooperative cancel callback', async t => {
+  let cancelled = 0, finishCancel;
+  const request = new Request('http://localhost/v1/spaces', { method: 'POST', duplex: 'half',
+    headers: { 'content-type': 'application/json', 'content-length': '1' },
+    body: new ReadableStream({ start(controller) { controller.enqueue(new Uint8Array(24 * 1024 + 1)); },
+      cancel() { cancelled++; return new Promise(resolve => { finishCancel = resolve; }); } }) });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let error;
+  const pending = readBody(request, ['name']).catch(value => { error = value; });
+  await turn();
+  const settledBeforeCancellation = error !== undefined;
+  finishCancel?.();
+  await pending;
+  assert.equal(settledBeforeCancellation, true, 'oversize rejection must not wait for cancellation completion');
+  assert.equal(error.status, 413); assert.equal(error.code, 'request_too_large'); assert.equal(cancelled, 1);
+  assert.equal(request.body.locked, false);
+});
+
+test('foundation body uses one total deadline despite progressive chunks', async t => {
+  let controller, cancelled = 0, error;
+  const request = new Request('http://localhost/v1/spaces', { method: 'POST', duplex: 'half',
+    headers: { 'content-type': 'application/json' }, body: new ReadableStream({ start(value) { controller = value; }, cancel() { cancelled++; } }) });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = readBody(request, ['name']).catch(value => { error = value; });
+  for (const chunk of ['{"name":"', 'still sending']) {
+    t.mock.timers.tick(4000); controller.enqueue(new TextEncoder().encode(chunk)); await turn();
+  }
+  t.mock.timers.tick(1999); await turn(); assert.equal(error, undefined);
+  t.mock.timers.tick(1); await turn();
+  const timedOut = error !== undefined;
+  if (!timedOut) controller.close();
+  await pending;
+  assert.equal(timedOut, true); assert.equal(error.status, 408); assert.equal(error.code, 'read_timeout'); assert.equal(cancelled, 1);
+});
+
+test('foundation body keeps normal chunked parsing and clears its deadline', async t => {
+  let cancelled = 0;
+  const request = new Request('http://localhost/v1/spaces', { method: 'POST', duplex: 'half',
+    headers: { 'content-type': 'Application/JSON; charset=utf-8' }, body: new ReadableStream({ start(controller) {
+      for (const chunk of ['{"na', 'me":"ok"}', ' '.repeat(24 * 1024 - 13)]) controller.enqueue(new TextEncoder().encode(chunk));
+      controller.close();
+    }, cancel() { cancelled++; } }) });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  assert.deepEqual(await readBody(request, ['name']), { name: 'ok' });
+  assert.equal(request.body.locked, false); t.mock.timers.tick(10000); assert.equal(cancelled, 0);
+});
+
+test('foundation body stream failures remain sanitized server errors', async t => {
+  const f = await fixture(t);
+  const request = new Request('http://localhost/v1/spaces', { method: 'POST', duplex: 'half',
+    headers: { authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' },
+    body: new ReadableStream({ start(controller) { controller.error(new Error('synthetic stream failure')); } }) });
+  const response = await f.api(request);
+  assert.equal(response.status, 500); assert.deepEqual(await response.json(), { error: 'internal_error' });
+  assert.equal(request.body.locked, false);
+});
+
+for (const deadline of [false, true]) test('foundation rejected pending read '+(deadline ? 'after timeout remains408' : 'before timeout remains500'), async t => {
+  const f = await fixture(t), failure = new Error('Stream was cancelled.');
+  let rejectRead, released = false;
+  const request = new Request('http://localhost/v1/spaces', { method: 'POST', headers: {
+    authorization: 'Bearer ' + TOKEN, 'content-type': 'application/json' }, body: '{}' });
+  // Native workerd rejects the pending read after cancelling its incoming body.
+  request.body.getReader = () => ({
+    read: () => deadline ? new Promise((_, reject) => { rejectRead = reject; }) : Promise.reject(failure),
+    cancel: () => { rejectRead?.(failure); return Promise.resolve(); },
+    releaseLock: () => { released = true; },
+  });
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const pending = f.api(request);
+  if (deadline) t.mock.timers.tick(10000);
+  const response = await pending;
+  assert.equal(response.status, deadline ? 408 : 500);
+  assert.deepEqual(await response.json(), { error: deadline ? 'read_timeout' : 'internal_error' });
+  assert.equal(released, true);
 });

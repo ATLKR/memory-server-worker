@@ -29,6 +29,7 @@ async function fixture(opts = {}) {
   storage.raw.exec(readFileSync(new URL('../auth-schema.sql', import.meta.url), 'utf8'));
   storage.raw.exec("INSERT INTO accounts(id) VALUES ('alice')");
   let now = NOW;
+  storage.setClock(() => now);
   const principals = [];
   const exchanges = [];
   const localToken = 'browser-local-session-00000000000000000000000000000000';
@@ -45,7 +46,7 @@ async function fixture(opts = {}) {
       expires_in: 900, refresh_token: 'must-not-be-stored' });
   };
   const controller = createAuthController(storage.db, { ...settings, ...opts.settings }, signIn,
-    { clock: () => now, ...(opts.remoteJwks ? {} : { jwks }), fetch: opts.fetch ?? network,
+    { clock: () => now, ...(opts.remoteJwks ? {} : { jwks: opts.jwks ?? jwks }), fetch: opts.fetch ?? network,
       publicKeyCache: opts.publicKeyCache });
   const request = (path, init) => new Request(`${settings.origin}${path}`, init);
   const begin = async () => {
@@ -95,6 +96,24 @@ test('browser login binds PKCE to a single-use callback and stores only the opaq
   assert.equal(f.raw.prepare('SELECT count(*) AS n FROM credentials').get().n, 1);
 });
 
+test('callback cannot consume an auth flow that expires while its UPDATE waits to execute', async t => {
+  const f = await fixture(); t.after(f.close);
+  const flow = await f.begin(), prepare = f.db.prepare.bind(f.db);
+  let queued = false;
+  f.db.prepare = sql => {
+    const statement = prepare(sql);
+    if (sql.includes('UPDATE auth_flows SET consumed_at=')) {
+      const first = statement.first.bind(statement);
+      statement.first = async () => { queued = true; f.setNow(NOW + 600001); return first(); };
+    }
+    return statement;
+  };
+  const response = await f.callback(flow);
+  assert.equal(response.status, 400); assert.equal(queued, true);
+  assert.equal(f.raw.prepare('SELECT consumed_at FROM auth_flows').get().consumed_at, null);
+  assert.equal(f.exchanges.length, 0);
+});
+
 test('callback rejects expired, unbound, duplicate and issuer-confused requests before exchanging', async t => {
   for (const scenario of ['binding', 'state', 'issuer', 'duplicate', 'error', 'expiry']) {
     await t.test(scenario, async t => {
@@ -112,6 +131,18 @@ test('callback rejects expired, unbound, duplicate and issuer-confused requests 
       assert.equal(f.raw.prepare('SELECT count(*) AS n FROM credentials').get().n, 0);
     });
   }
+});
+
+for(const during of [1,2])test('callback checks flow expiry after digest '+during,async t=>{
+ const f=await fixture();t.after(f.close);const flow=await f.begin();f.setNow(NOW+599999);
+ const original=crypto.subtle.digest;let calls=0;crypto.subtle.digest=async function(...args){const result=await original.apply(this,args);if(++calls===during)f.setNow(NOW+600001);return result;};t.after(()=>{crypto.subtle.digest=original;});
+ assert.equal((await f.callback(flow)).status,400);assert.equal(f.exchanges.length,0);assert.equal(f.raw.prepare('SELECT consumed_at FROM auth_flows').get().consumed_at,null);
+});
+
+test('token verification checks expiry after asynchronous key resolution',async t=>{
+ const f=await fixture({jwks:async()=>{f.setNow(NOW+900001);return keys.publicKey;}});t.after(f.close);
+ const token=await signed();await assert.rejects(()=>f.resolveBearer(token));
+ assert.equal(f.principals.length,0);
 });
 
 test('real signed bearer validation rejects wrong token authority, use, lifetime and capabilities', async t => {
@@ -261,4 +292,18 @@ test('callback diagnostics remain request-local and expose no verifier or cookie
   assert.equal(result.headers.get('x-auth-failure'), 'AUTH_CALLBACK_VALIDATION');
   assert.doesNotMatch(await result.text(), new RegExp(flow.state));
   assert.equal((await f.callback(flow)).status, 303);
+});
+
+for (const boundary of ['flow claim', 'verifier erasure']) test('callback checks flow expiry after '+boundary+' before token exchange', async t => {
+  const f = await fixture(); t.after(f.close); const flow = await f.begin();
+  f.raw.prepare('UPDATE auth_flows SET expires_at=?').run(NOW + 100);
+  const prepare = f.db.prepare.bind(f.db);
+  f.db.prepare = sql => {
+    const statement = prepare(sql), method = boundary === 'flow claim' ? 'first' : 'run', invoke = statement[method].bind(statement);
+    statement[method] = async () => { const value = await invoke(); if (sql.includes(boundary === 'flow claim' ? 'SET consumed_at=?' : 'SET verifier=NULL')) f.setNow(NOW + 200); return value; };
+    return statement;
+  };
+  assert.equal((await f.callback(flow)).status, 400);
+  assert.equal(f.exchanges.length, 0);
+  assert.equal(f.raw.prepare('SELECT verifier FROM auth_flows').get().verifier, null);
 });

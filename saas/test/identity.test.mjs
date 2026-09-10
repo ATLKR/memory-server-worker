@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { IdentityDenied, canonicalEmail, digestToken } from '../src/identity.ts';
+import { IdentityDenied, IdentityInvalid, canonicalEmail, digestToken } from '../src/identity.ts';
 import { createFixture, startLink, seedCredential, NOW } from './helpers.mjs';
 
 async function fixture(t) { const f = await createFixture(); t.after(f.close); return f; }
@@ -11,7 +11,7 @@ const denied = fn => assert.rejects(fn, IdentityDenied);
 test('mail normalization preserves plus/dot distinctions and rejects malformed mail', () => {
   assert.deepEqual(canonicalEmail(' Alice+tag@CORP.EXAMPLE '), { address: 'alice+tag@corp.example', domain: 'corp.example' });
   for (const address of ['x', '.x@corp.example', 'x..y@corp.example', 'x@-corp.example', 'é@corp.example', 'x@corp.example@bad.example'])
-    assert.throws(() => canonicalEmail(address), IdentityDenied);
+    assert.throws(() => canonicalEmail(address), IdentityInvalid);
 });
 
 test('account sessions return all live claims using fresh primary authorization', async t => {

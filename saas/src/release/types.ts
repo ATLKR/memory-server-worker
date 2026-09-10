@@ -47,6 +47,9 @@ export interface Memory {
     provenance: Provenance;
     supersedesMemoryId: string | null;
     erasedAt: number | null;
+    /** Present on trash reads; retention facts do not imply update authority. */
+    restoreUntil?: number | null;
+    restoreExpired?: boolean;
 }
 export interface Vector {
     id: string;
@@ -114,6 +117,7 @@ export interface ReleaseEnv {
     fetch?: typeof fetch;
 }
 export interface Extension {
+    workspaceSpaceAccess?: import('../workspace.ts').WorkspaceSpaceAccess;
     publicRoute(request: Request): Promise<Response | null>;
     route(request: Request, token: string): Promise<Response | null>;
     signedIn(principal: unknown, session: {

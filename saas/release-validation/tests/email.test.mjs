@@ -4,6 +4,26 @@ import { fixture, at } from './db.mjs';
 import { Admin } from '../../src/release/admin.ts';
 import { createRelease } from '../../src/release/extension.ts';
 import { IdentityService } from '../../src/identity.ts';
+import { readSettings } from '../../src/config.ts';
+
+for (const brand of ['기'.repeat(30), '기'.repeat(80), 'Memory: Test', 'Memory 관리 화면', "$& $` $' $$ 기억"]) test('configured literal brand supports reauthentication and email linking: ' + brand, async t => {
+ const {db,token}=await fixture();t.after(()=>db.close());const delivered=[];
+ const env={DB:db,PRODUCT_NAME:brand,MAIL_FROM:'memory@allenlabs.org',EMAIL:{send:async message=>{delivered.push(message);return {messageId:'cf-brand-proof'};}}};
+ assert.equal(readSettings(env).brand.name,env.PRODUCT_NAME);
+ const admin=new Admin(env,()=>at),identity=new IdentityService(db,()=>at);
+ const challenge=await admin.startReauth(token,'e1');
+ assert.equal(delivered[0].subject,env.PRODUCT_NAME+': 추가 본인 확인');
+ assert.ok(delivered[0].text.startsWith('본인이 요청한 경우에만 '+brand+' 관리 화면에 아래 증명을 입력하세요.'));
+ await admin.completeReauth(token,challenge.id,delivered[0].text.match(/Proof: ([A-Za-z0-9_-]+)/)[1]);
+ const release=createRelease(env,{clock:()=>at,identity});
+ const response=await release.route(new Request(readSettings(env).origin+'/v1/account/emails',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'brand-test@example.com'})}),token);
+ assert.equal(response.status,202);
+ assert.equal(delivered[1].subject,env.PRODUCT_NAME+' 이메일 확인');
+ assert.ok(delivered[1].text.endsWith('이 코드는 '+brand+' 관리 콘솔에서 직접 입력하세요.'));
+ const {challengeId}=await response.json();
+ await identity.completeEmailLink(token,challengeId,delivered[1].text.match(/Proof: ([A-Za-z0-9_-]+)/)[1]);
+ assert.ok((await identity.getAccount(token)).emails.some(e=>e.address==='brand-test@example.com'));
+});
 
 test('a mistyped email proof does not turn a valid session into an authentication failure',async()=>{
  const {db,token}=await fixture();let delivered;

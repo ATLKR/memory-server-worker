@@ -1,22 +1,184 @@
 # Operations runbook
 
-The deployment record below describes 0.3.0. The latest recorded 0.4.0-rc.2
-deployment and the 0.4.0-rc.2 source changes are documented in
+This runbook describes the current release. Historical deployment evidence is
+retained in [VERIFICATION.md](VERIFICATION.md); the latest deployment is documented in
 [release/INTEGRATION.md](release/INTEGRATION.md). Cloudflare Email
 proof delivery is covered in [release/EMAIL.md](release/EMAIL.md). Treat these
-current documents as the source of truth for release behavior; retain this prior
-deployment record for recovery context.
+documents as the source of truth for release behavior.
 
-## 0.4.0-rc.2 maintenance and diagnosis
+## Maintenance and diagnosis
 
 The source configures `*/5 * * * *` for expired transient-state cleanup. Each
 invocation processes at most 100 rows per cleanup category: ingest payloads,
-export sessions, domain/reauthentication challenges and past-day mail budgets.
+export sessions, unused domain challenges, reauthentication challenges and
+past-day mail budgets. Consumed DNS proofs and immutable verification receipts
+are retained.
 Expiry is checked by request authorization independently of the sweep, so a
 backlog does not extend a credential or challenge lifetime. Immutable identity
-and audit records are retained. Apply the index-only forward migration
-`0007_maintenance-schema.sql` before deploying this code; migrations 1–6 remain
-byte-frozen. This section does not assert that migration 7 or this code is live.
+and audit records are retained. Migrations 1–7 are applied in the recorded
+production environment and byte-frozen. This PR additionally requires forward
+migrations `0008_checkout-schema.sql`, `0009_job-progress-schema.sql`,
+`0010_protocol-schema.sql`, `0011_pagination-schema.sql`,
+`0012_lookup-schema.sql`, `0013_key-lookup-schema.sql`,
+`0014_tenant-queue-schema.sql`, `0015_workspace-lookup-schema.sql`,
+`0016_retrieval-progress-schema.sql`, `0017_vector-reconciliation-schema.sql`,
+`0018_outbound-share-schema.sql`, `0019_execution-time-schema.sql`,
+`0020_domain-verification-schema.sql` and `0021_domain-retention-schema.sql`
+before deploying its Worker; none has been applied to production. New environments
+apply migrations 1–21. The source readiness check requires schema version 21.
+The current full local check passes 1,410 tests with strict typechecking, all 21
+migration source comparisons and the seven frozen production hashes. Recorded
+native validation covers populated upgrades from 5 through 21, six queued-expiry
+cases, ten domain verification/retention checks and seven auth/HTTP tests. The
+[integration record](release/INTEGRATION.md) identifies the source scope of each
+run and the remaining live acceptance gates.
+
+Migration 19 and the application SQL helpers evaluate deadline admission at the
+later of the application-bound time and the database statement's execution time.
+A queued statement cannot use an already-expired credential, membership or
+recent proof, or an elapsed restoration/ingest deadline or lease, to authorize a
+later mutation. This tightens temporal admission while preserving recorded
+timestamps and immutable identity/history/audit records. Recent-proof consumption
+and the matching credential's `reauthenticated_at` update run atomically through
+one SQL statement and its triggers. Include queue-delay expiry and proof
+consumption rollback cases in staging acceptance after applying migration 19.
+
+Migration 20 makes DNS verification one receipt/trigger statement: challenge
+consumption, domain creation or renewal, and the exact manager assignment commit
+or roll back together. A completed receipt can be replayed only by the same
+account with a current browser session, recent email proof, the original live
+owner/admin membership and its nonrevoked domain-manager assignment. Domain and
+receipt validity are checked again. It returns the original `verifiedUntil`
+without repeating DNS or extending verification.
+
+An accepted provider email-revocation event invalidates unused pending proofs
+for the exact account/address; standing blocks reject new proof issuance or
+consumption with 403. Migration 20 backfills only unused, not-yet-invalidated
+proofs covered by those exact blocks, using database execution time. Consumed
+proofs and immutable history remain intact. Migration 21 adds a selective
+unused-DNS-proof expiry index; cleanup removes at most 100 unused expired DNS
+challenges per invocation and retains consumed proofs and verification receipts.
+
+Migration 14 rebuilds only the derived FTS table, preserving its stable row IDs,
+source and history. It adds exact encoded tenant terms and prefix indexes for
+lengths 1–31. Search rejects longer processed terms with `search_token_too_long`
+before charging usage; it never falls back to a global prefix scan. Ranking uses
+local body match density instead of global BM25 statistics. These indexes use
+additional physical D1 space beyond the logical body/history quota. Measure
+database size and migration duration on a populated staging copy before rollout.
+[FTS5 prefix indexes](https://www.sqlite.org/fts5.html#prefix_indexes).
+
+A local SQLite comparison with 1,000 identical bilingual documents in 20 Spaces
+(354,890 logical body bytes) used 688,128 bytes for the previous FTS table and
+1,945,600 bytes for tenant/prefix indexing: 2.83 times the FTS-only footprint.
+This synthetic sample excludes source/history tables and is not a production
+capacity forecast. Both migration 12 and migration 14 rebuild derived FTS content;
+include both steps when measuring an upgrade from the deployed schema 7.
+
+The same migration adds tenant-specific Space candidate indexes, per-state queue
+indexes, a cleanup-only job flag and a durable maintenance cursor. Existing job
+progress remains intact. Queue claims select bounded candidates before combining
+states; maintenance can continue its bounded scan on a later invocation.
+Space pagination bounds candidates from each source before merging and checking
+current access; exact-scoped PATs start from their stored Space IDs. Sorting the
+caller's own membership/share set may still grow with that set. These indexes
+remove unrelated-tenant scans, not the cost of enumerating an arbitrarily large
+set of the caller's grants. Include large-account pagination in capacity testing.
+
+Migration 15 adds account/key and retained organization-membership indexes for
+the initial workspace snapshot, plus a tombstone index and source-erasure cursor.
+Automatic source erasure, when enabled, inspects at most 20 raw tombstones per
+invocation before applying each Space's retention policy. It advances past rows
+that are not yet due and wraps for later checks; a configured retention duration
+is an eligibility threshold, not a promise of deletion at that exact instant.
+Existing source, history, job progress and the vector-sweep cursor remain intact.
+
+Migration 16 indexes per-Space ingest/job lists and all retained memory states
+used by index rebuilds. It also records at most 100 vector IDs in a pending
+deletion page. Accepted asynchronous deletions are confirmed on later slices,
+with a five-second delay while visibility is pending. These waits preserve prior
+failure counts; actual provider errors and abandoned leases retain the five-attempt
+failure limit. A deletion cursor and erasure confirmation advance only after
+absence is observed under the current lease. Migration 17 adds a durable retry
+deadline and delay for each pending page. If vectors remain visible, the same
+page is deleted again after an initial 60-second interval, doubling up to 24 hours.
+Checkpointing before the provider request preserves the propagation window across
+restarts. Visibility waits and reconciliation do not spend failure attempts;
+actual provider errors and abandoned leases still do. This also removes vectors
+from an older upsert that finishes between deletion and confirmation.
+`vector_erased_at` records the most recent confirmed absence; later sweeps retain
+that historical observation while their job is pending. It does not certify that
+an earlier provider request can never finish later. Inspect pending/dead cleanup
+jobs alongside that timestamp. Initial erasure leaves it null until confirmation.
+Identifiers remain available for
+subsequent anti-resurrection sweeps.
+
+Queries and stored bodies use the same Unicode61 tokenization without query-only
+NFKC conversion. Identical fullwidth or ligature words remain searchable; ASCII
+and compatibility variants remain distinct. The 31-code-point limit applies to
+each of the first 20 distinct processed terms in the original query.
+
+Checkout recovery records whether a Stripe Checkout request may have been sent.
+A customer-creation failure leaves the request unattempted; its first Checkout
+attempt atomically refreshes the expiry to 35 minutes and permanently marks the
+attempt. Concurrent callers and retries use that persisted expiry. A lost
+Checkout response, or any checkout row that predates migration 8, is treated as
+attempted even when `session_id` is NULL. Do not reset its marker or extend its
+expiry: reconcile the existing Stripe attempt and preserve the idempotency key.
+An expired operation requires a new operation ID. Stripe requires at least a
+30-minute creation window and rejects changed parameters for an existing
+idempotency key. [Checkout expiry](https://docs.stripe.com/api/checkout/sessions/create),
+[Stripe idempotency](https://docs.stripe.com/api/idempotent_requests).
+
+A local expiry alone does not authorize a replacement purchase: an earlier
+session may have completed while its payment event is still queued. Migration 10
+records an immutable closure only after Stripe confirms expiry or confirms that
+the completed session's matching subscription ended. A completed live purchase
+requires reconciliation instead of a new checkout. If a prior attempt's session
+ID is unknown after response loss, keep it blocked for operator reconciliation;
+do not guess that NULL means no purchase occurred.
+
+SCIM DELETE records a tombstone for the exact membership, revokes its access and
+removes that resource from SCIM queries while preserving internal audit history.
+PATCH deactivation remains visible with `active:false`. GET supports SCIM page
+normalization and attribute selection without returning explicitly excluded email
+fields. The adapter remains deprovisioning-only; it does not provision users.
+
+Indexing and vector cleanup retain durable chunk/cursor progress under the current
+job lease. Successful partial work yields without consuming a failure attempt;
+provider failures and crashed expired leases are capped at five attempts before
+manual recovery. Cleanup retains identifier-only references for later erasure
+sweeps and confirms each deletion page before advancing its cursor. An erasure
+ledger is marked complete only after the full pass. Jobs become eligible for a
+repeat sweep after 24 hours; the durable scan visits at most 100 completed jobs
+per invocation, so a full scan of a large backlog can take longer than a day.
+Sweeps of soft-deleted, erased and current live memories restart cleanup progress
+to catch late obsolete provider writes. The done job's `available_at` records
+the last confirmed completion. Monitor backlog size and the oldest completion
+age rather than assuming a daily completion guarantee.
+Restored memories and live leases are excluded. Explicit rebuilds also
+reset progress without taking over a live lease. A manual failed-job retry keeps
+its confirmed progress. Per-slice provider-call/time limits and a drain time budget
+leave room for the rest of the scheduled pipeline.
+
+Live memories also revisit obsolete vector references daily, retaining completed
+chunk progress so cleanup does not repeat embedding calls. Migration 11 indexes
+Space export history, memory creation ordering and recipient invitation pages.
+Exports select a bounded page of target IDs before hydrating revisions; received
+invitations use account-bound cursors and at most 100 rows per requested page.
+
+Migration 18 adds `release_shares_space_created` on
+`release_shares(space_id, created_at DESC, id DESC)` for bounded, newest-first
+outbound share history. It preserves all existing grants and their timestamps.
+
+Migration 12 rebuilds derived FTS content with retained, immutable row-ID mapping
+and replaces the credential view's global membership materialization with exact
+membership lookup. Source, versions, audit, membership and credential rows are
+preserved. The FTS backfill runs once during migration; include its duration in
+the staging rollout for the actual database size. Subsequent memory mutations
+locate one FTS row through its indexed identifier.
+Migration 13 applies the same exact-membership lookup to foundation key issuance
+while retaining its validation, original membership/email binding and audit.
 
 Keep `BACKGROUND_JOBS_ENABLED=false` and `AUTO_ERASURE_ENABLED=false` for the
 current pilot configuration. The cron does not dispatch AI/vector/ingestion or
@@ -34,28 +196,99 @@ as `AUTH_CALLBACK_VALIDATION`, `AUTH_FLOW_CLAIM`, `AUTH_TOKEN_EXCHANGE_403`,
 Record the fixed code and time when diagnosing a failed attempt. The optional
 numeric suffix is an upstream HTTP status; it is not the callback response status.
 Do not collect authorization codes, JWTs, cookies or full callback URLs. Request
-logging remains disabled. The observed real-user SSO failure is still under
-investigation; these diagnostics do not establish or fix its cause. MCP client
+logging remains disabled. The unsupported Workers redirect mode that caused the
+observed login failure was corrected, and real-account SSO passed. MCP client
 scope configuration is covered in [CONNECTING.md](CONNECTING.md).
 
-## Historical 0.3.0 runbook
+## Creation and delegation recovery
 
-This runbook covers the Standard memory Worker in `saas/`, deployed at `https://memory.allenlabs.org`. Release 0.3.0 and its fifth migration are deployed; the service remains a hosted pilot rather than production GA. Real-user browser login remains unverified. The 0.3.0 public HTTP smoke check passed on 2026-09-08 at 09:22 UTC. Central-auth upstream CI is green; that result is separate from this SaaS module's passing local checks.
+Organization and Space creation POSTs are not idempotent. A transport failure,
+unreadable successful response or mutation 5xx can follow a committed write. If
+the outcome is uncertain, refresh `/v1/workspace` and inspect existing IDs, names, organization and
+parent context before creating again. Do not automatically repeat the POST.
+The root editor explains this uncertainty and asks users to copy needed drafts
+before refreshing the page. Memory mutations with an operation ID retain their
+existing same-operation retry behavior. Confirmed validation/authorization errors
+and ordinary GET retry guidance remain separate.
 
-## Deployment record — 2026-09-08
+In `/manage`, an edit completion clears only the draft it submitted. A newer
+failed draft remains available for retry and same-account session recovery;
+an older body-free receipt preserves its submitted copy separately.
+
+A domain-delegation retry returns `200 {"completed":true}` for the exact same
+live domain/membership pair. Every retry checks the current manager, target,
+domain validity, browser session and recent email proof. It never revives a
+revoked assignment or remaps it to a membership created after rejoining.
+
+## Outbound share recovery
+
+`GET /v1/spaces/:spaceId/shares` returns `{results,nextCursor}` for issued
+grants, newest first by `createdAt` and then `id`. The `limit` defaults to 25
+and must be an integer from 1 to 100. Continue with the returned opaque cursor;
+it is bound to the requesting account and Space. Each row contains
+`id,spaceId,recipientEmail,createdAt,expiresAt,acceptedAt,revokedAt`.
+
+The list requires a current browser session with current update permission for
+the Space. PATs and external OAuth bearers cannot use it. Listing does not
+require a recent email proof. It includes grants issued by older browser
+sessions and expired or revoked grants. The returned timestamps are retained
+history and do not assert that the recipient currently has access.
+
+Share creation with `POST /v1/spaces/:spaceId/shares` is not idempotent. If a
+response is lost or a mutation 5xx leaves the outcome uncertain, do not
+automatically repeat the POST. Refresh the outbound
+list, inspect the original and any duplicate grants, and revoke unwanted grants
+with `DELETE /v1/spaces/:spaceId/shares/:shareId`. Creation and revocation still
+require current update permission and an email proof from the last five minutes.
+The `/manage` console offers refresh, incremental pages and per-row revocation.
+Confirmed revocation cannot be overwritten by an earlier list response. Until a
+fresh read returns `revokedAt`, the UI shows confirmation without inventing a
+timestamp; account and Space changes still invalidate old responses.
+An uncertain DELETE response asks the user to inspect that ID's revocation
+record; it does not claim that revocation failed or automatically create a grant.
+After resolving an uncertain outcome, create another grant only if needed.
+
+## Response checks and retained content
+
+Trash rows expose `restoreUntil = deletedAt + current retentionDays * 86400000`
+and `restoreExpired`, which becomes true at the cutoff itself. The default
+Space policy is 30 days; a changed policy affects subsequent reads and restore
+decisions. These fields describe retention, not write permission. Restore still
+requires current update authority and the expected revision. An unchanged
+tombstone at or beyond its cutoff returns `409 restore_expired`; a mismatched revision
+returns `409 revision_conflict`.
+
+Memory get/list/search responses check current read authority, the represented
+revision, erasure and the requested live/trash state in their final primary
+snapshot. Normal lists and searches also omit superseded facts. Exports retain
+their historical snapshot revisions, while the final query checks current
+export authority/session and suppresses erased sources. This final snapshot is
+the response decision point. List/export cursors follow the raw candidate page:
+continue a non-null `nextCursor` even when filtering leaves `results` empty.
+
+Ingest detail and lists read current authority and state together, then check
+expiry before returning. Approved and cancelled jobs keep those terminal states;
+other jobs past their deadline report `expired`. Only an unexpired `review`
+response contains proposals or source quotes. Approved, cancelled and expired
+responses do not return earlier proposals.
+
+## Deployment boundaries
+
+This runbook covers the Standard memory Worker in `saas/`, deployed at `https://memory.allenlabs.org`. It remains a hosted pilot. Version-specific test results, Worker version IDs and acceptance results belong in the maintained release integration record.
+
+## Recorded environment
 
 | Item | Confirmed state |
 | --- | --- |
 | Live domain | `https://memory.allenlabs.org` |
-| Product / Worker deployment version | `0.3.0` / `16f1ae09-9280-4cff-942f-4a8b90644367` |
+| Product / Worker deployment version | See [release/INTEGRATION.md](release/INTEGRATION.md) |
 | Dedicated production D1 UUID | `a186c3b4-9092-4619-97b0-cda5b99d9b5d` |
-| Remote migrations | All five applied: identity, memory, product, auth, and forward hierarchy migration `0005_hierarchy-schema.sql` |
+| Remote migrations | All seven applied: identity, memory, product, auth, hierarchy, release and maintenance indexes |
 | Cloudflare account | Approved personal account configured for this deployment |
 | Central-auth live settings | Additive trusted-origin/resource update completed; 14 other bindings and existing auth domains preserved |
 | Durable central-auth configuration | Source allowlists and generated types updated; full upstream CI passed |
-| Local 0.3.0 validation | 171 tests, TypeScript, frozen migration checks, and bundled local workerd/D1 integration passed |
-| Public HTTP verification | 0.3.0 passed at 2026-09-08 09:22 UTC: home/health/assets 200, protected endpoints 401, login 302 to the correct issuer |
-| Outstanding user verification | Hosted SSO completion; ordinary Chrome test outside the controlled browser session pending |
+| Validation / public HTTP | Version-specific local and CI results are in the integration record |
+| Browser SSO | Real-account login/callback and authenticated workspace passed on 2026-09-09 |
 
 The earlier remote D1 permission error was resolved for this deployment using authorized temporary credentials. The deployment used one-hour account tokens scoped to D1 Write, Workers Scripts Write, and Account Settings Read, plus zone permissions restricted to `allenlabs.org` for Zone Read and Workers Routes Write. All temporary deployment tokens were revoked after use.
 
@@ -94,7 +327,7 @@ npm run check
 npm run test:d1
 ```
 
-`npm run types` runs `wrangler types worker-configuration.d.ts --strict-vars=false`; review generated binding changes. `npm run check` runs strict typechecking, the explicit SQLite/auth/UI/HTTP test suites, and migration-source consistency checks. `npm run test:d1` first performs the dry-run Worker build, then runs the bundled Worker against local Miniflare/workerd and D1. It covers a populated four-to-five migration upgrade, independent nested organizations, provisioning, invitations, machine keys, memory revisions, MCP, and exact-organization offboarding. The 0.3.0 run passed all 171 tests and these runtime checks. Tests use synthetic local data; they do not verify live SSO, remote D1 permissions, DNS, or production readiness.
+`npm run types` runs `wrangler types worker-configuration.d.ts --strict-vars=false`; review generated binding changes. `npm run check` runs strict typechecking, baseline and release SQLite/auth/UI/HTTP suites, client templates and migration consistency. `npm run test:d1` builds and runs the Worker against local Miniflare/workerd and D1. It covers populated forward upgrades, conservative preservation of existing checkout attempts, customer-failure recovery, durable vector-cleanup progress, independent nested organizations, provisioning, PATs, memory operations, MCP, cleanup and native OAuth transport. Tests use synthetic local data; they do not verify live SSO, remote D1 permissions, DNS, or production readiness.
 
 Additional existing scripts:
 
@@ -125,11 +358,11 @@ npm run deploy
 
 `preflight` checks local configuration, including the real D1 UUID, client ID, custom domain, alternate-host restrictions, and disabled invocation logging. It does not call the provider or prove remote readiness. `db:remote` runs preflight and applies migrations with `wrangler d1 migrations apply DB --remote`. `deploy` runs check and preflight before `wrangler deploy`; it does not apply D1 migrations or run `test:d1` for you. Stop on any failing command and inspect which remote migrations, if any, were applied before retrying.
 
-All five migrations are now applied remotely in order. Migration 0005 adds the hierarchy without changing the first four migration files or their existing data. `migrations:check` verifies the original baseline's SHA-256 hashes, and `.gitattributes` pins SQL files to LF. `migrations:sync` can create a missing new forward migration but refuses to rewrite an existing migration. Add reviewed forward migrations; never regenerate or edit an already applied file to change production schema. Apply a required migration before deploying code that queries its new tables. A code rollback also requires compatible database schema. Revoke temporary maintenance tokens after the authorized work and verify cleanup.
+All seven migrations are applied remotely in order. `migrations:check` verifies their frozen SHA-256 hashes, and `.gitattributes` pins SQL files to LF. To add a forward migration, register its source in `scripts/migrations.mjs`; `migrations:sync` can create the missing new file but refuses to rewrite an existing migration. Never edit an applied file to change production schema. Apply a required migration before deploying code that queries its new tables. Never roll back to a writer that ignores release capability policies. Revoke temporary maintenance tokens after use and verify cleanup.
 
-The latest real-user sign-in attempt remains incomplete. Provider-side evidence shows approved consent and an authorization code issued but not consumed. The controlled in-app browser and Chrome reported `ERR_BLOCKED_BY_CLIENT` for `/auth/callback`, including requests without parameters or with synthetic credentials. This observed client-side block does not establish a broken server-side SSO implementation. An ordinary Chrome test outside the controlled browser session is pending. No security protections were disabled during diagnosis; do not log or copy real callback codes while investigating.
+Real-account sign-in passed after the Workers redirect fix, including approval, callback and authenticated Space loading. No security protections were disabled. If login fails again, collect only the fixed failure stage and time, never real callback codes.
 
-The 0.3.0 public check passed at 2026-09-08 09:22 UTC: home, health, and assets returned 200, protected endpoints returned 401, and login returned 302 to `auth-api.allen.company`. Live authenticated checks still need to verify browser login/callback/logout, personal Space isolation, independent parent/child access, member read versus admin write, invitation acceptance, machine-key REST/MCP access and revocation, and membership removal with exact derived-key denial. Record the deployment version, migration state, test time, and actual results. Do not infer user-login success from provider consent, local tests, public liveness, or deployment alone.
+For each rollout record the deployment version, migration state, test time and observed results. Validate public liveness, authentication/discovery and affected authenticated workflows. Live mail/PAT issuance, external MCP clients, multi-account organizational workflows, configured providers and recovery still require acceptance. Do not infer those outcomes from consent, local tests or liveness alone.
 
 ## Daily operation and security
 
@@ -139,7 +372,7 @@ The `REQUEST_LIMITER` binding currently allows 120 calls per 60 seconds per key 
 
 Keep Worker invocation/request logging disabled: OAuth callback query strings contain authorization codes. Do not enable broad `wrangler tail`, URL/header capture, tracing, or request-body logging for a login incident. Never log cookies, authorization headers, raw provider tokens, invitation/key secrets, or memory bodies. Use sanitized status counts, request IDs, and identifier-only audit records. Current raw provider bearer tokens are verified in memory and stored only as SHA-256 digests; opaque browser sessions and machine keys also persist digest-only. Keep Cloudflare credentials in their approved credential store, outside repository files and diagnostics.
 
-Browser cookies are Secure, HttpOnly, and SameSite=Lax. Sessions last at most 15 minutes and never beyond the verified provider token expiry; users must sign in again after expiry. The provider supplies no `auth_time`. Refresh, sign-in callback time, or token use must not be substituted for verified recent reauthentication. `reauthenticated_at` remains NULL for these sessions, so sensitive email-link/unlink and delegated domain-revocation workflows remain unavailable through ordinary hosted sign-in.
+Browser cookies are Secure, HttpOnly, and SameSite=Lax. Sessions last at most 15 minutes and never beyond the verified provider token expiry. The provider supplies no `auth_time`; callback time and refresh must not substitute for recent proof. The session initially has `reauthenticated_at=NULL`. A one-use email proof bound to that session establishes a five-minute recent-reauthentication window for sensitive operations. Cloudflare Email receipt remains a separate live acceptance check.
 
 The editor temporarily retains an unsaved draft in the open page when a session expires. Reconnection and write retries verify the original account and current write access to the original Space; optimistic revision checks still apply. This is ephemeral page memory, not localStorage, sessionStorage, or a durable draft service. Reloading or closing the page loses the draft. Explicit logout or reconnection under another account clears it.
 
@@ -166,10 +399,10 @@ This database contains both memory and authorization history. An earlier restore
 4. Reapply or reconcile revoked/disabled accounts, organizations, claims, memberships, keys, email blocks, and consumed invitations. Invalidate restored sessions and pending OAuth/email proofs as appropriate. Never reopen using the restored authorization snapshot alone.
 5. Validate schema/migration compatibility, fresh login, tenant isolation, and known revoked-key/member denial while public traffic remains blocked. Reopen only after reconciliation and verification are recorded.
 
-No scheduled long-term backup export or user export workflow is implemented here. A Time Travel window is not a permanent archive. Design and test any additional backup retention and access controls before relying on them.
+User memory exports are implemented as bounded snapshots. They are not database backups or complete account exports. No scheduled long-term database backup exporter is implemented. A Time Travel window is not a permanent archive; design and test additional retention and access controls before relying on them.
 
 ## Current release limits
 
-Memory deletion creates a tombstone; previous bodies remain in `memory_versions` and storage history. There is no permanent purge, retention-expiry job, user export, or erasure workflow. Do not promise physical deletion from storage or backups.
+Normal deletion creates a tombstone. Recently reauthenticated explicit erasure removes individual memory payload/history while retaining identifier/audit records; automatic retention erasure is implemented but disabled in the pilot. Backups and complete account deletion are outside that erasure operation. See [release/OPERATIONS.ko.md](release/OPERATIONS.ko.md) for the data lifecycle.
 
-Billing, payments, pooled usage accounting, vector/semantic search, embeddings, provider-wide deprovisioning, and Zero-Access encryption are not implemented. Storage uses one dedicated D1 database; the scale review is a proposal, and no sharding or shard routing is deployed. Search is bounded literal substring search; Standard memory is server-readable. Email reauthentication/proof-delivery and account-recovery operations still need a supported provider proof and an operated workflow. These limits, plus full live user SSO and recovery validation, remain release gates; do not label this service production GA based on the current implementation or deployment alone.
+Pooled usage accounting, FTS5 search, exports and explicit shares are implemented. AI/Vectorize, payments and identity deprovisioning adapters need configuration and live acceptance; provider jobs remain disabled. Zero-Access encryption, physical sharding and R2 offload are not implemented, and the dedicated D1 database retains its per-database size limit. Managed memory is service-readable. Mail/PAT receipt, real MCP clients, load and recovery drills remain launch work; the service is a pilot.

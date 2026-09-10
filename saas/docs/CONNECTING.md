@@ -10,7 +10,7 @@ Memory SaaS의 메모리 저장소는 **Space**다. Git 저장소와 자동으�
 ## 특정 저장소만 허용하는 PAT
 
 1. 웹 콘솔에서 중앙 SSO로 로그인하고 PAT 관리 화면을 연다. 발급에는 5분 이내 본인 확인이 필요하다.
-2. 개인 또는 한 조직을 고르고 허용할 Space를 명시적으로 선택한다. **한 PAT에 개인 Space와 조직 Space, 또는 서로 다른 조직의 Space를 섞을 수 없다.** 필요하면 범위마다 PAT를 따로 만든다.
+2. 개인 또는 한 조직을 고르고 허용할 Space를 명시적으로 선택한다. **조직 PAT는 한 조직의 현재 멤버십에만 연결되며 개인 Space나 다른 조직의 Space를 섞을 수 없다.** 개인 읽기 전용 PAT는 본인의 개인 Space와 수락한 읽기 공유 Space를 함께 선택할 수 있으며, 공유 원본이 조직 Space여도 가능하다.
 3. 필요한 동작만 선택하고 1–90일의 만료 기간을 정한다. 토큰은 한 번 표시되므로 비밀 관리 도구에 저장한다.
 4. 클라이언트 실행 환경의 `MEMORY_SAAS_PAT`에 토큰을 주입한다. 설정 파일에는 변수 이름만 둔다. 실제 토큰을 명령행 인수나 저장소 파일에 넣지 않는다.
 
@@ -22,9 +22,9 @@ Memory SaaS의 메모리 저장소는 **Space**다. Git 저장소와 자동으�
 | `delete` | 논리 삭제 |
 | `export` | REST 내보내기 |
 
-조직 쓰기는 현재 owner/admin 멤버십도 필요하다. 조직 키는 발급 당시의 정확한 멤버십·이메일에 연결되며 회수·만료 시 차단된다. PAT로 Space 생성, 조직/키 관리, 최근 본인 확인이 필요한 영구 제거를 할 수 없다.
+조직 member는 읽기 전용 조직 PAT를 발급할 수 있고, 나머지 capability는 현재 owner/admin 멤버십도 필요하다. 조직 키는 발급 당시의 정확한 멤버십·이메일에 연결되며 회수·만료 시 차단된다. 개인 PAT는 조직 멤버십만으로 조직 권한을 얻지 않는다. 조직 공유 Space를 개인 PAT의 `spaceIds`에 넣을 때는 `organizationId`를 생략하고 `capabilities: ["read"]`를 지정한다. 매 요청에서 공유 수락·만료·회수, 수신 이메일과 공유자의 현재 권한을 다시 검사하며 공유만으로 쓰기·내보내기를 허용하지 않는다. PAT로 Space 생성, 조직/키 관리, 최근 본인 확인이 필요한 영구 제거를 할 수 없다.
 
-발급 API는 브라우저 세션으로 `POST /v1/keys`를 호출한다. [개인 요청 예제](../client/pat-request.personal.json)와 [조직 요청 예제](../client/pat-request.organization.json)의 ID를 실제 값으로 교체한다. `spaceIds`는 1–50개이며, 생략하면 그 개인/조직 범위 전체를 허용하므로 특정 저장소용 PAT에서는 생략하지 않는다. 서버가 범위를 검증하므로 MCP 인수의 `spaceId`를 바꿔도 권한이 넓어지지 않는다.
+발급 API는 브라우저 세션으로 `POST /v1/keys`를 호출한다. [개인 요청 예제](../client/pat-request.personal.json)와 [조직 요청 예제](../client/pat-request.organization.json)의 ID를 실제 값으로 교체한다. `spaceIds`는 1–50개이며, 생략하면 그 개인/조직 범위 전체를 허용하고 개인 PAT의 읽기 범위에는 수락한 공유도 포함된다. 특정 저장소용 PAT에서는 생략하지 않는다. 서버가 범위를 검증하므로 MCP 인수의 `spaceId`를 바꿔도 권한이 넓어지지 않는다.
 
 ## Codex
 
@@ -38,7 +38,9 @@ codex mcp login allenlabs-memory --scopes openid,profile,email,memory:read,memor
 
 ## Claude Code와 MCP 기반 플러그인
 
-[claude.pat.json](../client/claude.pat.json) 또는 [claude.sso.json](../client/claude.sso.json)의 `mcpServers` 항목을 프로젝트 `.mcp.json`에 병합한다. PAT 방식은 `${MEMORY_SAAS_PAT}`를 실행 환경에서 받는다. SSO 방식은 Claude Code의 `/mcp`에서 `allenlabs-memory` 인증을 시작한다. 플러그인이 자체 `.mcp.json`을 제공하는 경우에도 같은 HTTP 서버 항목을 사용할 수 있다. [공식 Claude Code MCP 문서](https://code.claude.com/docs/en/mcp)를 참고한다.
+현재 Claude Code 연결에는 [claude.pat.json](../client/claude.pat.json)의 `mcpServers` 항목을 프로젝트 `.mcp.json`에 병합하고 `${MEMORY_SAAS_PAT}`를 실행 환경에서 제공한다. 플러그인이 자체 `.mcp.json`을 제공하는 경우에도 같은 HTTP 서버 항목을 사용할 수 있다. [공식 Claude Code MCP 문서](https://code.claude.com/docs/en/mcp)를 참고한다.
+
+**Claude Code SSO는 현재 중앙 callback 등록 정책과 호환성 확인이 필요하다.** Claude Code의 현재 문서는 `http://localhost:PORT/callback`을 사용하며 v2.1.231에서 이 형식을 복원했다고 명시한다. 아래에 기록된 중앙 DCR 정책은 `localhost`를 허용하지 않는다. [공식 callback 계약](https://code.claude.com/docs/en/mcp#use-pre-configured-oauth-credentials). 따라서 [claude.sso.json](../client/claude.sso.json)은 호환되는 callback 등록과 실제 로그인 검증이 끝난 뒤 사용할 참조 템플릿이다. 템플릿을 추가하거나 callback 포트만 고정해도 이 호스트 불일치는 해결되지 않는다. 이번 PR은 중앙 인증 정책을 변경하지 않았으며, 합성 JWT 테스트는 실제 Claude 등록·로그인 성공을 증명하지 않는다. 호환성을 확인한 뒤에는 `/mcp`에서 `allenlabs-memory` 인증을 시작한다.
 
 SSO 템플릿의 `oauth.scopes`는 읽기·추가·수정·삭제에 필요한 권한과 계정 이메일 연결에 필요한 identity 권한을 명시한다. 이를 생략하면 현재 Claude Code는 401 응답의 `scope="memory:read"`를 따라 읽기 전용으로 로그인할 수 있다. 이미 그렇게 로그인했다면 `/mcp`에서 해당 서버의 인증을 지우고 다시 로그인하여 변경된 권한에 동의한다. 권한 문자열은 공백으로 구분하며 [Claude Code의 scope 설정](https://code.claude.com/docs/en/mcp#restrict-oauth-scopes)을 따른다.
 
@@ -49,6 +51,8 @@ SSO 템플릿의 `oauth.scopes`는 읽기·추가·수정·삭제에 필요한 �
 ## 기존 Better Auth 기반 중앙 SSO
 
 OAuth를 지원하는 원격 MCP 클라이언트는 서비스의 401 응답에 포함된 보호 리소스 메타데이터를 따라 로그인한다. 별도 Memory 비밀번호나 Better Auth 세션 쿠키를 플러그인에 복사하지 않는다.
+
+유효한 SSO 토큰으로 도구를 호출했지만 필요한 동작 scope가 없으면 서버는 HTTP 403과 `WWW-Authenticate`에 추가로 필요한 scope를 반환한다. 이를 지원하는 클라이언트는 다시 동의를 요청할 수 있다. PAT의 고정된 capability 제한이나 Space 접근 권한 거부는 이 재인증 요청으로 해제되지 않는다.
 
 | 항목 | 값 |
 |---|---|

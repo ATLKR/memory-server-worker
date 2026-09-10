@@ -12,6 +12,18 @@ const principal=subject=>({issuer:'https://auth-api.allen.company',subject,email
 async function fixture(t){
   const f=createDatabase({workspace:true}); t.after(f.close);
   f.raw.exec(readFileSync(new URL('../../release-schema.sql',import.meta.url),'utf8'));
+  f.raw.exec(readFileSync(new URL('../../maintenance-schema.sql',import.meta.url),'utf8'));
+  f.raw.exec(readFileSync(new URL('../../checkout-schema.sql',import.meta.url),'utf8'));
+  f.raw.exec(readFileSync(new URL('../../job-progress-schema.sql',import.meta.url),'utf8'));
+  f.raw.exec(readFileSync(new URL('../../protocol-schema.sql',import.meta.url),'utf8'));
+  f.raw.exec(readFileSync(new URL('../../pagination-schema.sql',import.meta.url),'utf8'));
+  f.raw.exec(readFileSync(new URL('../../lookup-schema.sql',import.meta.url),'utf8'));
+  f.raw.exec(readFileSync(new URL('../../key-lookup-schema.sql',import.meta.url),'utf8'));
+  f.raw.exec(readFileSync(new URL('../../tenant-queue-schema.sql',import.meta.url),'utf8'));
+  f.raw.exec(readFileSync(new URL('../../workspace-lookup-schema.sql',import.meta.url),'utf8'));
+  f.raw.exec(readFileSync(new URL('../../retrieval-progress-schema.sql',import.meta.url),'utf8'));
+  f.raw.exec(readFileSync(new URL('../../vector-reconciliation-schema.sql',import.meta.url),'utf8'));
+  f.raw.exec(readFileSync(new URL('../../outbound-share-schema.sql',import.meta.url),'utf8'));
   f.db.batch=async statements=>{f.raw.exec('BEGIN IMMEDIATE');try{const results=[];for(const statement of statements)results.push(await statement.all());f.raw.exec('COMMIT');return results;}catch(error){f.raw.exec('ROLLBACK');throw error;}};
   const workspace=new WorkspaceService(f.db,()=>NOW),owner=await workspace.signIn(principal('owner'));
   f.raw.prepare('UPDATE credentials SET reauthenticated_at=? WHERE token_digest=?').run(NOW,await digest(owner.token));
@@ -74,7 +86,7 @@ for(const beforeMapping of [false,true])test('email-only revocation preserves pe
   const snapshot=await f.workspace.snapshot(signedIn.token);
   assert.deepEqual(snapshot.account.emails,[]); assert.deepEqual(snapshot.organizations,[]);
   assert.ok(snapshot.spaces.some(space=>space.organizationId===null));
-  if(!beforeMapping){assert.equal(signedIn.accountId,f.owner.accountId);await forbidden(()=>requireSpace(f.db,signedIn.token,f.org.spaceId,'read',NOW));}
+  if(!beforeMapping){assert.equal(signedIn.accountId,f.owner.accountId);await forbidden(()=>requireSpace(f.db,signedIn.token,f.org.spaceId,'read', () => NOW));}
 });
 
 for(const kind of ['account.disabled','email.revoked'])test('identity webhook atomically covers a first sign-in racing its batch: '+kind,async t=>{
@@ -83,10 +95,10 @@ for(const kind of ['account.disabled','email.revoked'])test('identity webhook at
   f.db.batch=async statements=>{raced=await f.workspace.signIn(principal('racer'));return original(statements);};
   await webhook(admin,{id:'identity-race',subject:'racer',type:kind,...(kind==='email.revoked'?{email:principal('racer').email}:{})});
   if(kind==='account.disabled'){
-    await forbidden(()=>interactive(f.db,raced.token,NOW));
+    await forbidden(()=>interactive(f.db,raced.token, () => NOW));
     await assert.rejects(()=>f.workspace.signIn(principal('racer')));
   }else{
-    await interactive(f.db,raced.token,NOW);
+    await interactive(f.db,raced.token, () => NOW);
     assert.deepEqual((await f.workspace.snapshot(raced.token)).account.emails,[]);
     assert.deepEqual((await f.workspace.snapshot((await f.workspace.signIn(principal('racer'))).token)).account.emails,[]);
   }
@@ -98,12 +110,12 @@ test('provider revocation rolls back webhook receipt and tombstone if the author
   await assert.rejects(()=>webhook(admin,{id:'failed-disable',subject:'owner',type:'account.disabled'}));
   assert.equal(f.raw.prepare('SELECT count(*) n FROM release_webhook_events').get().n,0);
   assert.equal(f.raw.prepare('SELECT count(*) n FROM release_provider_revocations').get().n,0);
-  await interactive(f.db,f.owner.token,NOW);
+  await interactive(f.db,f.owner.token, () => NOW);
 });
 
 test('checkout retry after a lost provider response retains the original Stripe parameters and expires locally',async t=>{
   const f=await fixture(t);let now=NOW,firstBody,firstKey,sessionCalls=0;
-  const billing=new Billing({DB:f.db,PUBLIC_ORIGIN:'https://memory.allenlabs.org',STRIPE_SECRET_KEY:'synthetic',STRIPE_API_VERSION:'synthetic',BILLING_PRICES_JSON:JSON.stringify({price_test:{plan:'team',monthlyUnits:10000,storageBytes:1048576000}}),fetch:async(url,init)=>{
+  const billing=new Billing({DB:f.db,BACKGROUND_JOBS_ENABLED:'true',PUBLIC_ORIGIN:'https://memory.allenlabs.org',STRIPE_SECRET_KEY:'synthetic',STRIPE_WEBHOOK_SECRET:'w'.repeat(64),STRIPE_API_VERSION:'synthetic',BILLING_PRICES_JSON:JSON.stringify({price_test:{plan:'team',monthlyUnits:10000,storageBytes:1048576000}}),fetch:async(url,init)=>{
     if(String(url).endsWith('/customers'))return Response.json({id:'cus_test'});
     sessionCalls++;
     if(!firstBody){firstBody=init.body;firstKey=init.headers['idempotency-key'];throw new Error('Response lost after provider acceptance');}

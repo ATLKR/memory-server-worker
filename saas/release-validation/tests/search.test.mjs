@@ -119,3 +119,28 @@ test('an expired or replaced indexing lease cannot be renewed or send another pr
   }finally{db.close();}
  }
 });
+
+for(const boundary of ['first-renewal','between-chunks'])for(const change of ['update','delete','erase'])test('indexing stops sending cached plaintext after '+change+' at '+boundary,async()=>{
+ const {db,token}=await fixture();const sent=[];
+ try {
+  const store=new MemoryStore(db,()=>at),memory=await store.create(token,'s1',{body:'private source '.repeat(200)},'create');
+  let changed=false;
+  const mutate=async()=>{
+   if(changed)return;changed=true;
+   if(change==='update')await store.update(token,'s1',memory.id,{body:'Replacement fact',expectedRevision:1},'update');
+   else {
+    await store.remove(token,'s1',memory.id,1,'delete');
+    if(change==='erase')await store.erase(token,'s1',memory.id,2,memory.id,'erase');
+   }
+  };
+  const env={DB:db,AI:{async run(_model,input){sent.push(input.text[0]);return{data:[Array(1024).fill(.1)]};}},MEMORY_INDEX:{async upsert(){if(boundary==='between-chunks')await mutate();},async deleteByIds(){},async getByIds(){return[];}}};
+  const jobs=new Jobs(env,()=>at);
+  if(boundary==='first-renewal'){
+   const renew=jobs.renew.bind(jobs);jobs.renew=async job=>{await renew(job);await mutate();};
+  }
+  await jobs.drain(1);
+  assert.equal(changed,true);
+  assert.equal(sent.length,boundary==='first-renewal'?0:1,'A new embedding request received stale or erased plaintext');
+  assert.equal(db.raw.prepare('SELECT state FROM release_jobs WHERE memory_id=? AND revision=1').get(memory.id).state,'done');
+ }finally{db.close();}
+});

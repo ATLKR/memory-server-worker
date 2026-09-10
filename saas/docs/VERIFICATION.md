@@ -1,19 +1,15 @@
 # Product verification — 2026-09-08
 
-This is the historical **0.3.0** deployment record. The **0.4.0-rc.2**
-integration added release suites and a populated sixth-migration workerd/D1
-test. Current evidence and activation limits are in
+This file preserves historical **0.3.0** and foundation verification. Current
+release evidence, including upgrades through migration 7, native workerd tests,
+successful real-account SSO and activation limits, is maintained in
 [release/INTEGRATION.md](release/INTEGRATION.md). Local tests do not establish live
 provider or real-user SSO acceptance.
 
-The **0.4.0-rc.2** source adds bounded expiry cleanup, independent provider-job
-activation, unavailable-feature controls, sanitized callback diagnostics and
-explicit MCP SSO scopes. Run the full check and populated workerd/D1 migration
-test for that candidate; the historical totals below are not rc.2 results. Root
-development dependencies were separately patched and locally verified: full audit
-zero vulnerabilities, all 208 existing tests and builds pass, generated types and
-the deterministic plugin ZIP remain unchanged. No new hosted CI or deployment
-result is asserted here.
+The totals and outstanding items below describe their historical checkpoints,
+not the current candidate. For the current source run `npm run check` and
+`npm run test:d1`; root checks remain separate. Do not use an earlier checkpoint's
+SSO status or feature list as the present release contract.
 
 ## Historical 0.3.0 productization result
 

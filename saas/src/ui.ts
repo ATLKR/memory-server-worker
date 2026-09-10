@@ -1,3 +1,5 @@
+import { PUBLIC_ORIGIN } from './config.ts';
+
 export type Brand = {
   name: string;
   shortName: string;
@@ -10,19 +12,27 @@ function escapeHtml(value: string): string {
   return String(value).replace(/[&<>"']/g, character => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]!);
 }
 
+/** Encode mailbox contents while retaining RFC 6068's addr-spec separator. */
+export function supportEmailHref(address: string): string {
+  const at = address.lastIndexOf('@');
+  return 'mailto:' + (at < 0 ? encodeURIComponent(address)
+    : encodeURIComponent(address.slice(0, at)) + '@' + encodeURIComponent(address.slice(at + 1)));
+}
+
 /** Static shell only. Authenticated data is loaded through same-origin APIs. */
-export function renderPage(brand: Brand): string {
+export function renderPage(brand: Brand, hasManagement = false, origin = PUBLIC_ORIGIN): string {
   const name = escapeHtml(brand.name);
   const shortName = escapeHtml(brand.shortName);
   const description = escapeHtml(brand.description);
   const support = escapeHtml(brand.supportEmail);
-  const supportHref = escapeHtml('mailto:' + encodeURIComponent(brand.supportEmail));
+  const supportHref = escapeHtml(supportEmailHref(brand.supportEmail));
   const mark = escapeHtml(Array.from(brand.shortName)[0] ?? '');
+  const mcpEndpoint = escapeHtml(new URL('/mcp', origin).href);
   return `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="${description}"><meta name="color-scheme" content="light">
 <title>${name}</title><link rel="stylesheet" href="/assets/app.css"><script src="/assets/app.js" defer></script></head>
-<body><a class="skip-link" href="#main-content">본문으로 건너뛰기</a>
+<body data-management="${hasManagement}" data-mcp-endpoint="${mcpEndpoint}"><a class="skip-link" href="#main-content">본문으로 건너뛰기</a>
 <div id="boot" class="boot" role="status"><span class="brand-mark" aria-hidden="true">${mark}</span><p>작업 공간을 불러오고 있어요.</p></div>
 <section id="welcome" class="welcome" hidden aria-labelledby="welcome-title">
   <header class="welcome-header"><a class="brand" href="/" aria-label="${name} 홈"><span class="brand-mark" aria-hidden="true">${mark}</span><span>${shortName}</span></a><span class="badge">Standard</span></header>
@@ -40,12 +50,12 @@ export function renderPage(brand: Brand): string {
   <main id="main-content" class="main-content" tabindex="-1"><div class="topbar"><span>${shortName} <span aria-hidden="true">/</span> <span id="breadcrumb">내 메모리</span></span><span class="topbar-note"><span class="small-dot"></span> 나의 맥락, 한곳에</span></div>
     <header class="page-heading"><div><p id="space-kind" class="eyebrow">PERSONAL SPACE</p><h1 id="space-title">내 메모리</h1><p id="space-description">남겨둔 생각을 다음 작업으로 이어가세요.</p></div><div class="heading-actions"><button id="invite-members" class="button secondary" type="button" hidden>멤버 초대</button><button id="new-memory" class="button primary" type="button"><span aria-hidden="true">+</span> 새 메모리</button></div></header>
     <div class="feedback"><p id="app-status" role="status" aria-live="polite"></p><p id="app-error" class="error" role="alert" hidden></p><button id="reload-memory" class="text-button" type="button" hidden>최신 내용 다시 불러오기</button><div id="reauth-actions" hidden><a id="reauthenticate" class="button secondary" href="/auth/login" target="_blank" rel="noopener noreferrer">새 탭에서 다시 로그인</a> <button id="resume-session" class="button primary" type="button">로그인 후 다시 연결</button><p class="field-help">초안은 이 창에만 남아 있어요. 이 창을 닫거나 새로고침하지 마세요. 필요하면 내용을 직접 복사해 두세요.</p></div></div>
-    <section class="memory-console" aria-label="메모리 탐색 및 편집"><div class="memory-index"><form id="search-form" class="search-form" role="search"><label class="sr-only" for="search-query">메모리 검색</label><span class="search-symbol" aria-hidden="true">⌕</span><input id="search-query" name="query" type="search" maxlength="256" placeholder="기억 속에서 찾아보세요" autocomplete="off"><button class="sr-only" type="submit">검색</button></form><div class="list-caption"><span id="list-count">모든 메모리</span><span>최근 수정순</span></div><div id="memory-list" class="memory-list" aria-label="메모리 목록"></div><div id="list-empty" class="list-empty" hidden><span class="empty-mark" aria-hidden="true">↳</span><strong id="empty-title">아직 비어 있는 공간이에요.</strong><p id="empty-description">첫 번째 메모리로 시작해 보세요.</p></div><button id="load-more" class="load-more" type="button" hidden>더 불러오기</button></div>
+    <section class="memory-console" aria-label="메모리 탐색 및 편집"><div class="memory-index"><form id="search-form" class="search-form" role="search"><label class="sr-only" for="search-query">메모리 검색</label><span class="search-symbol" aria-hidden="true">⌕</span><input id="search-query" name="query" type="search" maxlength="${hasManagement ? 1024 : 256}" placeholder="기억 속에서 찾아보세요" autocomplete="off"><button class="sr-only" type="submit">검색</button></form><div class="list-caption"><span id="list-count">모든 메모리</span><span id="list-order">최근 수정순</span></div><div id="memory-list" class="memory-list" aria-label="메모리 목록"></div><div id="list-empty" class="list-empty" hidden><span class="empty-mark" aria-hidden="true">↳</span><strong id="empty-title">아직 비어 있는 공간이에요.</strong><p id="empty-description">첫 번째 메모리로 시작해 보세요.</p></div><button id="load-more" class="load-more" type="button" hidden>더 불러오기</button></div>
     <div class="memory-detail"><div id="editor-empty" class="editor-empty"><span class="empty-mark" aria-hidden="true">✳</span><h2>다음에 다시 찾을 기억</h2><p>목록에서 메모리를 선택하거나<br>새 메모리를 작성해 보세요.</p></div><form id="editor-form" class="editor-form" hidden><div class="editor-top"><div><span id="editor-kind" class="eyebrow">MEMORY</span><p id="memory-meta" class="memory-meta"></p></div><span id="permission-badge" class="badge">편집 가능</span></div><label class="field-label" for="memory-body">내용</label><textarea id="memory-body" class="memory-body" name="body" required placeholder="기억해 둘 내용을 자유롭게 적어 보세요. 첫 줄은 목록의 제목으로 표시됩니다."></textarea><div class="source-field"><label class="field-label" for="memory-source">출처 <span>선택</span></label><input id="memory-source" name="source" type="text" placeholder="문서 이름, 회의, 대화 또는 링크" autocomplete="off"></div><div class="editor-footer"><span id="editor-hint">변경한 내용은 저장을 눌러 반영하세요.</span><div><button id="delete-memory" class="button danger" type="button">삭제</button><button id="save-memory" class="button primary" type="submit">변경사항 저장</button></div></div></form></div></section>
     <footer class="workspace-footer"><span>Standard · 서버에서 저장하고 처리합니다.</span><span>${name}</span></footer>
   </main>
 </div>
-<dialog id="memory-dialog" class="memory-dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description"><div class="dialog-header"><span class="eyebrow">YOUR WORKSPACE</span><button id="dialog-close" class="icon-button" type="button" aria-label="창 닫기">×</button></div><h2 id="dialog-title"></h2><p id="dialog-description" class="dialog-description"></p><p id="dialog-error" class="error" role="alert" hidden></p><form id="dialog-form" class="dialog-form"></form><div class="dialog-footer"><button id="dialog-cancel" class="button secondary" type="button">닫기</button><button id="dialog-submit" class="button primary" type="submit" form="dialog-form">만들기</button></div></dialog>
+<dialog id="memory-dialog" class="memory-dialog" aria-labelledby="dialog-title" aria-describedby="dialog-description"><div class="dialog-header"><span class="eyebrow">YOUR WORKSPACE</span><button id="dialog-close" class="icon-button" type="button" aria-label="창 닫기">×</button></div><h2 id="dialog-title"></h2><p id="dialog-description" class="dialog-description"></p><p id="dialog-pending" role="status" hidden>요청을 처리하고 있어요. 결과가 표시될 때까지 창을 닫을 수 없어요.</p><p id="dialog-error" class="error" role="alert" hidden></p><form id="dialog-form" class="dialog-form"></form><div class="dialog-footer"><button id="dialog-cancel" class="button secondary" type="button">닫기</button><button id="dialog-submit" class="button primary" type="submit" form="dialog-form">만들기</button></div></dialog>
 <noscript><p class="noscript">이 작업 공간을 사용하려면 JavaScript를 활성화해 주세요. <a href="${supportHref}">도움 요청</a></p></noscript>
 </body></html>`;
 }
@@ -54,23 +64,34 @@ export function renderPage(brand: Brand): string {
 export const appScript = String.raw`(() => {
 'use strict';
 const $ = id => document.getElementById(id);
-const state = { workspace: null, space: null, items: [], selected: null, draft: false, dirty: false, saving: false, nextCursor: null, query: '', authExpired: false, reconnecting: false, recovery: null };
-let listEpoch = 0, detailEpoch = 0, workspaceEpoch = 0, dialogEpoch = 0, searchTimer;
-let dialogAction = null;
+const state = { workspace: null, space: null, items: [], selected: null, draft: false, dirty: false, saving: false, workspaceLoading: false, nextCursor: null, query: '', authExpired: false, reconnecting: false, recovery: null };
+let listEpoch = 0, detailEpoch = 0, editEpoch = 0, editorEpoch = 0, workspaceEpoch = 0, dialogEpoch = 0, requestEpoch = 0, verifiedRequestEpoch = 0, authenticationEpoch = 0, searchTimer;
+let dialogPending = false, dialogAction = null, pendingMemoryOperation = null, logoutAccountId = null, logoutPending = false;
 const date = value => { const at = new Date(value); return Number.isFinite(at.getTime()) ? new Intl.DateTimeFormat('ko-KR', { year: 'numeric', month: 'short', day: 'numeric' }).format(at) : '기한 없음'; };
 const node = (tag, className, content) => { const el = document.createElement(tag); if (className) el.className = className; if (content !== undefined) el.textContent = String(content); return el; };
 function status(message = '') { $('app-status').textContent = message; }
 function clearError() { $('app-error').hidden = true; $('app-error').textContent = ''; $('reload-memory').hidden = true; }
 function errorText(error) {
+  if (error.code === 'search_token_too_long') return '검색 단어는 각각 31자까지 입력할 수 있어요. 검색어를 줄여 주세요.';
   if (error.status === 401) return '로그인이 만료되었어요. 다시 로그인해 주세요.';
   if (error.status === 403) return '이 작업에 필요한 권한이 없거나 변경되었어요. 공간을 다시 확인해 주세요.';
   if (error.status === 409) return '다른 곳에서 내용이 변경되었어요. 작성 중인 내용을 복사한 뒤 최신 내용을 불러와 주세요.';
   if (error.status === 429) return '요청이 많아 잠시 쉬고 있어요. 잠시 후 다시 시도해 주세요.';
   if (error.status === 400 || error.status === 413 || error.status === 422) return '입력 내용을 확인해 주세요. 이름은 100자, 본문은 16KB, 출처는 2KB까지 입력할 수 있어요.';
+  if (error.uncertain) {
+    if (error.path === '/v1/organizations' || error.path === '/v1/spaces') return '작업 결과를 확인할 수 없어요. 이미 조직·공간이 생성되었을 수 있어요. 필요한 입력과 초안을 복사한 뒤 페이지를 새로고침하여 작업 공간을 먼저 확인하세요. 다시 만들면 중복 생성될 수 있어요.';
+    if (error.operationRetry) return '작업 결과를 확인할 수 없어요. 입력 내용은 이 창에 남아 있어요. 동일한 작업을 다시 실행하면 현재 작업 ID로 재시도합니다.';
+    if (/\/invites$/.test(error.path)) return '초대 요청의 결과를 확인할 수 없어요. 초대가 생성되었을 수 있지만 이 응답의 코드는 확인할 수 없어요. 새 초대를 만들면 별도 코드가 생성됩니다.';
+    return '작업 결과를 확인할 수 없어요. 이미 적용되었을 수 있어요. 필요한 초안을 복사한 뒤 페이지를 새로고침하여 현재 상태를 먼저 확인해 주세요.';
+  }
   return '요청을 완료하지 못했어요. 연결을 확인하고 다시 시도해 주세요.';
 }
+function ignoredError(error) { return error.handled || ((error.status === 401 || error.code === 'account_mismatch') && error.authenticationCurrent && !error.authenticationCurrent()); }
 function showError(error, target = 'app-error') {
-  if (error.handled) return;
+  if (ignoredError(error)) return;
+  if (error.code === 'account_mismatch') {
+    signedOut('다른 계정으로 로그인되어 이전 계정의 초안과 화면을 지웠어요. 다시 로그인하거나 페이지를 새로고침해 주세요.'); return;
+  }
   if (error.status === 401) {
     if (state.dirty && state.workspace && state.space) suspendAuthentication();
     else signedOut(errorText(error));
@@ -79,24 +100,49 @@ function showError(error, target = 'app-error') {
   const el = $(target); el.textContent = errorText(error); el.hidden = false;
   if (error.status === 409 && target === 'app-error') $('reload-memory').hidden = false;
 }
-async function requestJson(path, method = 'GET', body) {
-  const options = { method, credentials: 'same-origin', headers: { Accept: 'application/json' }, cache: 'no-store' };
-  if (body !== undefined) { options.headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
-  const response = await fetch(path, options);
-  if (!response.ok) { const error = new Error('Request failed'); error.status = response.status; throw error; }
-  return response.status === 204 ? null : response.json();
+function uncertainResponse(error, path, method, body) {
+  if (!['GET', 'HEAD'].includes(method)) { error.uncertain = true; error.path = path; error.operationRetry = Boolean(body && body.operationId); }
+  return error;
 }
-async function api(path, method = 'GET', body) {
-  if (state.authExpired) { const error = new Error('Session requires reconnection'); error.status = 401; throw error; }
+async function requestJson(path, method = 'GET', body) {
+  const request = ++requestEpoch, generation = authenticationEpoch, accountId = state.workspace?.account.id;
+  const options = { method, credentials: 'same-origin', headers: { Accept: 'application/json' }, cache: 'no-store' };
+  if (state.workspace) options.headers['X-Memory-Account-Id'] = state.workspace.account.id;
+  if (body !== undefined) { options.headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
+  let response;
+  try { response = await fetch(path, options); }
+  catch (error) { throw uncertainResponse(error, path, method, body); }
+  if (!response.ok) {
+    const error = new Error('Request failed'); error.status = response.status; const detail = await response.json().catch(() => null); error.code = detail && detail.error;
+    error.authenticationCurrent = () => request >= verifiedRequestEpoch && generation === authenticationEpoch && accountId === state.workspace?.account.id;
+    // An obsolete view must still report a current authentication failure. Only
+    // a newer verified response or an explicit session boundary supersedes it.
+    if (error.status === 401 || error.code === 'account_mismatch') { showError(error); error.handled = true; }
+    throw response.status >= 500 ? uncertainResponse(error, path, method, body) : error;
+  }
+  let value;
+  try { value = response.status === 204 ? null : await response.json(); }
+  catch (error) { throw uncertainResponse(error, path, method, body); }
+  if (generation === authenticationEpoch && accountId === state.workspace?.account.id) verifiedRequestEpoch = Math.max(verifiedRequestEpoch, request);
+  return value;
+}
+async function api(path, method = 'GET', body, beforeRequest = () => {}) {
+  if (logoutPending) { const error = new Error('Logout pending'); error.handled = true; throw error; }
+  if (state.authExpired) { const error = new Error('Session requires reconnection'); error.status = 401; error.handled = true; throw error; }
   // A recovered draft stays bound to its original account and Space until it
   // is saved or deliberately replaced. Recheck again immediately before retry.
   if (state.recovery && method !== 'GET' && !await resumeSession(false)) {
     const error = new Error('Recovery verification failed'); error.handled = true; throw error;
   }
+  // Recovery verification deliberately advances the workspace generation.
+  // Writers bind their response guard after that verification, before the request.
+  beforeRequest();
   return requestJson(path, method, body);
 }
 function suspendAuthentication() {
+  ++authenticationEpoch;
   ++workspaceEpoch; ++listEpoch; ++detailEpoch; clearTimeout(searchTimer);
+  state.workspaceLoading = false;
   if (!state.recovery) state.recovery = { accountId: state.workspace.account.id, spaceId: state.space.id };
   state.authExpired = true;
   if ($('memory-dialog').open) $('memory-dialog').close();
@@ -105,7 +151,7 @@ function suspendAuthentication() {
   $('app-error').hidden = false; status(''); updateActions();
 }
 async function resumeSession(notify = true) {
-  if (!state.recovery || state.reconnecting) return false;
+  if (!state.recovery || state.reconnecting || logoutPending) return false;
   const context = state.recovery, epoch = ++workspaceEpoch;
   state.reconnecting = true; updateActions();
   try {
@@ -115,18 +161,23 @@ async function resumeSession(notify = true) {
       signedOut('다른 계정으로 로그인되어 초안을 지웠어요. 원래 계정으로 다시 로그인해 주세요.'); return false;
     }
     const space = fresh.spaces.find(item => item.id === context.spaceId);
+    ++authenticationEpoch; state.workspace = fresh;
+    if (space) state.space = space;
+    $('account-email').textContent = fresh.account.emails[0] ? fresh.account.emails[0].address : '연결된 이메일 없음';
+    renderSpaces(); updateActions();
     if (!space || !space.canWrite) {
       state.authExpired = true; $('reauth-actions').hidden = false;
       $('app-error').textContent = '원래 공간의 쓰기 권한을 확인할 수 없어요. 초안은 이 창에 남아 있으니 필요한 내용을 복사해 두세요.';
       $('app-error').hidden = false; return false;
     }
-    state.workspace = fresh; state.space = space; state.authExpired = false;
-    $('account-email').textContent = fresh.account.emails[0] ? fresh.account.emails[0].address : '연결된 이메일 없음';
+    state.authExpired = false;
     $('reauth-actions').hidden = true; clearError(); renderSpaces();
     if (notify) status('같은 계정과 공간의 권한을 확인했어요. 초안을 다시 저장해 주세요.');
     return true;
   } catch (error) {
+    if (ignoredError(error)) return false;
     if (epoch === workspaceEpoch && state.recovery === context) {
+      if (error.code === 'account_mismatch') { showError(error); return false; }
       state.authExpired = true; $('reauth-actions').hidden = false;
       $('app-error').textContent = errorText(error); $('app-error').hidden = false;
     }
@@ -136,32 +187,40 @@ async function resumeSession(notify = true) {
   }
 }
 function signedOut(message = '') {
-  ++workspaceEpoch; ++listEpoch; ++detailEpoch;
-  state.workspace = null; state.space = null; state.selected = null; state.items = []; state.dirty = false;
-  state.authExpired = false; state.reconnecting = false; state.recovery = null; $('reauth-actions').hidden = true;
+  ++authenticationEpoch;
+  ++workspaceEpoch; ++listEpoch; ++detailEpoch; ++editorEpoch;
+  state.workspace = null; state.space = null; state.selected = null; state.items = []; state.dirty = false; pendingMemoryOperation = null;
+  state.authExpired = false; state.reconnecting = false; state.workspaceLoading = false; state.recovery = null; $('reauth-actions').hidden = true;
   $('memory-body').value = ''; $('memory-source').value = ''; $('memory-list').replaceChildren(); $('space-list').replaceChildren();
   if ($('memory-dialog').open) $('memory-dialog').close();
   $('boot').hidden = true; $('workspace').hidden = true; $('welcome').hidden = false;
   $('welcome-error').textContent = message; $('welcome-error').hidden = !message;
 }
 function mayLeave() { return !state.dirty || window.confirm('저장하지 않은 내용이 있어요. 이 내용을 닫을까요?'); }
-function canWrite() { return Boolean(state.space && state.space.canWrite && !state.authExpired && !state.reconnecting); }
+function canWrite() { return Boolean(state.space && state.space.canWrite && !state.authExpired && !state.reconnecting && !state.workspaceLoading && !logoutPending); }
 function setSaving(value) { state.saving = value; $('memory-body').disabled = value; $('memory-source').disabled = value; updateActions(); }
 function updateActions() {
-  const paused = state.authExpired || state.reconnecting;
+  const paused = state.authExpired || state.reconnecting || state.workspaceLoading || logoutPending;
+  const copyOnly = state.dirty && !state.selected && !state.draft;
+  const manages = organization => ['owner', 'admin'].includes(organization.role);
+  $('manage-members').hidden = !state.workspace?.organizations.some(manages);
+  $('invite-members').hidden = !state.workspace?.organizations.some(organization => organization.id === state.space?.organizationId && manages(organization));
+  $('logout').disabled = logoutPending;
   for (const id of ['new-space', 'manage-members', 'accept-invite', 'manage-keys', 'invite-members']) $(id).disabled = paused || !state.workspace;
   $('new-organization').disabled = paused || !state.workspace || !state.workspace.account.emails.length;
   $('search-query').disabled = paused || !state.space; $('load-more').disabled = paused;
-  $('resume-session').disabled = state.reconnecting;
+  $('resume-session').disabled = state.reconnecting || logoutPending;
   for (const button of document.querySelectorAll('#space-list button, #memory-list button')) button.disabled = paused || state.saving;
   $('new-memory').disabled = !canWrite() || state.saving;
   $('save-memory').disabled = !canWrite() || state.saving || (!state.selected && !state.draft);
   $('delete-memory').disabled = !canWrite() || state.saving || !state.selected;
-  $('memory-body').readOnly = !canWrite(); $('memory-source').readOnly = !canWrite();
-  $('permission-badge').textContent = canWrite() ? '편집 가능' : '읽기 전용';
-  $('editor-hint').textContent = canWrite() ? '변경한 내용은 저장을 눌러 반영하세요.' : '이 공간에서는 메모리를 읽을 수 있어요.';
+  $('memory-body').readOnly = !canWrite() || copyOnly; $('memory-source').readOnly = !canWrite() || copyOnly;
+  $('permission-badge').textContent = copyOnly ? '제출한 내용 · 복사용' : canWrite() ? '편집 가능' : '읽기 전용';
+  $('editor-hint').textContent = copyOnly ? '현재 저장된 본문이 아닙니다. 필요하면 복사한 뒤 다른 메모리를 선택하세요.' : canWrite() ? '변경한 내용은 저장을 눌러 반영하세요.' : '이 공간에서는 메모리를 읽을 수 있어요.';
 }
 function renderEditor(memory, draft = false) {
+  ++editorEpoch;
+  pendingMemoryOperation = null;
   if (!state.authExpired) state.recovery = null;
   state.selected = memory; state.draft = draft; state.dirty = false;
   $('editor-empty').hidden = Boolean(memory || draft); $('editor-form').hidden = !memory && !draft;
@@ -175,7 +234,7 @@ function renderList() {
   const list = $('memory-list'); list.replaceChildren();
   for (const item of state.items) {
     const button = node('button', 'memory-row'); button.type = 'button';
-    button.disabled = state.authExpired || state.reconnecting || state.saving;
+    button.disabled = state.authExpired || state.reconnecting || state.saving || state.workspaceLoading || logoutPending;
     const excerpt = String(item.body ?? item.snippet ?? '');
     const title = excerpt.trim().split('\n')[0].slice(0, 90) || '메모리';
     button.append(node('strong', 'memory-row-title', title), node('span', 'memory-row-preview', excerpt.slice(0, 170)));
@@ -184,16 +243,22 @@ function renderList() {
     button.addEventListener('click', () => { if (mayLeave()) selectMemory(item.id); }); list.append(button);
   }
   $('list-count').textContent = state.items.length + '개 표시' + (state.query ? ' · 검색 결과' : '');
+  $('list-order').textContent = document.body.dataset.management === 'true' ? (state.query ? '관련도순' : '최근 생성순') : '최근 수정순';
   $('list-empty').hidden = state.items.length > 0;
   $('empty-title').textContent = state.query ? '일치하는 메모리가 없어요.' : '아직 비어 있는 공간이에요.';
   $('empty-description').textContent = state.query ? '다른 단어로 다시 찾아보세요.' : canWrite() ? '첫 번째 메모리로 시작해 보세요.' : '팀이 공유한 메모리가 여기에 표시됩니다.';
   $('load-more').hidden = !state.nextCursor || Boolean(state.query);
 }
 async function selectMemory(id) {
-  if (!state.space || state.saving || state.authExpired || state.reconnecting) return;
-  const epoch = ++detailEpoch, spaceId = state.space.id; status('메모리를 불러오는 중…'); clearError();
-  try { const memory = await api('/v1/spaces/' + encodeURIComponent(spaceId) + '/memories/' + encodeURIComponent(id)); if (epoch !== detailEpoch || !state.space || state.space.id !== spaceId) return; renderEditor(memory); status(''); }
-  catch (error) { if (epoch === detailEpoch) { status(''); showError(error); } }
+  if (!state.space || state.saving || state.authExpired || state.reconnecting || logoutPending) return;
+  const epoch = ++detailEpoch, editing = editEpoch, displayed = editorEpoch, spaceId = state.space.id; status('메모리를 불러오는 중…'); clearError();
+  try {
+    const memory = await api('/v1/spaces/' + encodeURIComponent(spaceId) + '/memories/' + encodeURIComponent(id));
+    if (epoch !== detailEpoch || displayed !== editorEpoch || !state.space || state.space.id !== spaceId) return;
+    if (editing !== editEpoch) { status('불러오는 동안 작성한 초안을 유지했어요. 저장한 뒤 메모리를 다시 선택해 주세요.'); return; }
+    renderEditor(memory); status('');
+  }
+  catch (error) { if (epoch === detailEpoch && displayed === editorEpoch && state.space?.id === spaceId) { status(''); showError(error); } }
 }
 async function loadItems(append = false) {
   if (!state.space || state.authExpired || state.reconnecting) return;
@@ -206,7 +271,7 @@ async function loadItems(append = false) {
     const result = await api(path); if (epoch !== listEpoch || !state.space || state.space.id !== spaceId) return;
     state.items = append ? state.items.concat(result.results.filter(item => !state.items.some(old => old.id === item.id))) : result.results;
     state.nextCursor = result.nextCursor || null; renderList(); status('');
-    if (!state.selected && !state.draft && state.items.length) await selectMemory(state.items[0].id);
+    if (!state.selected && !state.draft && !state.dirty && state.items.length) await selectMemory(state.items[0].id);
   } catch (error) { if (epoch === listEpoch) { status(''); showError(error); } }
   finally { if (epoch === listEpoch) $('load-more').disabled = false; }
 }
@@ -214,7 +279,7 @@ function renderSpaces() {
   $('space-list').replaceChildren();
   for (const space of state.workspace.spaces) {
     const button = node('button', 'space-button'); button.type = 'button';
-    button.disabled = state.authExpired || state.reconnecting || state.saving;
+    button.disabled = state.authExpired || state.reconnecting || state.saving || state.workspaceLoading || logoutPending;
     button.append(node('span', 'space-symbol', space.organizationId ? '◫' : '◈'), node('span', 'space-name', space.name));
     if (!space.canWrite) button.append(node('span', 'space-readonly', '읽기'));
     if (state.space && space.id === state.space.id) button.setAttribute('aria-current', 'page');
@@ -236,35 +301,64 @@ async function selectSpace(id) {
 }
 async function loadWorkspace(preferredSpace) {
   const epoch = ++workspaceEpoch;
+  ++listEpoch; ++detailEpoch; clearTimeout(searchTimer);
+  state.workspaceLoading = true; updateActions();
   try {
     const result = await api('/v1/workspace'); if (epoch !== workspaceEpoch) return;
-    state.workspace = result; $('boot').hidden = true; $('welcome').hidden = true; $('workspace').hidden = false;
+    ++authenticationEpoch; state.workspace = result; $('boot').hidden = true; $('welcome').hidden = true; $('workspace').hidden = false;
     $('account-email').textContent = result.account.emails[0] ? result.account.emails[0].address : '연결된 이메일 없음';
     $('new-organization').disabled = !result.account.emails.length;
     $('manage-members').hidden = !result.organizations.some(org => ['owner', 'admin'].includes(org.role));
     const chosen = result.spaces.find(space => space.id === preferredSpace) || result.spaces.find(space => state.space && space.id === state.space.id) || result.spaces[0];
     await selectSpace(chosen ? chosen.id : null);
-  } catch (error) { if (epoch === workspaceEpoch) { if (error.status === 401 && state.dirty && state.space) suspendAuthentication(); else signedOut(error.status === 401 ? '' : errorText(error)); } }
+  } catch (error) {
+    if (ignoredError(error)) return;
+    if (epoch === workspaceEpoch) {
+      if (error.status === 401 && state.dirty && state.space) suspendAuthentication();
+      else if (error.status === 401 || !state.workspace) signedOut(error.status === 401 ? '' : errorText(error));
+      else showError(error);
+    }
+  } finally {
+    if (epoch === workspaceEpoch) { state.workspaceLoading = false; updateActions(); }
+  }
+}
+function memoryWriteInput(method, path, input) {
+  if (document.body.dataset.management !== 'true') return input;
+  const fingerprint = JSON.stringify([state.workspace.account.id, method, path, input]);
+  if (!pendingMemoryOperation || pendingMemoryOperation.fingerprint !== fingerprint)
+    pendingMemoryOperation = { fingerprint, id: crypto.randomUUID() };
+  return { ...input, operationId: pendingMemoryOperation.id };
 }
 async function saveMemory(event) {
   event.preventDefault(); if (!canWrite() || state.saving || (!state.selected && !state.draft)) return;
   const body = $('memory-body').value, source = $('memory-source').value || null;
   if (!body.trim() || body.includes('\0') || (source && source.includes('\0')) || new TextEncoder().encode(body).length > 16384 || (source && new TextEncoder().encode(source).length > 2048)) { showError({ status: 400 }); return; }
   const spaceId = state.space.id; let path = '/v1/spaces/' + encodeURIComponent(spaceId) + '/memories';
+  let generation = workspaceEpoch, displayed = editorEpoch; const accountId = state.workspace.account.id;
+  const current = () => generation === workspaceEpoch && displayed === editorEpoch && state.workspace && state.workspace.account.id === accountId && state.space && state.space.id === spaceId;
   const updating = state.selected; if (updating) path += '/' + encodeURIComponent(updating.id);
   clearError(); setSaving(true); status('저장하고 있어요…');
   try {
-    const saved = await api(path, updating ? 'PATCH' : 'POST', updating ? { body, source, expectedRevision: updating.revision } : { body, source });
-    if (!state.space || state.space.id !== spaceId) return;
-    renderEditor(saved); await loadItems(); status('저장했어요. 다음 작업에서 이어가세요.');
-  } catch (error) { showError(error); status(''); }
+    const method = updating ? 'PATCH' : 'POST';
+    const saved = await api(path, method, memoryWriteInput(method, path, updating ? { body, source, expectedRevision: updating.revision } : { body, source }), () => { generation = workspaceEpoch; });
+    if (!current()) return;
+    if (saved.representation === 'receipt') {
+      state.selected = null; state.draft = false; state.dirty = true; updateActions();
+      $('memory-meta').textContent = '적용된 작업 버전 ' + saved.committedRevision + ' · 현재 본문 확인 필요';
+      try { const memory = await api('/v1/spaces/' + encodeURIComponent(spaceId) + '/memories/' + encodeURIComponent(saved.id)); if (!current()) return; renderEditor(memory); displayed = editorEpoch; await loadItems(); if (current()) status('작업 적용을 확인하고 현재 저장된 본문을 불러왔어요.'); }
+      catch (error) { if (!current()) return; if (error.status === 401 || error.code === 'account_mismatch') showError(error); else { await loadItems(); if (current()) status('작업은 이미 적용됐지만 현재 본문을 조회할 수 없어요. 제출했던 내용은 복사할 수 있도록 남겨 두었어요.'); } }
+      return;
+    }
+    renderEditor(saved); displayed = editorEpoch; await loadItems(); if (current()) status('저장했어요. 다음 작업에서 이어가세요.');
+  } catch (error) { if (current()) { showError(error); status(''); } }
   finally { setSaving(false); }
 }
 async function deleteMemory() {
   if (!canWrite() || !state.selected || state.saving || !window.confirm('이 메모리를 삭제할까요? 목록과 검색에서 사라지며, 기존 버전과 삭제 이력은 서버에 보존됩니다.')) return;
-  clearError(); setSaving(true); const selected = state.selected;
-  try { await api('/v1/spaces/' + encodeURIComponent(state.space.id) + '/memories/' + encodeURIComponent(selected.id), 'DELETE', { expectedRevision: selected.revision }); renderEditor(null); await loadItems(); status('메모리를 삭제했어요.'); }
-  catch (error) { showError(error); } finally { setSaving(false); }
+  clearError(); setSaving(true); const selected = state.selected, spaceId = state.space.id, accountId = state.workspace.account.id; let generation = workspaceEpoch, displayed = editorEpoch;
+  const current = () => generation === workspaceEpoch && displayed === editorEpoch && state.workspace && state.workspace.account.id === accountId && state.space && state.space.id === spaceId;
+  try { const path = '/v1/spaces/' + encodeURIComponent(spaceId) + '/memories/' + encodeURIComponent(selected.id); await api(path, 'DELETE', memoryWriteInput('DELETE', path, { expectedRevision: selected.revision }), () => { generation = workspaceEpoch; }); if (!current()) return; renderEditor(null); displayed = editorEpoch; await loadItems(); if (current()) status('메모리를 삭제했어요.'); }
+  catch (error) { if (current()) showError(error); } finally { setSaving(false); }
 }
 function field(name, label, options = {}) {
   const wrap = node('div', 'form-field'); const caption = node('label', 'field-label', label); caption.htmlFor = 'field-' + name;
@@ -277,10 +371,13 @@ function field(name, label, options = {}) {
   if (options.placeholder) input.placeholder = options.placeholder;
   wrap.append(caption, input); if (options.help) wrap.append(node('p', 'field-help', options.help)); $('dialog-form').append(wrap); return input;
 }
+function setDialogPending(value) { dialogPending = value; $('dialog-close').disabled = value; $('dialog-cancel').disabled = value; $('dialog-pending').hidden = !value; $('memory-dialog').setAttribute('aria-busy', String(value)); }
 function openDialog(title, description, button = '만들기') {
+  if (dialogPending) return false;
   ++dialogEpoch; dialogAction = null; $('dialog-form').replaceChildren(); $('dialog-error').hidden = true; $('dialog-error').textContent = '';
   $('dialog-title').textContent = title; $('dialog-description').textContent = description; $('dialog-submit').textContent = button; $('dialog-submit').hidden = false; $('dialog-submit').disabled = false;
   if (!$('memory-dialog').open) $('memory-dialog').showModal();
+  return true;
 }
 function closeDialog() { $('memory-dialog').close(); }
 function organizationChoices(writersOnly = false) { return state.workspace.organizations.filter(org => !writersOnly || ['owner', 'admin'].includes(org.role)).map(org => ({ value: org.id, label: org.name })); }
@@ -297,17 +394,17 @@ function showSecret(result, invite) {
   if (!invite) appendConnection(); secret.focus();
 }
 function appendConnection() {
-  const note = node('div', 'connection-note'); note.append(node('strong', '', '에이전트 연결'), node('p', '', 'MCP 엔드포인트'), node('code', '', 'https://memory.allenlabs.org/mcp'), node('p', '', '인증 헤더'), node('code', '', 'Authorization: Bearer <API_KEY>')); $('dialog-form').append(note);
+  const note = node('div', 'connection-note'); note.append(node('strong', '', '에이전트 연결'), node('p', '', 'MCP 엔드포인트'), node('code', '', document.body.dataset.mcpEndpoint), node('p', '', '인증 헤더'), node('code', '', 'Authorization: Bearer <API_KEY>')); $('dialog-form').append(note);
 }
 function openSpace() {
   if (!state.workspace || state.authExpired || state.reconnecting || !mayLeave()) return;
-  openDialog('새 공간 만들기', '작업이나 팀에 따라 기억을 나누어 보세요. 모든 공간은 Standard 서버 관리형입니다.');
+  if (!openDialog('새 공간 만들기', '작업이나 팀에 따라 기억을 나누어 보세요. 모든 공간은 Standard 서버 관리형입니다.')) return;
   field('name', '공간 이름', { maxLength: 100, placeholder: '예: 프로젝트 노트' }); field('organizationId', '소유 공간', { options: [{ value: '', label: '개인 공간' }, ...organizationChoices(true)], required: false });
   dialogAction = async epoch => { const input = { name: $('field-name').value, securityMode: 'managed' }; if ($('field-organizationId').value) input.organizationId = $('field-organizationId').value; const space = await api('/v1/spaces', 'POST', input); if (epoch !== dialogEpoch) return; closeDialog(); await loadWorkspace(space.id); }; focusFirst();
 }
 function openOrganization() {
   if (!state.workspace || state.authExpired || state.reconnecting || !state.workspace.account.emails.length || !mayLeave()) return;
-  openDialog('함께 쓰는 조직 만들기', '조직 멤버십은 선택한 인증 이메일에 연결됩니다. 해당 이메일의 권한이 해제되면 조직 접근도 해제됩니다.');
+  if (!openDialog('함께 쓰는 조직 만들기', '조직 멤버십은 선택한 인증 이메일에 연결됩니다. 해당 이메일의 권한이 해제되면 조직 접근도 해제됩니다.')) return;
   field('name', '조직 이름', { maxLength: 100, placeholder: '예: 디자인 팀' }); field('emailId', '조직에 연결할 이메일', { options: state.workspace.account.emails.map(email => ({ value: email.id, label: email.address })) });
   field('parentOrganizationId', '상위 조직', { options: [{ value: '', label: '없음 · 독립된 조직' }, ...organizationChoices(true)], required: false, help: '상위 조직을 선택해도 멤버십과 메모리 접근 권한은 자동으로 상속되지 않습니다.' });
   dialogAction = async epoch => { const input = { name: $('field-name').value, emailId: $('field-emailId').value }; if ($('field-parentOrganizationId').value) input.parentOrganizationId = $('field-parentOrganizationId').value; const result = await api('/v1/organizations', 'POST', input); if (epoch !== dialogEpoch) return; closeDialog(); await loadWorkspace(result.spaceId); }; focusFirst();
@@ -317,25 +414,36 @@ function openInvitation() {
   const organizationId = state.space.organizationId;
   const organization = state.workspace.organizations.find(org => org.id === organizationId);
   if (!organization || !['owner', 'admin'].includes(organization.role)) return;
-  openDialog('멤버 초대하기', '지정한 이메일을 인증한 계정만 참여할 수 있어요. 생성한 코드는 직접 전달해 주세요.', '초대 코드 만들기');
+  if (!openDialog('멤버 초대하기', '지정한 이메일을 인증한 계정만 참여할 수 있어요. 생성한 코드는 직접 전달해 주세요.', '초대 코드 만들기')) return;
   field('email', '초대할 이메일', { type: 'email', maxLength: 254, placeholder: 'name@company.com' }); field('role', '역할', { options: [{ value: 'member', label: '멤버 · 메모리 읽기' }, { value: 'admin', label: '관리자 · 메모리 편집 및 멤버 초대' }] });
   dialogAction = async epoch => { const result = await api('/v1/organizations/' + encodeURIComponent(organizationId) + '/invites', 'POST', { email: $('field-email').value, role: $('field-role').value }); if (epoch !== dialogEpoch) return; showSecret(result, true); }; focusFirst();
 }
 function openAccept() {
   if (!state.workspace || state.authExpired || state.reconnecting || !mayLeave()) return;
-  openDialog('초대 코드로 참여하기', '초대받은 이메일이 현재 계정에 연결되어 있어야 해요.', '참여하기');
+  if (!openDialog('초대 코드로 참여하기', '초대받은 이메일이 현재 계정에 연결되어 있어야 해요.', '참여하기')) return;
   field('token', '초대 코드', { multiline: true, placeholder: '전달받은 초대 코드를 붙여 넣으세요' });
   dialogAction = async epoch => { await api('/v1/invitations/accept', 'POST', { token: $('field-token').value.trim() }); if (epoch !== dialogEpoch) return; closeDialog(); await loadWorkspace(); status('조직에 참여했어요. 새 공간을 확인해 보세요.'); }; focusFirst();
 }
 function openMembers() {
   if (!state.workspace || state.authExpired || state.reconnecting) return;
   const choices = organizationChoices(true); if (!choices.length) return;
-  openDialog('조직 멤버 관리', '멤버십을 해제하면 해당 조직의 접근 권한과 파생 API 키가 해제됩니다. 개인 계정과 개인 메모리는 유지됩니다.');
+  if (!openDialog('조직 멤버 관리', '멤버십을 해제하면 해당 조직의 접근 권한과 파생 API 키가 해제됩니다. 개인 계정과 개인 메모리는 유지됩니다.')) return;
   $('dialog-submit').hidden = true;
   const select = field('organizationId', '관리할 조직', { options: choices });
   if (state.space && choices.some(choice => choice.value === state.space.organizationId)) select.value = state.space.organizationId;
   const list = node('div', 'key-list'); list.id = 'members-list'; list.setAttribute('aria-live', 'polite'); $('dialog-form').append(list);
   const epoch = dialogEpoch; let generation = 0;
+  function updateOwnerControls() {
+    const owners = [...list.querySelectorAll('.key-row')].filter(row => row.dataset.role === 'owner');
+    const mayRemoveOwners = state.workspace?.organizations.find(organization => organization.id === select.value)?.role === 'owner';
+    for (const row of owners) {
+      const lastOwner = owners.length === 1, button = row.querySelector('button');
+      button.disabled = lastOwner || !mayRemoveOwners || button.dataset.pending === 'true';
+      row.querySelector('.last-owner-help')?.remove();
+      if (lastOwner || !mayRemoveOwners) { const help = node('p', 'field-help last-owner-help', lastOwner ? '조직에는 소유자가 한 명 이상 필요하므로 마지막 소유자의 멤버십은 해제할 수 없어요.' : '조직 소유자만 다른 소유자의 멤버십을 해제할 수 있어요.'); help.id = 'owner-help-' + [...list.children].indexOf(row); row.append(help); button.setAttribute('aria-describedby', help.id); }
+      else button.removeAttribute('aria-describedby');
+    }
+  }
   async function loadMembers() {
     const current = ++generation, organizationId = select.value; list.replaceChildren(node('p', 'field-help', '멤버를 불러오는 중…'));
     try {
@@ -343,21 +451,24 @@ function openMembers() {
       if (epoch !== dialogEpoch || current !== generation) return;
       list.replaceChildren();
       for (const member of result.results) {
-        const row = node('div', 'key-row'); const details = node('div');
+        const row = node('div', 'key-row'); row.dataset.role = member.role; const details = node('div');
         details.append(node('strong', '', member.email || member.accountId), node('span', '', ({ owner: '소유자', admin: '관리자', member: '멤버' })[member.role] + ' · ' + date(member.expiresAt)));
         const remove = node('button', 'text-button danger', '멤버십 해제'); remove.type = 'button'; remove.setAttribute('aria-label', (member.email || member.accountId) + ' 멤버십 해제');
         remove.addEventListener('click', async () => {
+          if (remove.disabled) return;
+          if (member.accountId === state.workspace.account.id && !mayLeave()) return;
           if (!window.confirm('이 멤버의 조직 접근과 조직 API 키를 해제할까요? 개인 계정과 개인 메모리는 유지됩니다.')) return;
-          remove.disabled = true;
+          remove.dataset.pending = 'true'; remove.disabled = true;
           try {
             await api('/v1/organizations/' + encodeURIComponent(organizationId) + '/memberships/' + encodeURIComponent(member.id), 'DELETE');
             if (epoch !== dialogEpoch || current !== generation) return;
             if (member.accountId === state.workspace.account.id) { closeDialog(); await loadWorkspace(); }
-            else { row.remove(); if (!list.children.length) list.append(node('p', 'field-help', '표시할 멤버가 없어요.')); }
-          } catch (error) { if (epoch === dialogEpoch && current === generation) { showError(error, 'dialog-error'); remove.disabled = false; } }
+            else { row.remove(); updateOwnerControls(); if (!list.children.length) list.append(node('p', 'field-help', '표시할 멤버가 없어요.')); }
+          } catch (error) { if (epoch === dialogEpoch && current === generation) { showError(error, 'dialog-error'); delete remove.dataset.pending; remove.disabled = false; updateOwnerControls(); } }
         });
         row.append(details, remove); list.append(row);
       }
+      updateOwnerControls();
       if (!result.results.length) list.append(node('p', 'field-help', '표시할 멤버가 없어요.'));
     } catch (error) { if (epoch === dialogEpoch && current === generation) { list.replaceChildren(); showError(error, 'dialog-error'); } }
   }
@@ -365,16 +476,26 @@ function openMembers() {
 }
 function openKeys() {
   if (!state.workspace || state.authExpired || state.reconnecting) return;
-  openDialog('에이전트 연결 · API 키', '필요한 공간과 권한만 연결하세요. 키는 발급 즉시 한 번만 표시됩니다.', 'API 키 발급');
+  if (!openDialog('에이전트 연결 · API 키', '필요한 공간과 권한만 연결하세요. 키는 발급 즉시 한 번만 표시됩니다.', 'API 키 발급')) return;
+  const keyDialogEpoch = dialogEpoch, keyAccountId = state.workspace.account.id;
   const keys = state.workspace.keys.filter(key => key.revokedAt == null);
   if (keys.length) {
     const list = node('div', 'key-list'); list.append(node('h3', '', '발급한 키'));
     for (const key of keys) {
-      const row = node('div', 'key-row'); const details = node('div'); details.append(node('strong', '', key.label), node('span', '', (key.permission === 'write' ? '읽기 · 쓰기' : '읽기') + ' · ' + date(key.expiresAt) + ' 만료'));
+      const row = node('div', 'key-row'); row.dataset.keyId = key.id; const details = node('div');
+      const scope = document.body.dataset.management === 'true' ? '발급 시 지정한 동작·공간 권한' : key.permission === 'write' ? '읽기 · 쓰기' : '읽기';
+      details.append(node('strong', '', key.label), node('span', '', scope + ' · ' + date(key.expiresAt) + ' 만료'));
       const revoke = node('button', 'text-button danger', '해제'); revoke.type = 'button'; revoke.setAttribute('aria-label', key.label + ' 키 해제');
-      revoke.addEventListener('click', async () => { if (!window.confirm('이 키의 에이전트 접근을 해제할까요?')) return; revoke.disabled = true; try { await api('/v1/keys/' + encodeURIComponent(key.id), 'DELETE'); state.workspace.keys = state.workspace.keys.filter(item => item.id !== key.id); row.remove(); } catch (error) { showError(error, 'dialog-error'); revoke.disabled = false; } });
+      revoke.addEventListener('click', async () => { if (revoke.disabled || !window.confirm('이 키의 에이전트 접근을 해제할까요?')) return; revoke.disabled = true; try { await api('/v1/keys/' + encodeURIComponent(key.id), 'DELETE'); if (!state.workspace || state.workspace.account.id !== keyAccountId) return; state.workspace.keys = state.workspace.keys.filter(item => item.id !== key.id); for (const displayed of $('dialog-form').querySelectorAll('[data-key-id]')) if (displayed.dataset.keyId === key.id) displayed.remove(); } catch (error) { if (keyDialogEpoch === dialogEpoch && state.workspace?.account.id === keyAccountId) { showError(error, 'dialog-error'); revoke.disabled = false; } } });
       row.append(details, revoke); list.append(row);
     } $('dialog-form').append(list);
+  }
+  if (document.body.dataset.management === 'true') {
+    $('dialog-description').textContent = '새 PAT는 관리 콘솔에서 최근 본인 확인 후 허용할 공간과 동작을 선택해 발급하세요. 기존 키는 여기서 회수할 수 있어요.';
+    $('dialog-submit').hidden = true;
+    const link = node('a', 'button primary', '공간·동작을 지정해 PAT 발급'); link.href = '/manage';
+    link.addEventListener('click', event => { if (!mayLeave()) event.preventDefault(); });
+    $('dialog-form').append(link); return;
   }
   field('label', '새 키 이름', { maxLength: 100, placeholder: '예: 개인 개발 에이전트' });
   field('organizationId', '접근 범위', { options: [{ value: '', label: '나의 개인 공간' }, ...organizationChoices()], required: false });
@@ -384,7 +505,7 @@ function openKeys() {
 }
 $('editor-form').addEventListener('submit', saveMemory);
 $('resume-session').addEventListener('click', () => resumeSession());
-$('memory-body').addEventListener('input', () => { state.dirty = true; }); $('memory-source').addEventListener('input', () => { state.dirty = true; });
+$('memory-body').addEventListener('input', () => { ++editEpoch; state.dirty = true; }); $('memory-source').addEventListener('input', () => { ++editEpoch; state.dirty = true; });
 $('new-memory').addEventListener('click', () => { if (canWrite() && !state.saving && mayLeave()) { ++detailEpoch; clearError(); renderEditor(null, true); $('memory-body').focus(); } });
 $('delete-memory').addEventListener('click', deleteMemory);
 $('reload-memory').addEventListener('click', () => { if (state.selected && mayLeave()) selectMemory(state.selected.id); });
@@ -395,10 +516,26 @@ $('load-more').addEventListener('click', () => loadItems(true));
 $('new-space').addEventListener('click', openSpace); $('new-organization').addEventListener('click', openOrganization);
 $('manage-members').addEventListener('click', openMembers);
 $('invite-members').addEventListener('click', openInvitation); $('accept-invite').addEventListener('click', openAccept); $('manage-keys').addEventListener('click', openKeys);
-$('dialog-close').addEventListener('click', closeDialog); $('dialog-cancel').addEventListener('click', closeDialog);
-$('memory-dialog').addEventListener('close', () => { ++dialogEpoch; dialogAction = null; for (const input of $('dialog-form').querySelectorAll('input,textarea')) input.value = ''; $('dialog-form').replaceChildren(); $('dialog-error').textContent = ''; });
-$('dialog-form').addEventListener('submit', async event => { event.preventDefault(); if (!dialogAction || $('dialog-submit').disabled) return; const epoch = dialogEpoch; $('dialog-submit').disabled = true; $('dialog-error').hidden = true; try { await dialogAction(epoch); } catch (error) { if (epoch === dialogEpoch) showError(error, 'dialog-error'); } finally { if (epoch === dialogEpoch) $('dialog-submit').disabled = false; } });
-$('logout').addEventListener('click', async () => { if (!mayLeave()) return; try { const response = await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'follow' }); if (!response.ok) { const error = new Error('Logout failed'); error.status = response.status; throw error; } signedOut(); } catch (error) { showError(error); } });
+$('dialog-close').addEventListener('click', () => { if (!dialogPending) closeDialog(); }); $('dialog-cancel').addEventListener('click', () => { if (!dialogPending) closeDialog(); });
+$('memory-dialog').addEventListener('cancel', event => { if (dialogPending) event.preventDefault(); });
+$('memory-dialog').addEventListener('close', () => { ++dialogEpoch; setDialogPending(false); dialogAction = null; for (const input of $('dialog-form').querySelectorAll('input,textarea')) input.value = ''; $('dialog-form').replaceChildren(); $('dialog-error').textContent = ''; });
+$('dialog-form').addEventListener('submit', async event => { event.preventDefault(); if (!dialogAction || $('dialog-submit').disabled) return; const epoch = dialogEpoch, fields = [...$('dialog-form').querySelectorAll('input,select,textarea')].map(field => [field, field.disabled]); for (const [field] of fields) field.disabled = true; setDialogPending(true); $('dialog-submit').disabled = true; $('dialog-error').hidden = true; try { await dialogAction(epoch); } catch (error) { if (epoch === dialogEpoch) showError(error, 'dialog-error'); } finally { if (epoch === dialogEpoch) { setDialogPending(false); $('dialog-submit').disabled = false; for (const [field, disabled] of fields) if (field.isConnected) field.disabled = disabled; } } });
+$('logout').addEventListener('click', async () => {
+  if (logoutPending || !mayLeave()) return;
+  const accountId = logoutAccountId ?? state.workspace?.account.id;
+  if (!accountId) { signedOut(); return; }
+  logoutAccountId = accountId; logoutPending = true; ++authenticationEpoch;
+  ++workspaceEpoch; ++listEpoch; ++detailEpoch; clearTimeout(searchTimer);
+  state.workspaceLoading = false; state.reconnecting = false;
+  if ($('memory-dialog').open) closeDialog();
+  updateActions(); status('로그아웃 중…');
+  try {
+    const response = await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-Memory-Account-Id': accountId }, cache: 'no-store', redirect: 'follow' });
+    if (!response.ok) { const error = new Error('Logout failed'); error.status = response.status; const detail = await response.json().catch(() => null); error.code = detail && detail.error; throw error; }
+    signedOut();
+  } catch (error) { status(''); showError(error); }
+  finally { logoutPending = false; updateActions(); }
+});
 window.addEventListener('beforeunload', event => { if (state.dirty) { event.preventDefault(); event.returnValue = ''; } });
 document.addEventListener('keydown', event => { if ((event.ctrlKey || event.metaKey) && event.key === 'Enter' && !$('memory-dialog').open && !$('editor-form').hidden) { event.preventDefault(); $('editor-form').requestSubmit(); } });
 loadWorkspace();

@@ -76,6 +76,22 @@ async function fixture(t){
 }
 function permitted(result){assert.equal(result.failed,false,JSON.stringify(result.value));return result.value;}
 function denied(result){assert.equal(result.failed,true);assert.equal(result.value.status,403);assert.equal(result.value.error,'access_denied');}
+async function scopeDenied(f,token,name,args,scope){
+ const response=await f.request('/mcp',{method:'POST',token,data:{jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args}},headers:{accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'}});
+ assert.equal(response.status,403);assert.match(response.headers.get('www-authenticate'),/error="insufficient_scope"/);assert.ok(response.headers.get('www-authenticate').includes(scope));
+}
+
+test('MCP advertises memory_add replacement effects that supersession actually performs',async t=>{
+  const f=await fixture(t),pat=await f.issue(['read','create','update']);
+  const advertised=(await f.rpc(pat.token,'tools/list')).tools.find(tool=>tool.name==='memory_add');
+  const replacement=permitted(await f.tool(pat.token,'memory_add',{spaceId:f.spaceIds[0],body:'Replacement fact',
+    supersedesMemoryId:f.records[0].id,operationId:'annotation-supersession'}));
+  const current=permitted(await f.tool(pat.token,'memory_list',{spaceId:f.spaceIds[0]}));
+  assert.ok(current.results.some(row=>row.id===replacement.id));
+  assert.ok(current.results.every(row=>row.id!==f.records[0].id),'Supersession removes the prior fact from normal listings');
+  assert.equal(advertised.annotations.readOnlyHint,false);
+  assert.equal(advertised.annotations.destructiveHint,true,'A tool capable of replacement cannot advertise additive-only effects');
+});
 
 test('PAT MCP permits read/create in selected Spaces only and never grants management',async t=>{
   const f=await fixture(t),pat=await f.issue(['read','create']);
@@ -138,7 +154,7 @@ test('real signed OAuth remains an MCP alternative with verified scopes and no m
   const created=permitted(await f.tool(oauth,'memory_add',{spaceId:f.spaceIds[0],body:'OAuth plugin memory',operationId:'oauth-create'}));
   assert.equal(permitted(await f.tool(oauth,'memory_get',{spaceId:f.spaceIds[0],memoryId:created.id})).body,'OAuth plugin memory');
   const readOnly=await signedToken({client:'read-only-plugin',scope:'memory:read'});
-  denied(await f.tool(readOnly,'memory_add',{spaceId:f.spaceIds[0],body:'Scope escalation',operationId:'oauth-read-only'}));
+  await scopeDenied(f,readOnly,'memory_add',{spaceId:f.spaceIds[0],body:'Scope escalation',operationId:'oauth-read-only'},'memory:write');
   for(const path of ['/v1/workspace','/v1/release/config'])assert.equal((await f.request(path,{token:oauth})).status,403);
   assert.equal((await f.request('/v1/keys',{method:'POST',token:oauth,data:{label:'Escalation',capabilities:['read'],expiresInDays:1}})).status,403);
   const wrongAudience=await signedToken({client:'plugin-oauth-client',audience:'https://other.example'});
@@ -155,10 +171,10 @@ test('partial OAuth scopes preserve permitted MCP writes without granting delete
   const created=permitted(await f.tool(writer,'memory_add',{spaceId:f.spaceIds[0],body:'Scoped writer',operationId:'partial-create'}));
   const updated=permitted(await f.tool(writer,'memory_update',{spaceId:f.spaceIds[0],memoryId:created.id,body:'Scoped update',expectedRevision:1,operationId:'partial-update'}));
   assert.equal(updated.body,'Scoped update');assert.equal(updated.revision,2);
-  denied(await f.tool(writer,'memory_delete',{spaceId:f.spaceIds[0],memoryId:created.id,expectedRevision:2,operationId:'partial-delete-denied'}));
+  await scopeDenied(f,writer,'memory_delete',{spaceId:f.spaceIds[0],memoryId:created.id,expectedRevision:2,operationId:'partial-delete-denied'},'memory:delete');
   const deleter=await signedToken({client:'delete-without-write',scope:'memory:read memory:delete'});
-  denied(await f.tool(deleter,'memory_add',{spaceId:f.spaceIds[0],body:'No create',operationId:'delete-create-denied'}));
-  denied(await f.tool(deleter,'memory_update',{spaceId:f.spaceIds[0],memoryId:created.id,body:'No update',expectedRevision:2,operationId:'delete-update-denied'}));
+  await scopeDenied(f,deleter,'memory_add',{spaceId:f.spaceIds[0],body:'No create',operationId:'delete-create-denied'},'memory:write');
+  await scopeDenied(f,deleter,'memory_update',{spaceId:f.spaceIds[0],memoryId:created.id,body:'No update',expectedRevision:2,operationId:'delete-update-denied'},'memory:write');
   permitted(await f.tool(deleter,'memory_delete',{spaceId:f.spaceIds[0],memoryId:created.id,expectedRevision:2,operationId:'partial-delete'}));
   const orgResponse=await f.browser('/v1/organizations',{method:'POST',data:{name:'Owner organization',emailId:f.snapshot.account.emails[0].id}});
   assert.equal(orgResponse.status,201);const org=await orgResponse.json();

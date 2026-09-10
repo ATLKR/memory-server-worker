@@ -1,3 +1,4 @@
+import { sqlNow, SQL_NOW_MS } from './sql-clock.ts';
 /**
  * Internal identity service. No public HTTP routes or central-auth changes.
  * D1 is a storage adapter, not the identity model. Use fresh primary reads for
@@ -33,10 +34,15 @@ export interface OrganizationAuthorization {
 export class IdentityDenied extends Error {
   constructor() { super('Identity operation denied'); this.name = 'IdentityDenied'; }
 }
+export class IdentityInvalid extends Error {
+  readonly status = 400;
+  readonly code = 'invalid_email';
+  constructor() { super('Invalid email address'); this.name = 'IdentityInvalid'; }
+}
 
 /** Deliberate v1 policy: ASCII, case-insensitive mailboxes; no plus/dot folding. */
 export function canonicalEmail(input: string): { address: string; domain: string } {
-  if (typeof input !== 'string') throw new IdentityDenied();
+  if (typeof input !== 'string') throw new IdentityInvalid();
   const address = input.trim().toLowerCase();
   const parts = address.split('@');
   const local = parts[0] ?? '';
@@ -46,7 +52,7 @@ export function canonicalEmail(input: string): { address: string; domain: string
       local.startsWith('.') || local.endsWith('.') || local.includes('..') ||
       domain.length > 253 || !domain.includes('.') ||
       !domain.split('.').every(label => /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) {
-    throw new IdentityDenied();
+    throw new IdentityInvalid();
   }
   return { address, domain };
 }
@@ -65,7 +71,7 @@ function identifier(value: string): string {
   return value;
 }
 
-const RECENT_SESSION = `c.kind='session' AND c.membership_id IS NULL AND c.reauthenticated_at BETWEEN ? AND ?`;
+const RECENT_SESSION = `c.kind='session' AND c.membership_id IS NULL AND c.reauthenticated_at BETWEEN max(?,${SQL_NOW_MS}-300000) AND ?`;
 const REAUTH_WINDOW_MS = 5 * 60 * 1000;
 
 export class IdentityService {
@@ -93,12 +99,12 @@ export class IdentityService {
     const hash = await digestToken(token);
     const at = this.now();
     const r = await this.db.withSession('first-primary').prepare(`
-      SELECT c.account_id AS accountId,e.id AS emailId,e.address
+      SELECT c.account_id AS accountId,e.id AS emailId,e.address,c.expires_at AS credentialExpiresAt
       FROM active_credentials c LEFT JOIN account_emails e
         ON e.account_id=c.account_id AND e.revoked_at IS NULL
-      WHERE c.token_digest=? AND c.expires_at>? AND c.kind='session' AND c.membership_id IS NULL`).bind(hash, at)
-      .all<{ accountId: string; emailId: string | null; address: string | null }>();
-    if (!r.success || !r.results.length) throw new IdentityDenied();
+      WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND c.kind='session' AND c.membership_id IS NULL`).bind(hash, at)
+      .all<{ accountId: string; emailId: string | null; address: string | null; credentialExpiresAt: number }>();
+    if (!r.success || !r.results.length || r.results[0]!.credentialExpiresAt <= this.now()) throw new IdentityDenied();
     return { id: r.results[0]!.accountId, emails: r.results.flatMap(row =>
       row.emailId && row.address ? [{ id: row.emailId, address: row.address }] : []) };
   }
@@ -107,13 +113,14 @@ export class IdentityService {
     const hash = await digestToken(token);
     const at = this.now();
     const r = await this.db.withSession('first-primary').prepare(`
-      SELECT c.account_id AS accountId,m.id AS membershipId,m.organization_id AS organizationId,m.role
+      SELECT c.account_id AS accountId,m.id AS membershipId,m.organization_id AS organizationId,m.role,
+        c.expires_at AS credentialExpiresAt,m.expires_at AS membershipExpiresAt
       FROM active_credentials c JOIN active_memberships m ON m.account_id=c.account_id
-      WHERE c.token_digest=? AND c.expires_at>? AND m.expires_at>? AND m.organization_id=?
+      WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND m.expires_at>${sqlNow()} AND m.organization_id=?
         AND ((c.kind='session' AND c.membership_id IS NULL) OR (c.kind='api_key' AND c.membership_id=m.id))`)
-      .bind(hash, at, at, identifier(organizationId)).first<OrganizationAuthorization>();
-    if (!r) throw new IdentityDenied();
-    return r;
+      .bind(hash, at, at, identifier(organizationId)).first<OrganizationAuthorization & { credentialExpiresAt: number; membershipExpiresAt: number }>();
+    if (!r || Math.min(r.credentialExpiresAt, r.membershipExpiresAt) <= this.now()) throw new IdentityDenied();
+    return { accountId: r.accountId, membershipId: r.membershipId, organizationId: r.organizationId, role: r.role };
   }
 
   /**
@@ -133,13 +140,25 @@ export class IdentityService {
     const expiresAt = at + 10 * 60 * 1000;
     await this.write(`INSERT INTO email_challenges(id,account_id,address,domain,token_digest,expires_at)
       SELECT ?,c.account_id,?,?,?,? FROM active_credentials c
-      WHERE c.token_digest=? AND c.expires_at>? AND ${RECENT_SESSION}
+      WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${RECENT_SESSION}
         AND NOT EXISTS (SELECT 1 FROM email_blocks b WHERE b.address=?)`,
       [id, address, domain, proofHash, expiresAt, hash, at, at - REAUTH_WINDOW_MS, at, address]);
     try {
+      const fresh = this.now();
+      const actor = await this.db.withSession('first-primary').prepare(`
+        SELECT c.expires_at AS credentialExpiresAt,c.reauthenticated_at AS reauthenticatedAt,p.expires_at AS proofExpiresAt
+        FROM email_challenges p JOIN active_credentials c ON c.account_id=p.account_id
+        WHERE p.id=? AND p.used_at IS NULL AND p.invalidated_at IS NULL AND p.expires_at>${sqlNow()}
+          AND c.token_digest=? AND c.expires_at>${sqlNow()} AND ${RECENT_SESSION}
+          AND NOT EXISTS(SELECT 1 FROM email_blocks b WHERE b.address=p.address)`)
+        .bind(id, fresh, hash, fresh, fresh - REAUTH_WINDOW_MS, fresh)
+        .first<{ credentialExpiresAt: number; reauthenticatedAt: number; proofExpiresAt: number }>();
+      const checkedAt = this.now();
+      if (!actor || Math.min(actor.credentialExpiresAt, actor.proofExpiresAt) <= checkedAt ||
+          actor.reauthenticatedAt < checkedAt - REAUTH_WINDOW_MS || actor.reauthenticatedAt > checkedAt) throw new IdentityDenied();
       await deliver({ address, challengeId: id, proofToken, expiresAt });
     } catch (error) {
-      await this.db.prepare('UPDATE email_challenges SET invalidated_at=? WHERE id=? AND used_at IS NULL').bind(this.now(), id).run();
+      await this.db.prepare('UPDATE email_challenges SET invalidated_at=? WHERE id=? AND used_at IS NULL AND invalidated_at IS NULL').bind(this.now(), id).run();
       throw error;
     }
     return id;
@@ -152,8 +171,8 @@ export class IdentityService {
     const at = this.now();
     await this.write(`INSERT INTO email_consumptions(id,challenge_id,actor_credential_id,created_at)
       SELECT ?,p.id,c.id,? FROM email_challenges p JOIN active_credentials c ON c.account_id=p.account_id
-      WHERE c.token_digest=? AND c.expires_at>? AND ${RECENT_SESSION}
-        AND p.id=? AND p.token_digest=? AND p.expires_at>? AND p.used_at IS NULL AND p.invalidated_at IS NULL
+      WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${RECENT_SESSION}
+        AND p.id=? AND p.token_digest=? AND p.expires_at>${sqlNow()} AND p.used_at IS NULL AND p.invalidated_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM email_blocks b WHERE b.address=p.address)
         AND NOT EXISTS (SELECT 1 FROM account_emails e WHERE e.address=p.address AND e.revoked_at IS NULL)`,
       [id, at, hash, at, at - REAUTH_WINDOW_MS, at, identifier(challengeId), proofHash, at]);
@@ -166,7 +185,7 @@ export class IdentityService {
     await this.write(`INSERT INTO revocations(id,kind,actor_credential_id,email_id,created_at)
       SELECT ?,'self',c.id,e.id,? FROM active_credentials c
       JOIN account_emails e ON e.account_id=c.account_id
-      WHERE c.token_digest=? AND c.expires_at>? AND ${RECENT_SESSION}
+      WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${RECENT_SESSION}
         AND e.id=? AND e.revoked_at IS NULL`,
       [crypto.randomUUID(), at, hash, at, at - REAUTH_WINDOW_MS, at, identifier(emailId)]);
   }
@@ -185,9 +204,9 @@ export class IdentityService {
       JOIN active_memberships m ON m.account_id=c.account_id
       JOIN domain_managers g ON g.membership_id=m.id AND g.revoked_at IS NULL
       JOIN domains d ON d.id=g.domain_id AND d.organization_id=m.organization_id
-      WHERE c.token_digest=? AND c.expires_at>? AND d.id=? AND d.name=?
-        AND d.revoked_at IS NULL AND d.verified_until>?
-        AND m.expires_at>? AND m.role IN ('owner','admin') AND ${RECENT_SESSION}`,
+      WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND d.id=? AND d.name=?
+        AND d.revoked_at IS NULL AND d.verified_until>${sqlNow()}
+        AND m.expires_at>${sqlNow()} AND m.role IN ('owner','admin') AND ${RECENT_SESSION}`,
       [crypto.randomUUID(), address, at, hash, at, identifier(domainId), domain, at, at, at - REAUTH_WINDOW_MS, at]);
   }
 }
