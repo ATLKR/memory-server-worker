@@ -1,8 +1,14 @@
 # 운영·복구
 
+현재 후보는 **0.5.0-rc.1/중앙 25/HOT 1**이다. Production은 rc.3/중앙 1–7, staging은 이전 revision `1a93820`/중앙 1–23/HOT 1이다. 24–25는 아직 배포하지 않았다. 아래 현재 계약과 [통합 기록](INTEGRATION.md)의 과거 rc.4 검증을 구분한다. 선택한 GA는 초대 기반·사용량 계량·AI 검색/추출이며 유료 결제는 비활성으로 제외한다.
+
 ## 원본과 파생 데이터
 
-D1의 현재 기억·revision 이력이 원본이다. FTS와 Vectorize는 파생 인덱스다. Vectorize에는 원문을 넣지 않고 memory ID/revision과 벡터만 넣는다. 검색된 후보의 내용·권한은 다시 D1에서 확인한다. 벡터 자체도 민감한 파생 데이터로 취급하며 별도 접근 제어와 삭제 정책이 필요하다.
+중앙 D1이 identity·현재 권한·revision head/history pointer·논리 사용량·receipt의 기준이다. Sharded 모드의 canonical body/source/provenance는 비공개 R2에 있고 HOT D1은 불변 payload의 검색용 본문/FTS를 보관한다. 기존 inline 자료는 호환 읽기를 유지한다. 외부 payload를 읽은 뒤 중앙 최종 snapshot에서 현재 권한과 반환 revision·제거 상태를 검사한다. FTS와 Vectorize는 파생 인덱스이며 Vectorize에는 원문을 넣지 않는다. 벡터도 민감한 파생 자료로 취급한다.
+
+`STORAGE_SHARDS_JSON`은 최대 16개의 active/draining 항목을 허용한다. 새 payload는 active로 분산되고 같은 Space도 두 물리 HOT를 사용할 수 있다. 저장된 위치를 재시도에서 다시 계산하지 않는다. draining은 새 배치 중단이며 기존 자료의 자동 이동이 아니다. 참조가 남은 binding을 제거하거나 다른 DB로 연결하지 않는다.
+
+중앙 durable intent 이후 외부 준비를 수행하고 현재 SQL 권한·revision·quota 검사로 pointer와 receipt를 발행한다. 미발행 자료는 제한된 GC로 수거한다. `STORAGE_BACKFILL_ENABLED=true`일 때 current/history 각각 한 후보를 처리하며 정확한 내용·revision, 감사·논리 charge를 보존한다. 과거 HOT 사본 retirement와 R2/HOT purge는 durable outbox로 재시도한다. 중앙 DB와 각 HOT의 용량은 유한하다. [샤딩·용량 계약](../SCALING.md)을 따른다.
 
 거절/충돌/권한 회수 후 API 재시도는 현재 SQL 권한으로 판단한다. 임시 대화를 자동 처리하는 ingest는 제출한 credential의 현재 권한을 확인한다. 기한이 지난 브라우저 session으로 제출한 ingest는 실행 시 권한 만료로 실패할 수 있다. 추출이 완료된 뒤의 사람 승인은 같은 계정의 현재 브라우저 session과 대상 Space의 create 권한으로 다시 승인하므로, 다시 로그인한 session에서도 검토를 마칠 수 있다. 장기 수집에는 용도와 유효기간이 제한된 create 전용 key를 쓰고 결과 열람은 별도 read 권한으로 한다. 저장이 완료된 기억의 인덱싱은 소유 계정·조직의 파생 작업이므로 작성자의 로그아웃·credential 만료·멤버십 회수와 별개로 진행한다. 각 새 embedding/upsert 직전에는 하나의 SQL 조회로 유효 lease, 현재 live revision, 소유 계정·조직의 활성 상태를 확인한다. 이미 요청된 공급자 작업의 결과와 제거용 식별자는 별도 정리 경로로 처리한다.
 
@@ -10,11 +16,15 @@ D1의 현재 기억·revision 이력이 원본이다. FTS와 Vectorize는 파생
 
 `release_jobs`는 pending/leased/done/dead 상태와 attempt, lease_token, lease_until을 가진다. 120초 lease와 fencing으로 늦은 worker가 현재 결과를 덮어쓰지 않게 한다. 긴 인덱싱은 각 조각 사이에 동일한 유효 lease를 갱신하며, 만료되거나 다른 worker에 넘어간 lease는 되살리지 않는다. 실패 5회 후 dead로 가며 `/manage`에서 허용된 운영자가 재시도할 수 있다. 인덱스 재구축은 현재 revision별로 작업을 다시 만들고 실행 중 lease를 강제로 초기화하지 않는다.
 
-현재 cron은 5분마다 임시 상태를 정리하며 provider 작업은 비활성이다. Provider 처리를 활성화하더라도 호출당 처리량은 제한되어 있다. lexical 검색은 트랜잭션 시점에 갱신되지만 semantic 반영은 지연될 수 있다. backlog와 oldest age를 실제 유입량에 맞춰 경보 대상으로 삼고 필요하면 소비량이나 큐 아키텍처를 변경한다. 무제한 처리량이나 정해진 복구 시간을 약속하지 않는다.
+현재 후보와 이전 staging은 `BACKGROUND_JOBS_ENABLED=true`로 AI/vector/검토형 추출을 처리하며 5분 cron의 호출당 작업량은 제한되어 있다. `PAID_BILLING_ENABLED=false`, `AUTO_ERASURE_ENABLED=false`는 유지한다. 외부 자료는 중앙 발행 전 준비되고 semantic 반영은 지연될 수 있다. backlog와 현재 episode의 oldest age를 유입량에 맞춰 감시하며 무제한 처리량이나 고정 복구 시간을 약속하지 않는다.
+
+0025의 `queued_at`은 최초 queue 진입과 done/dead→pending의 새 episode를 기록하고 같은 episode의 재시도에서 유지한다. 원래 `created_at`을 현재 대기 시작으로 오해하지 않는다. 이전 retry episode 시각을 복원할 수 없으면 unknown으로 남는다. 중앙 UTC 월별 provider 예약과 고객 사용량은 별도 계량이다. Production AI 예약 상한 $20, staging $0.20만으로 전체 Memory Cloudflare 월 $50를 보장하지 않으므로 D1/R2/Workers/Vectorize 실제 비용과 경보·중단 대응도 확인한다.
 
 결제는 별도 DB lock과 유한량 consumer를 사용한다. webhook payload의 상태를 곧바로 적용하지 않고 공급자 현재 subscription을 조회한다. 이미 연결된 subscription은 주기적 재조회로 webhook 누락을 보완한다. 최초 subscription 생성 webhook 자체가 유실되어 아직 pool에 연결되지 않은 경우까지 자동 탐색하지는 않는다. 공급자 쪽 event replay와 checkout reconciliation 운영 절차가 필요하다. retry 한도를 넘긴 결제 이벤트는 운영자가 원인 해결 후 명시적으로 재처리해야 한다.
 
-이 PR의 0008 checkout migration은 customer 생성 실패와 Checkout 호출 후 응답 유실을 구분한다. 아직 Checkout을 시도하지 않은 요청만 첫 호출 직전에 35분 만료 시각을 원자적으로 기록하며, 동시에 재시도한 호출도 저장된 동일 시각을 쓴다. 이미 시도된 요청은 응답을 받지 못했더라도 시도 표시나 만료 시각을 바꾸지 않는다. 0008 이전 행도 공급자 이력을 알 수 없어 시도된 요청으로 보존한다. `session_id=NULL`만 보고 미시도로 판단하지 말고 기존 idempotency key로 공급자 결과를 재조정한다. 만료된 요청을 다시 시작할 때는 새 operation ID가 필요하다. Production 기록은 여전히 rc.3와 migrations 1–7이며, 이 source 배포 전 PR에만 있는 0008–0021을 먼저 적용해야 한다. 후보 `/ready`는 schema 21을 요구한다. 현재 전체 로컬 검증은 1,410개 테스트를 통과했다. 완료된 native 기록은 데이터가 있는 5→21 업그레이드·큐 만료 6건·도메인 검증/보존 10건·인증/HTTP 7건을 포함한다. 각 실행의 소스 범위와 남은 실환경 수락 조건은 [검증 기록](INTEGRATION.md)에서 구분한다.
+이 PR의 0008 checkout migration은 customer 생성 실패와 Checkout 호출 후 응답 유실을 구분한다. 아직 Checkout을 시도하지 않은 요청만 첫 호출 직전에 35분 만료 시각을 원자적으로 기록하며, 동시에 재시도한 호출도 저장된 동일 시각을 쓴다. 이미 시도된 요청은 응답을 받지 못했더라도 시도 표시나 만료 시각을 바꾸지 않는다. 0008 이전 행도 공급자 이력을 알 수 없어 시도된 요청으로 보존한다. `session_id=NULL`만 보고 미시도로 판단하지 말고 기존 idempotency key로 공급자 결과를 재조정한다. 만료된 요청을 다시 시작할 때는 새 operation ID가 필요하다. Production은 0008–0025, 현재 staging은 0024–0025를 추가 적용한 뒤 이 후보를 배포한다. 새 환경은 중앙 0001–0025와 모든 HOT의 `shard-migrations/0001_payloads.sql`이 필요하다. 후보 `/ready`는 중앙 25/HOT 1을 요구한다. 전체 검증 수는 최종 재실행 뒤 기록하며 과거 rc.4 수치를 현재 통과로 읽지 않는다. [검증 기록](INTEGRATION.md)에서 각 실행과 live gate를 구분한다.
+
+0022는 payload pointer·논리 크기·intent·purge/retirement outbox, 0023은 월별 provider 예약과 inline 이관 cursor/index, 0024는 순서 있는 account/exact-email lifecycle, 0025는 queue episode 시각이다. 남은 migration은 결제 비활성 여부와 무관하게 모두 필수다.
 
 0019_execution-time-schema.sql과 SQL helper는 애플리케이션 바인딩 시각과 DB 문장의 실제 실행 시각 중 더 늦은 값으로 기한을 검사한다. 요청이 DB 큐에서 기다리는 동안 credential·멤버십·최근 proof·복원 기간·ingest·lease가 만료되면, 큐 진입 전의 시각만으로 이후 변경을 허용하지 않는다. 기존 기록 시각과 변경 불가 이력은 보존한다. 최근 본인 확인 proof의 사용 처리와 해당 credential의 `reauthenticated_at` 갱신은 하나의 SQL 문장과 trigger에서 함께 적용하거나 함께 실패한다. Staging 검증에는 큐 대기 중 만료와 proof 소비 실패 시 전체 롤백을 포함한다.
 
@@ -80,19 +90,21 @@ D1의 현재 기억·revision 이력이 원본이다. FTS와 Vectorize는 파생
 ingest 상세·목록은 현재 권한과 작업 상태를 같은 최종 primary snapshot에서 읽고 반환 시 만료도 확인한다. `approved`·`cancelled` 상태는 기한 뒤에도 유지하고, 나머지 만료 작업은 `expired`로 표시한다. 만료되지 않은 `review` 상태에서만 제안·인용문을 반환하며 승인·취소·만료 응답에 이전 제안을 포함하지 않는다.
 관리 콘솔도 승인·취소 중 목록을 새로고침한 경우 현재 카드와 늦게 도착한 상세 응답에 최종 상태를 반영한다. 완료한 작업의 이전 인용문과 승인·취소 버튼을 다시 표시하지 않으며, 다른 계정·Space로 전환한 화면에는 이전 결과를 채우지 않는다. 루트의 일회용 코드 발급 창은 응답 처리 중 닫기·취소·Escape를 잠그고 결과 또는 오류가 표시된 뒤 해제한다.
 
+기억 제거 응답은 `status: access_removed_cleanup_pending`, `accessRemoved: true`, `payloadCleanup: not_confirmed`, `indexCleanup: not_confirmed`를 반환한다. 이는 중앙 접근 차단의 작업 영수증이며 물리적 정리 완료 확인이 아니다. R2·hot D1 원문과 벡터는 정리 작업이 성공할 때까지 남을 수 있다. 같은 작업을 재시도해 받은 영수증도 최신 정리 상태를 조회한 결과가 아니다. 관리 콘솔은 이를 접근 차단 및 정리 확인 대기로 표시한다.
+
 **백업 안의 과거 본문, 계정/이메일/결제 전체 개인정보는 이 개별 기억 제거 API의 완료 범위가 아니다.** 전역 탈퇴·삭제 정책을 별도로 확정하고 구현해야 한다.
 
 ## 복구 훈련
 
 출시 전에 다음 순서를 staging에서 실제 수행한다.
 
-1. 원본 D1 snapshot/export, 현재 schema 버전, 권한 회수/erasure ledger의 독립 복사본, 적용 코드 hash를 기록한다. 백업 접근 권한과 암호화를 별도로 관리한다.
+1. 중앙 D1 일반 테이블/DDL, 모든 active/draining HOT 자료와 tombstone, R2 객체·metadata/hash, 현재 schema와 source hash, snapshot 이후 권한 회수/erasure 증거를 기록한다. 쓰기·진행 중 provider 작업을 통제한 capture 경계를 확인하고 비공개로 보관한다.
 2. 새 격리 DB에 복구한다. 외부 트래픽은 닫고 모든 이전 key/session을 유효한 것으로 가정하지 않는다.
 3. snapshot 이후 발생한 계정/이메일/멤버십 회수와 영구 제거를 재적용한다. 이를 재구성할 자료가 없으면 복구본을 사용자에게 노출하지 않는다.
 4. 새 인덱스로 canonical 데이터에서 재구축하고 제거된 기억·다른 tenant 결과가 안 나오는지 검사한다. 오래된 인덱스만 연결해서 복구하지 않는다.
 5. 개수·revision·삭제·공유·권한·검색 샘플과 현재 provider 상태를 확인하고 승인 후 승격한다. 결과와 실패를 기록한다.
 
-자동 외부 백업 생성기나 원본 전체 restore orchestrator는 이 ZIP에 구현되어 있지 않다. 이 문서는 실행 절차이며 실제 복구 성공 기록이 아니다.
+실제 provider의 전체 D1 export는 FTS virtual table 때문에 거절되었다. 명시적 일반 테이블 export와 별도 DDL/파생 FTS 재구축 exporter는 native 검증 중이다. 도구의 파일 검증이나 native 성공만으로 원격 capture·복구 성공을 주장하지 않는다. [MULTI_STORE_RECOVERY.md](MULTI_STORE_RECOVERY.md)의 현재 source/config/schema에 맞는 격리 훈련을 완료한다. 자동 원자적 다중 저장소 snapshot이나 전체 restore orchestrator가 제공되는 것은 아니다.
 
 ## 외부 회수 이벤트 계약
 
@@ -109,10 +121,18 @@ x-memory-signature: lowercase_hex(HMAC_SHA256(secret, timestamp + "." + raw_body
 {"id":"event-unique-id","issuer":"https://auth-api.allen.company","subject":"provider-subject","type":"email.revoked","email":"person@example.com"}
 ```
 
-계정 비활성화는 `type=account.disabled`이다. email 회수는 해당 계정의 서비스 claim을 회수하며 메일 공급자의 mailbox를 삭제하는 API가 아니다. 조직 SCIM 회수는 해당 멤버십을 회수하고 개인 계정을 삭제하지 않는다. 발행 측에서는 durable event 기록, 실패 재전송, 누락 재조정, 관리자 회수 시험이 필요하다. 수신기가 생겼다고 외부 이벤트가 자동 발행되는 것은 아니다.
+위 형식은 기존 v1의 영구 회수 계약이다. 계정 비활성화는 `type=account.disabled`이며 기존 차단을 되살리지 않는다. email 회수는 Memory claim에 적용하고 mailbox를 삭제하지 않는다. 조직 SCIM은 정확한 멤버십을 회수하며 개인 계정을 삭제하지 않는다.
+
+0024의 v2 lifecycle은 중앙의 불변 event ID/sequence와 계정 또는 정확한 이메일별 순서 상태를 사용한다. 계정 suspension은 기존 credential·멤버십·proof를 회수하고 resume은 새 SSO를 요구하며 옛 권한을 복원하지 않는다. 이메일 재검증은 새 claim을 허용하되 옛 ACL은 복원하지 않는다. 계정 삭제는 terminal이다. 검증된 Memory audience JWT의 최신 lifecycle event를 새 claim 생성 전에 적용하므로 정상적인 새 owner가 늦은 동일 HMAC 전달에 의해 회수되지 않는다.
+
+중앙 private publisher는 동일 D1 변경의 outbox, 환경별 HMAC secret, 제한된 무기한 재시도와 정확한 production/`memory-staging.allenlabs.org` 목적지를 구현했다. Native 두 Worker에서 9 events/11 deliveries를 검증했지만 중앙에는 아직 배포하지 않았다. 실제 전달 목표 2분 미만은 배포 후 oldest pending age로 계측해야 한다. 동기식 cross-service 회수나 발행 전 과거 삭제 기록의 자동 복원을 주장하지 않는다.
+
+개인 Space의 소유 계정이 suspended이면 기존 보낸 공유의 열람·수락과 새 AI/provider 처리를 차단한다. 명시적인 resume은 보존된 보낸 공유를 다시 사용할 수 있게 하지만 회수된 수신자 이메일 claim, 기존 session/PAT, 조직 멤버십을 복원하지 않는다. 조직 자료는 과거 작성자의 개인 계정 상태가 아니라 해당 조직의 현재 권한으로 판단한다.
 
 ## 관측성
 
 선택적 Analytics Engine에는 제한된 route 분류, 메서드, HTTP 상태, 지연과 개수만 보낸다. URL query, OAuth code, body, 이메일, token, account ID는 넣지 않는다. 원본 request/invocation logging은 비활성 상태를 유지한다. 원문을 알 수 없는 상태 코드 집계만으로 모든 장애가 설명되지는 않으므로 승인된 진단 절차를 따로 정한다.
 
-권장 운영 점검은 `/ready` heartbeat, queue pending/dead/oldest, provider 오류율, pool storage, quota 거절, 장기 미정리 erasure, billing pending/dead, 도메인 검증 만료다. 실제 pager/alert destination 자동 연결은 완료하지 않았다.
+권장 점검은 `/ready` heartbeat, queue pending/dead/현재 episode age, provider 오류율·월별 예약, 중앙/HOT 물리 용량, R2 비용, pool quota 거절, purge/retirement backlog, lifecycle oldest pending age와 도메인 만료다. 결제는 이번 범위에서 비활성이다. 실제 pager/alert destination 연결과 대응 훈련은 별도 gate다.
+
+`/ready`의 기술 설정 통과와 GA 승인을 구분한다. `LIVE_ACCEPTANCE_ID`만으로 승인되지 않으며 정확한 source/config/중앙25/HOT1과 15개 gate 증거를 묶은 Ed25519 JWS가 필요하다. 최종 메일 proof, lifecycle 배포, 부하·비용·복구와 운영 정책의 증거가 갖춰진 뒤 [GA 수락](GA_ACCEPTANCE.md)을 수행한다.

@@ -14,8 +14,13 @@ const cleanSource = async () => ({ revision: 'a'.repeat(40), dirty: false });
 
 function stagingConfig() {
   const config = structuredClone(production);
+  config.main = join(project, 'src/worker.ts');
   config.name = 'memory-target-test-staging';
   config.vars.DEPLOYMENT_ENVIRONMENT = 'staging';
+  config.vars.STORAGE_MODE = 'inline';
+  delete config.vars.STORAGE_SHARDS_JSON;
+  config.vectorize = [{ binding: 'MEMORY_INDEX', index_name: 'memory-target-test-staging-index' }];
+  config.analytics_engine_datasets = [{ binding: 'METRICS', dataset: 'memory_target_test_staging_metrics' }];
   config.vars.PUBLIC_ORIGIN = 'https://memory-staging.example.org';
   config.routes = [{ pattern: 'memory-staging.example.org', custom_domain: true }];
   config.d1_databases = [{ binding: 'DB', database_name: 'memory-target-test-staging', database_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', migrations_dir: 'migrations' }];
@@ -122,15 +127,16 @@ test('staging checks all production D1/R2 resources, including preview targets',
   const { loadDeploymentConfiguration } = await import('./deployment-config.mjs');
   const { dir, path } = await fixture(t);
   const baseline = structuredClone(production);
-  baseline.d1_databases.push({ binding: 'OTHER_DB', database_name: 'other-production-db', database_id: '22222222-3333-4444-8555-666666666666', preview_database_id: '33333333-4444-4555-8666-777777777777' });
+  const extraDatabase = { binding: 'OTHER_DB', database_name: 'other-production-db', database_id: '22222222-3333-4444-8555-666666666666', preview_database_id: '33333333-4444-4555-8666-777777777777' };
+  baseline.d1_databases.push(extraDatabase);
   baseline.r2_buckets = [{ binding: 'ARCHIVE', bucket_name: 'production-archive', preview_bucket_name: 'production-preview-archive' }];
   const productionConfigPath = join(dir, 'production.jsonc');
   await writeFile(productionConfigPath, JSON.stringify(baseline));
   for (const mutate of [
-    c => { c.d1_databases[0].database_id = baseline.d1_databases[1].database_id; },
-    c => { c.d1_databases[0].preview_database_id = baseline.d1_databases[1].database_id; },
-    c => { c.d1_databases[0].database_id = baseline.d1_databases[1].preview_database_id; },
-    c => { c.d1_databases[0].database_name = baseline.d1_databases[1].database_name; },
+    c => { c.d1_databases[0].database_id = extraDatabase.database_id; },
+    c => { c.d1_databases[0].preview_database_id = extraDatabase.database_id; },
+    c => { c.d1_databases[0].database_id = extraDatabase.preview_database_id; },
+    c => { c.d1_databases[0].database_name = extraDatabase.database_name; },
     c => { c.r2_buckets[0].bucket_name = 'production-archive'; },
     c => { c.r2_buckets[0].preview_bucket_name = 'production-archive'; },
     c => { c.r2_buckets[0].bucket_name = 'production-preview-archive'; },
@@ -301,7 +307,7 @@ test('resource fingerprint ignores promotion/attestation and formatting, but bin
     c => { c.d1_databases[0].database_id = '11111111-2222-4333-8444-555555555555'; },
     c => { c.r2_buckets[0].bucket_name = 'another-private-bucket'; },
     c => { c.vars.GA_PROFILE = 'another-profile'; },
-    c => { c.vars.BACKGROUND_JOBS_ENABLED = 'true'; },
+    c => { c.vars.BACKGROUND_JOBS_ENABLED = c.vars.BACKGROUND_JOBS_ENABLED === 'true' ? 'false' : 'true'; },
     c => { c.vars.PUBLIC_ORIGIN = 'https://another.example.org'; },
     c => { c.vectorize = [{ binding: 'MEMORY_INDEX', index_name: 'another-index' }]; },
   ]) {

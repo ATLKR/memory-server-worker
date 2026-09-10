@@ -19,6 +19,8 @@ export interface WorkspacePrincipal {
   emailVerified?: boolean;
   displayName?: string;
   expiresAt: number;
+  /** Verified issuer JWT iat, in milliseconds; never copied from public input. */
+  issuedAt?: number;
   permission: 'read' | 'write';
 }
 export interface WorkspaceSnapshot {
@@ -73,9 +75,11 @@ async function hashToken(token: string): Promise<string> {
 export class WorkspaceService {
   private readonly db: IdentityDatabase;
   private readonly clock: () => number;
-  constructor(db: IdentityDatabase, clock: () => number = Date.now) {
+  private readonly identityLifecycle: boolean;
+  constructor(db: IdentityDatabase, clock: () => number = Date.now, options: { identityLifecycle?: boolean } = {}) {
     this.db = db;
     this.clock = clock;
+    this.identityLifecycle = options.identityLifecycle === true;
   }
   private now(): number {
     const at = this.clock();
@@ -104,6 +108,7 @@ export class WorkspaceService {
       const subject = boundedText(principal.subject, 512);
       const granted = permission(principal.permission);
       if (!Number.isSafeInteger(principal.expiresAt) || principal.expiresAt <= this.now()) invalid();
+      if (principal.issuedAt !== undefined && (!Number.isSafeInteger(principal.issuedAt) || principal.issuedAt < 0 || principal.issuedAt > this.now())) invalid();
       const token = externalToken === undefined ? randomToken() : externalToken;
       const digest = await hashToken(token);
       if (externalToken !== undefined) {
@@ -132,9 +137,10 @@ export class WorkspaceService {
       if (principal.emailVerified === true && principal.email !== undefined) email = canonicalEmail(principal.email);
       const credentialId = externalToken === undefined ? `session:${crypto.randomUUID()}` : `oauth:${digest}`;
       await this.write(`INSERT INTO workspace_sign_ins(id,issuer,subject,new_account_id,credential_id,token_digest,
-        expires_at,permission,email_id,address,domain,personal_space_id,created_at)
-        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? WHERE ?>${sqlNow()}`, [crypto.randomUUID(), issuer, subject, crypto.randomUUID(), credentialId,
-        digest, expiresAt, granted, crypto.randomUUID(), email?.address ?? null, email?.domain ?? null, crypto.randomUUID(), at, expiresAt, at]);
+        expires_at,permission,email_id,address,domain,personal_space_id,created_at${this.identityLifecycle ? ',issued_at' : ''})
+        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?${this.identityLifecycle ? ',?' : ''} WHERE ?>${sqlNow()}`, [crypto.randomUUID(), issuer, subject, crypto.randomUUID(), credentialId,
+        digest, expiresAt, granted, crypto.randomUUID(), email?.address ?? null, email?.domain ?? null, crypto.randomUUID(), at,
+        ...(this.identityLifecycle ? [principal.issuedAt ?? null] : []), expiresAt, at]);
       const created = await this.db.withSession('first-primary').prepare(`
         SELECT c.account_id AS accountId,c.expires_at AS expiresAt FROM active_credentials c
         JOIN provider_identities p ON p.account_id=c.account_id AND p.issuer=? AND p.subject=?

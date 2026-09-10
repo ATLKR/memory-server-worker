@@ -13,11 +13,15 @@ import { digest } from '../src/release/util.ts';
 import { applySql } from './apply-sql.mjs';
 
 const config = parse(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'));
+// This suite covers populated inline upgrades; storage-runtime.integration.mjs
+// separately exercises native multi-HOT/R2 bindings and distributed writes.
+const inlineBindings = { ...config.vars, STORAGE_MODE: 'inline', BACKGROUND_JOBS_ENABLED: 'false' };
+delete inlineBindings.STORAGE_SHARDS_JSON;
 const mf = new Miniflare(convertV4MiniflareOptions({
   name: 'saas-product-integration', modules: true,
   scriptPath: fileURLToPath(new URL('../.local/build/worker.js', import.meta.url)),
   compatibilityDate: config.compatibility_date, compatibilityFlags: config.compatibility_flags,
-  d1Databases: ['DB'], bindings: config.vars,
+  d1Databases: ['DB'], bindings: inlineBindings,
   ratelimits: { REQUEST_LIMITER: { namespace_id: '2086090801', simple: { limit: 120, period: 60 } } },
 }));
 const parser = new DatabaseSync(':memory:');
@@ -238,6 +242,23 @@ try {
   assert.equal((await db.prepare('SELECT version FROM release_meta').first()).version, 22);
   await applySql(parser, db, readFileSync(new URL('../migrations/0023_operational-schema.sql', import.meta.url), 'utf8'));
   assert.equal((await db.prepare('SELECT version FROM release_meta').first()).version, 23);
+  await applySql(parser, db, readFileSync(new URL('../migrations/0024_lifecycle-schema.sql', import.meta.url), 'utf8'));
+  assert.equal((await db.prepare('SELECT version FROM release_meta').first()).version, 24);
+  const queueCreatedAt = Date.now() - 86400000;
+  await db.prepare("INSERT INTO release_jobs(id,kind,state,attempt,available_at,created_at) VALUES('native-queue-initial','upsert','pending',0,?,?),('native-queue-retry','delete','pending',2,?,?),('native-queue-completed','delete','done',0,?,?)")
+    .bind(queueCreatedAt, queueCreatedAt, Date.now(), queueCreatedAt, Date.now(), queueCreatedAt).run();
+  await applySql(parser, db, readFileSync(new URL('../migrations/0025_queue-episode-schema.sql', import.meta.url), 'utf8'));
+  assert.equal((await db.prepare('SELECT version FROM release_meta').first()).version, 25);
+  assert.equal((await db.prepare("SELECT queued_at FROM release_jobs WHERE id='native-queue-initial'").first()).queued_at, queueCreatedAt);
+  assert.equal((await db.prepare("SELECT queued_at FROM release_jobs WHERE id='native-queue-retry'").first()).queued_at, null);
+  const beforeEpisode = (await db.prepare("SELECT CAST(round(unixepoch('subsec')*1000) AS INTEGER) AS at").first()).at;
+  await db.prepare("UPDATE release_jobs SET state='pending',available_at=? WHERE id='native-queue-completed'").bind(Date.now()).run();
+  const episode = await db.prepare("SELECT created_at,queued_at FROM release_jobs WHERE id='native-queue-completed'").first();
+  assert.equal(episode.created_at, queueCreatedAt); assert.ok(episode.queued_at >= beforeEpisode);
+  await db.prepare("UPDATE release_jobs SET state='leased',attempt=1 WHERE id='native-queue-completed'").run();
+  await db.prepare("UPDATE release_jobs SET state='pending',attempt=2,available_at=? WHERE id='native-queue-completed'").bind(Date.now() + 60000).run();
+  assert.equal((await db.prepare("SELECT queued_at FROM release_jobs WHERE id='native-queue-completed'").first()).queued_at, episode.queued_at);
+  await db.prepare("DELETE FROM release_jobs WHERE id IN ('native-queue-initial','native-queue-retry','native-queue-completed')").run();
   // Exercise recovery through the actual Billing service and native D1, with
   // synthetic provider responses and an injected clock (no external requests).
   let billingAt = checkoutAt, customerCalls = 0, checkoutCalls = 0;
@@ -377,8 +398,8 @@ try {
 
   // Exercise the deployed scheduled handler, including native D1 tuple cleanup
   // and the forward indexes. This database and every identity below are synthetic.
-  assert.equal(config.vars.BACKGROUND_JOBS_ENABLED, 'false');
-  assert.equal(config.vars.AUTO_ERASURE_ENABLED, 'false');
+  assert.equal(inlineBindings.BACKGROUND_JOBS_ENABLED, 'false');
+  assert.equal(inlineBindings.AUTO_ERASURE_ENABLED, 'false');
   const maintenanceAt = Date.now(), expiredAt = maintenanceAt - 60000, liveUntil = maintenanceAt + 600000;
   const personalSpace = (await workspace.snapshot(owner.token)).spaces.find(space => space.organizationId === null);
   assert.ok(personalSpace);
@@ -873,5 +894,5 @@ try {
     if (boundary === 'expiry') await db.prepare('UPDATE memberships SET expires_at=? WHERE id=?').bind(boundaryMembership.expires_at, boundaryMembership.id).run();
   }
   assert.equal((await db.prepare('PRAGMA foreign_key_check').all()).results.length, 0);
-  console.log('PASS bundled Worker on local workerd/D1: populated migrations 5-23 with preserved identity/history, pagination indexes, stable FTS row lookup and indexed foundation key issuance, preserved checkout attempts and customer-failure recovery, bounded vector erasure with durable progress, asynchronous visibility confirmation, durable late-upsert reconciliation and retained identifiers, bounded scheduled cleanup and preserved personal memories/audit/jobs, maintenance heartbeat, lease fencing/renewal, paginated account-bound share invitations, retryable consent, and lost-response outbound grant recovery across browser sessions, SCIM qualified deactivation, deletion history/projection/pagination/owner protection, tenant FTS backfill/Unicode/prefix boundaries and pre-metering query limits, atomic idempotency/supersession conflicts, revisions, trash/restore, independent nested organizations, SSO bootstrap, invitations, scoped member PATs and encoded revocation/retry IDs, account-intent enforcement, terminal-ingest retry refusal, final REST erasure and ingest cancellation/approval disclosure, retained-page cursor progress, retention expiry classification and policy refresh, final MCP response authority and combined action checks, offboarding, readiness and integrity.');
+  console.log('PASS bundled Worker on local workerd/D1: populated migrations 5-25 with preserved identity/history and factual queue episode transitions, pagination indexes, stable FTS row lookup and indexed foundation key issuance, preserved checkout attempts and customer-failure recovery, bounded vector erasure with durable progress, asynchronous visibility confirmation, durable late-upsert reconciliation and retained identifiers, bounded scheduled cleanup and preserved personal memories/audit/jobs, maintenance heartbeat, lease fencing/renewal, paginated account-bound share invitations, retryable consent, and lost-response outbound grant recovery across browser sessions, SCIM qualified deactivation, deletion history/projection/pagination/owner protection, tenant FTS backfill/Unicode/prefix boundaries and pre-metering query limits, atomic idempotency/supersession conflicts, revisions, trash/restore, independent nested organizations, SSO bootstrap, invitations, scoped member PATs and encoded revocation/retry IDs, account-intent enforcement, terminal-ingest retry refusal, final REST erasure and ingest cancellation/approval disclosure, retained-page cursor progress, retention expiry classification and policy refresh, final MCP response authority and combined action checks, offboarding, readiness and integrity.');
 } finally { parser.close(); await mf.dispose(); }

@@ -45,7 +45,7 @@ function protect(response: Response): Response {
 
 export function createApplication(db: IdentityDatabase, settings: Settings, options: ApplicationOptions = {}) {
   const clock = options.clock ?? Date.now;
-  const workspace = new WorkspaceService(db, clock);
+  const workspace = new WorkspaceService(db, clock, { identityLifecycle: options.release?.identityLifecycle === 2 });
   const memory = new MemoryService(db, clock);
   const memoryApi = createMemoryApi(db, clock);
   const auth = createAuthController(db, settings.auth, async (p, token) => {

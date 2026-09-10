@@ -2,7 +2,7 @@ import { spawn } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { DeploymentConfigurationError, deploymentErrorMessage, deploymentFingerprint, loadDeploymentConfiguration, parseDeploymentArguments, PROJECT_DIRECTORY } from './deployment-config.mjs';
+import { DeploymentConfigurationError, deploymentErrorMessage, deploymentFingerprint, loadDeploymentConfiguration, parseDeploymentArguments, PROJECT_DIRECTORY, validateDeploymentSource } from './deployment-config.mjs';
 
 const require = createRequire(import.meta.url);
 const wrangler = join(dirname(require.resolve('wrangler/package.json')), 'bin/wrangler.js');
@@ -48,6 +48,7 @@ export async function runDeploymentCommand(argv, { runner = runProcess, cwd = pr
   const selection = { ...parseDeploymentArguments(args), cwd, productionConfigPath, processEnvironment };
   const target = await loadDeploymentConfiguration(selection);
   const options = { cwd: PROJECT_DIRECTORY, shell: false };
+  const inputs = operation === 'build' || operation === 'deploy' ? await validateDeploymentSource(target) : null;
   const source = operation === 'build' || operation === 'deploy' ? await inspectSource() : null;
   if (source && (!/^[a-f\d]{40}$/.test(source.revision) || typeof source.dirty !== 'boolean'))
     throw new DeploymentConfigurationError('Cannot identify the deployment source revision.');
@@ -69,7 +70,8 @@ export async function runDeploymentCommand(argv, { runner = runProcess, cwd = pr
     deploy: ['deploy'],
   };
   const definitions = source ? ['--define', `BUILD_SOURCE_REVISION:${JSON.stringify(source.dirty ? 'unreleased' : source.revision)}`,
-    '--define', `BUILD_RESOURCE_FINGERPRINT:${JSON.stringify(deploymentFingerprint(target.config))}`] : [];
+    '--define', `BUILD_RESOURCE_FINGERPRINT:${JSON.stringify(deploymentFingerprint(target.config))}`,
+    '--tsconfig', inputs.tsconfig] : [];
   const commands = operation === 'db:local' || operation === 'db:remote'
     ? [...target.hotBindings, 'DB'].map(binding => ['d1', 'migrations', 'apply', binding, operation === 'db:local' ? '--local' : '--remote'])
     : [argumentsByOperation[operation]];
@@ -77,6 +79,8 @@ export async function runDeploymentCommand(argv, { runner = runProcess, cwd = pr
     const checked = await loadDeploymentConfiguration(selection);
     if (checked.path !== target.path || JSON.stringify(checked.config) !== JSON.stringify(target.config))
       throw new DeploymentConfigurationError('Deployment configuration changed before the next command. Review the target and run again.');
+    if (inputs && JSON.stringify(await validateDeploymentSource(checked)) !== JSON.stringify(inputs))
+      throw new DeploymentConfigurationError('Deployment source inputs changed before the next command. Review the target and run again.');
     await runner(process.execPath, [wrangler, ...command, ...definitions, '--config', target.path], options);
   }
   return target;

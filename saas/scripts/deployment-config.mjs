@@ -180,6 +180,27 @@ export async function loadDeploymentConfiguration({ configPath, cwd = process.cw
   return { path, config, ...validate(config, production, path === productionPath) };
 }
 
+/** The source pin identifies this checkout's Memory Worker, not arbitrary Wrangler input. */
+export async function validateDeploymentSource(target) {
+  const overrides = ['build', 'alias', 'assets', 'site', 'wasm_modules', 'text_blobs', 'data_blobs',
+    'rules', 'find_additional_modules', 'base_dir', 'no_bundle', 'tsconfig', 'define', 'jsx_factory', 'jsx_fragment'];
+  if (overrides.some(key => Object.hasOwn(target.config, key)))
+    fail('Deployment source overrides are unsupported. Use the reviewed Memory build configuration.');
+  if (typeof target.config.main !== 'string' || !target.config.main)
+    fail('Select the reviewed Memory entry point explicitly.');
+  let project, entry, tsconfig;
+  try {
+    project = await realpath(PROJECT_DIRECTORY);
+    entry = await realpath(resolve(dirname(target.path), target.config.main));
+    tsconfig = await realpath(resolve(project, 'tsconfig.json'));
+  } catch { fail('Cannot resolve the reviewed Memory entry point or source configuration.'); }
+  // Resolve relative to the selected config, just as Wrangler does. Reject a
+  // redirected src/ or tsconfig as well as an external or alternate entry point.
+  if (entry !== resolve(project, 'src/worker.ts') || tsconfig !== resolve(project, 'tsconfig.json'))
+    fail('Deployment must use the reviewed Memory entry point and source configuration.');
+  return { entry, tsconfig };
+}
+
 export function deploymentErrorMessage(error) {
   return error instanceof DeploymentConfigurationError ? error.message : 'Deployment command failed. No fallback was attempted.';
 }

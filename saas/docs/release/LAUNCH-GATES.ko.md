@@ -1,34 +1,30 @@
-# 출시 판정표
+# 초대 기반·사용량 계량 GA 판정표
 
-현재 판정: **NO-GO for unrestricted public GA**. 아래 내용은 기능 확장 코드를 제공한 상태이며, 완전한 출시 승인이나 보안 인증이 아니다.
+현재 최종 GA 승인은 **대기**다. 선택한 범위는 초대 기반 가입, 관리형 메모리, AI 검색·검토형 추출과 사용량 계량이며 **유료 결제는 제외**한다. 이번 판정은 무제한 공개 가입이나 법규 준수 인증이 아니다.
 
-## 코드가 있고 이번 환경에서 제한된 검증을 한 항목
+후보는 0.5.0-rc.1/중앙 25/HOT 1이다. Production은 rc.3/중앙 1–7, staging은 이전 revision `1a93820`/중앙 1–23/HOT 1이다. 중앙 24–25와 최신 수정은 아직 배포하지 않았다. [통합 기록](INTEGRATION.md)의 과거 rc.4 결과를 현재 후보의 최종 통과로 읽지 않는다.
 
-메모리 원자적 멱등성·revision·권한/Space 분리, 인덱스 결과 재검사, 큐 lease/retry, quota, 보존·본문 제거·export·수락 기반 공유, 메일/DNS/결제/AI adapter의 모의 응답 계약, 대화 추출 제안 승인, REST/MCP 경로, 원본 app.ts 인증 경계와 확장 hook을 테스트했다. 현재 검증 결과와 남은 작업은 [유지 관리되는 통합 기록](INTEGRATION.md)에 기록한다. 이전 RED 로그는 실패를 먼저 재현한 개발 증거이며 최종 상태가 아니다.
+## 구현 및 기록된 검증
 
-## 추가 구현이 남은 것 — 단순 환경 변수 입력으로 끝나지 않음
+물리 HOT D1 샤딩·canonical 비공개 R2·중앙 권한/receipt/논리 quota·제한된 backfill/cleanup, REST/MCP, 공유/export/복원/제거, AI hybrid 검색·검토형 추출, 가입 roster 및 provider 비용 예약이 구현되어 있다. 한 Space를 실제 두 HOT에 분산한 이전 staging 검증이 있다.
 
-| 항목 | 현재 상태와 남은 작업 |
-|---|---|
-| 계정 탈퇴·전체 개인정보 삭제 | 개별 기억의 현재 본문/이력 제거는 구현. 계정, 이메일 claim, 조직 기록, 결제 공급자 정보, 복구 사본까지 포함하는 전역 삭제/법정 보존 workflow는 미구현. 삭제와 보존 정책을 정하고 별도 migration/API/운영 절차가 필요 |
-| 기존 개인용 자동 이관 | 기존 개인용 MCP와 SaaS 도구의 인수가 다름. 원본 Agent Memory export를 SaaS 형식으로 이관하고 개수/원문/검색 결과를 비교하는 자동 migration 도구는 미구현 |
-| 완전한 SCIM | 조직 멤버 목록/비활성화/회수만 지원. 사용자 생성, 속성 갱신, Groups, 전체 filter/schema 기능 및 공급자 호환 인증은 미구현. 지원하지 않는 메서드는 거부 |
-| ID 공급자의 회수 이벤트 발행 | 수신 endpoint와 replay 방지는 구현. 중앙 인증 서버 프로젝트에서 내보낼 durable outbox, 누락 재전송/재조정, 실재 회사 디렉터리 계정삭제 감지는 이 저장소 밖에서 연결 필요 |
-| 개인용 검색과 완전한 기능 동등성 | hybrid 검색/검토형 추출/명시적 supersession 구현. 자동 의미 중복 통합·자동 사실 충돌 판정 및 기존 Agent Memory와 동등한 품질 보장은 미완료 |
-| 대규모 운영 | 현재 유한량 cron 처리와 D1 구조. 예상 유입량에 맞춘 queue 소비량, 장기 ledger 보관/compaction, 비용 경보, 용량 계획 및 부하 기준을 구현·검증해야 함 |
-| 운영 정책·사용자 안내 | 사업자 정보, 약관/개인정보 처리방침 동의 기록, 지원/장애 공지 체계, 결제 취소·환불·정산 정책은 실제 사업 운영에 맞춰 보완 필요 |
+같은 이전 staging에서 실제 SSO, scoped PAT, 공식 MCP SDK, AI 검색/추출, 10단계 조직의 독립 ACL, CRUD/복원/제거 및 계량을 확인했다. 메일 receiver 배포와 실제 proof 소비는 아직 대기다. 중앙 lifecycle 발행기/수신기는 native 두 Worker에서 9 events/11 deliveries와 재전송·재개를 검증했으나 중앙 발행기는 미배포다.
 
-Zero-Access, HIPAA/GDPR 등 특정 법규 준수 보증, 엔터프라이즈 SAML/전체 SCIM은 이 릴리스에 포함하지 않았다. Standard 모드는 서버가 메모리를 처리할 수 있다. 임시 ingest AES-GCM은 공급자가 내용을 볼 수 없게 하는 Zero-Access 암호화가 아니다.
+Authentication35는 해당 source에서 actionable finding 0건으로 종료했고 Storage36은 3건을 보고하여 수정이 배정되었다. 수정 후 해당 영역을 다시 검토한다. Console34의 self-removal UI와 오래된 배포 문서 finding을 수정한 뒤 console 재검토도 필요하다. 현재 전체 테스트 수와 전체 영역의 zero-finding 결론은 최종 재실행·review 종료 전 기록하지 않는다.
 
-## 실제 계정·인프라로 검증해야 하는 것
+## 최종 revision의 필수 gate
 
-1. **원본 결합:** 대상 revision의 migration 일치 검사, 기존 데이터를 보유한 전체 업그레이드, 전체 테스트·Worker 빌드·workerd/D1 검증. 해당 revision의 결과와 CI를 [통합 기록](INTEGRATION.md)에서 확인한다.
-2. **SSO와 메일:** 실제 브라우저 로그인→저장→재접속→만료 재로그인, 메일 proof 발송/소비, 다른 브라우저/다른 계정 재사용 거부, 이메일 삭제 즉시 멤버십·키 회수. DNS 소유권과 lease 갱신, 관리자 회수까지 검증한다.
-3. **검색과 추출:** 실제 Workers AI 입력/출력 및 Vectorize 차원·namespace·eventual indexing 확인. 합성 51문항과 별도의 익명화된 실제 질문에서 기존 개인용 엔진 대비 평가한다. 인용문이 실제 존재해도 추출된 해석이 맞는다는 보장은 없으므로 사람 검토가 필요하다.
-4. **결제:** 사업자/정산 국가에 적합한 공급자 계정인지 확인 후 sandbox 결제, 미납, 취소, 가격 변경, 중복/순서 역전/누락 webhook, checkout 만료, portal을 검증한다. 가격 ID와 한도는 서버에서만 정한다. 실결제나 정산은 이번에 실행하지 않았다.
-5. **복구와 부하:** 독립 staging에서 데이터 보유 복구와 삭제 재적용, 인덱스 재생성, 회수 이벤트 누락 복구를 직접 수행한다. 동시 write/lease 만료/공급자 지연을 실제 D1에서 시험하고 지연·비용·quota·queue 깊이 기준을 정한다.
-6. **보안·정책:** 독립 보안 검토, 비밀 관리, 운영자 최소 권한, 퇴사자 회수, 사고 대응과 보존 정책을 확인한다. 새 에이전트의 코드 리뷰와 회귀 테스트는 독립 외부 보안 감사나 인증을 대체하지 않는다.
+[GA_ACCEPTANCE.md](GA_ACCEPTANCE.md)의 15개 gate는 코드의 필수 목록과 일치한다: source-validation, sso-session, mail-proof, workspace-authority, identity-revocation, pat-mcp-clients, ai-retrieval, reviewed-ingestion, sharing-export-erasure, metering-quotas, physical-storage, multi-store-recovery, load-capacity, observability-response, operational-policy.
 
-## `/ready`의 의미
+각 gate는 실제 대상·revision·중앙/HOT schema·리소스 지문, 시각, 검사 결과 및 증거 파일 SHA-256을 가져야 한다. 명시적 일반 테이블/DDL 복구 exporter의 native 검증은 provider 복구 훈련을 대신하지 않는다. 실제 전체 D1 export의 FTS 거절을 반영해 격리된 다중 저장소 복구를 수행한다.
 
-`RELEASE_MODE=pilot`과 빈 `LIVE_ACCEPTANCE_ID`가 기본이다. `/ready`는 구성·schema·heartbeat·운영자 승인 기록의 존재를 점검한다. `RELEASE_MODE=ga`와 승인 기록 ID를 설정해서 200이 나오더라도 위 검증을 자동 수행하거나 미구현 기능을 완성하는 것이 아니다. 승인 기록에 코드 hash, 원본 통합 결과, 실환경 시험 증거와 잔여 위험을 남겨야 한다.
+`LIVE_ACCEPTANCE_ID` 문자열만으로는 승인되지 않는다. `/ready`는 Ed25519 서명된 `LIVE_ACCEPTANCE_JWS`, 공개 키, 번들 source/config 지문, 중앙 25/HOT 1, 필수 binding, heartbeat, 초대 설정과 AI 예약 예산을 검사한다. 서명은 최대 7일이며 모든 15개 gate의 증거가 필요하다. 기술 설정 통과와 운영자 승인 완료를 구분한다.
+
+## 운영 결정과 제외 범위
+
+- Memory 전체 Cloudflare 월 $50 목표에 맞춰 production AI 예약 상한 $20과 staging $0.20, 별도 인프라 청구·경보·중단 대응을 검증한다. 예약 예산은 전체 청구액의 자동 상한이 아니다.
+- 계정/이메일/법정 보존/복구 사본까지 포함한 전체 개인정보 삭제 workflow, 사고·지원 대응, RPO/RTO와 보존 정책은 운영 결정 및 이행 증거가 필요하다. 개별 기억 접근 제거 receipt는 R2/HOT/벡터 물리 제거 완료가 아니다.
+- 기존 개인용 서비스의 자동 이관, 자동 의미 충돌 통합, 개인용 검색 엔진과 완전한 품질 동등성, 전체 SCIM/SAML, Zero-Access 및 규제 인증은 제공하지 않는다.
+- 유료 결제, 가격·환불·정산 수락은 이번 GA에서 제외하고 비활성 상태를 유지한다. 이를 활성화하려면 별도의 변경·수락이 필요하다.
+
+실제 메일 receipt, lifecycle 배포와 지연/누락 복구, 용량·비용·alert 대응 및 격리 복구를 완료하고 정확한 최종 source로 재검증한 뒤 승격한다.

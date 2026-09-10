@@ -22,6 +22,10 @@ async function fixture(t) {
   t.after(() => rm(directory, { recursive: true, force: true }));
   const config = parse(await readFile(join(project, 'wrangler.jsonc'), 'utf8'));
   config.name = 'memory-acceptance-staging';
+  config.vars.STORAGE_MODE = 'inline';
+  delete config.vars.STORAGE_SHARDS_JSON;
+  config.vectorize = [{ binding: 'MEMORY_INDEX', index_name: 'memory-acceptance-staging-index' }];
+  config.analytics_engine_datasets = [{ binding: 'METRICS', dataset: 'memory_acceptance_staging_metrics' }];
   Object.assign(config.vars, { DEPLOYMENT_ENVIRONMENT: 'staging', PUBLIC_ORIGIN: 'https://memory-staging.example.org',
     GA_PROFILE, PAID_BILLING_ENABLED: 'false', ENROLLMENT_MODE: 'invite', AI_MONTHLY_BUDGET_MICROUSD: '200000',
     LIVE_ACCEPTANCE_PUBLIC_KEY: publicKey });

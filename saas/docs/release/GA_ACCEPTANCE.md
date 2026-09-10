@@ -31,7 +31,7 @@ npm run deploy -- --config .\wrangler.staging.jsonc
 
 | Gate ID | 실제로 확인할 결과 |
 |---|---|
-| `source-validation` | 같은 commit의 전체 검사·CI·데이터 보유 schema 1–23 업그레이드·native D1와 HOT schema 1 검증 |
+| `source-validation` | 같은 commit의 전체 검사·CI·데이터 보유 schema 1–25 업그레이드·native D1와 HOT schema 1 검증 |
 | `sso-session` | 실제 로그인, 만료·재접속·로그아웃과 계정 전환 |
 | `mail-proof` | 실제 수신함에서 proof 수신·소비, 만료·다른 세션 재사용 거부 |
 | `workspace-authority` | 두 계정의 Space 분리, 조직 권한 비상속, membership·domain lease·관리자 회수 |

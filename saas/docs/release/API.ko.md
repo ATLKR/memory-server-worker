@@ -1,6 +1,6 @@
 # API 계약과 호환성
 
-현재 rc.4 source는 schema 21과 PR 전용 migrations 8–21을 요구한다. 마지막 배포 기록은 rc.3와 migrations 1–7이다. 현재 전체 로컬 검증은 1,410개 테스트를 통과했다. Native 검증의 소스 범위와 남은 실환경 수락 조건은 [통합 기록](INTEGRATION.md), 적용 순서는 [migration 목록](DEPLOYMENT.ko.md)을 확인한다.
+현재 0.5.0-rc.1 source는 중앙 schema 25와 HOT schema 1을 요구한다. Production은 rc.3/migrations 1–7, staging은 앞선 후보/migrations 1–23와 HOT 1을 적용한 pilot이다. 현재 소스 배포 전 각 환경의 남은 migration을 모두 적용한다. Native 검증의 소스 범위와 남은 실환경 수락 조건은 [통합 기록](INTEGRATION.md), 적용 순서는 [배포 절차](DEPLOYMENT.ko.md)를 확인한다.
 
 ## 인증과 권한
 
@@ -42,7 +42,7 @@ REST 메모리 쓰기는 `Idempotency-Key` 헤더 또는 JSON `operationId`를 �
 | `/v1/spaces/S/memories` | POST `body,source?,kind?,provenance?,eventTime?,supersedesMemoryId?,operationId?`; GET `query` 또는 `limit,cursor,deleted` |
 | `/v1/spaces/S/memories/M` | GET; PATCH `body,source?,expectedRevision,operationId?`; DELETE `expectedRevision,operationId?` |
 | `/v1/spaces/S/memories/M/restore` | POST `expectedRevision,operationId?` |
-| `/v1/spaces/S/memories/M/erase` | POST `expectedRevision,confirmation=M,operationId?`; 최근 재인증 필요 |
+| `/v1/spaces/S/memories/M/erase` | POST `expectedRevision,confirmation=M,operationId?`; 최근 재인증 필요. 접근 차단 승인과 비동기 정리 대기를 반환 |
 | `/v1/spaces/S/retention` | PUT `days` 1–3650, 기본 휴지통 30일 |
 | `/v1/spaces/S/exports` | POST snapshot session; GET `/exports/ID?cursor=...` |
 | `/v1/spaces/S/ingests` | POST `messages,operationId?`; GET 본인 작업 목록 |

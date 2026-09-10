@@ -3,7 +3,7 @@ import { sqlNow } from '../sql-clock.ts';
 import { authority, params, requireSpace, interactive, recentSql } from './authority.ts';
 import { columns, memoryRow, MemoryStore, type MemoryRow } from './memory.ts';
 import { PayloadStore } from './payloads.ts';
-import { compareLexical, shardedLexical, type LexicalHead } from './payload-search.ts';
+import { compareLexical, shardedLexical, uniqueLexical, type LexicalHead } from './payload-search.ts';
 import { reserveProvider } from './provider-budget.ts';
 import { digest, fail, id, integer, object, rows, str, tokenHash, stmt, batch } from './util.ts';
 import { unicode61Token } from './unicode61.ts';
@@ -79,12 +79,24 @@ export class Search {
     AND ${authority('read')}
     ORDER BY score DESC,r.id LIMIT ?`,
                 [`tenant : "${tenant}" AND body : (${expression})`, spaceId, ...params(hash, at, 'read'), candidateLimit]);
-        lexical = [...lexical, ...await shardedLexical(db, this.payloads, hash, spaceId, expression, candidateLimit, this.clock)]
-            .sort(compareLexical).slice(0, candidateLimit);
+        // The source reads can straddle archival or an update. Resolve their
+        // bounded union before truncating: a stronger stale revision must not
+        // displace a weaker current match, and archival earns only one rank.
+        const combined = [...lexical, ...await shardedLexical(db, this.payloads, hash, spaceId, expression, candidateLimit, this.clock)];
+        const distinct = uniqueLexical(combined, combined.length);
+        const currentLexical = distinct.length ? await rows<LexicalHead>(db, `/* lexical-current-heads */
+            SELECT r.id,r.revision,json_extract(candidate.value,'$.score') AS score FROM json_each(?) candidate
+            JOIN memories r ON r.id=json_extract(candidate.value,'$.id') AND r.revision=json_extract(candidate.value,'$.revision')
+            JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
+            WHERE s.id=? AND r.deleted_at IS NULL AND r.erased_at IS NULL
+                AND NOT EXISTS(SELECT 1 FROM memories successor WHERE successor.supersedes_id=r.id)
+                AND ${authority('read')}`, [JSON.stringify(distinct), spaceId, ...params(hash, this.clock(), 'read')]) : [];
+        lexical = uniqueLexical(currentLexical, candidateLimit);
         // Retain each revision until D1 identifies the current one. A stale
         // higher-ranked chunk must not hide a later current-revision match.
         const candidates = new Map<string, Map<number, number>>();
-        lexical.forEach((row, i) => candidates.set(row.id, new Map([[row.revision, 1 / (60 + i + 1)]])));
+        lexical.forEach((row, i) => { const revisions = candidates.get(row.id) ?? new Map<number, number>();
+            revisions.set(row.revision, 1 / (60 + i + 1)); candidates.set(row.id, revisions); });
         let mode = 'lexical', degradedReason: string | null = null;
         // Retried operation IDs do not purchase another provider call. Return
         // fresh authorized lexical results and make the skipped work explicit.
@@ -127,7 +139,7 @@ export class Search {
         const final = ids.length ? await rows<MemoryRow>(db, `SELECT ${columns} FROM memories r JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
    WHERE s.id=? AND r.id IN (SELECT value FROM json_each(?)) AND r.deleted_at IS NULL AND r.erased_at IS NULL
    AND NOT EXISTS(SELECT 1 FROM memories successor WHERE successor.supersedes_id=r.id) AND ${authority('read')}`, [spaceId, JSON.stringify(ids), ...params(hash, fresh, 'read')]) : [];
-        const hydrated = await this.store.hydrateRows(final);
+        const hydrated = await this.store.hydrateRows(final, { omitErased: true });
         const allowed = await this.store.confirmRead(hash, spaceId, hydrated, { deleted: false, currentFact: true });
         const results = hydrated.filter(r => allowed.has(r.id) && candidates.get(r.id)?.has(r.revision)).map(r => ({ ...memoryRow(r), snippet: Array.from(r.body).slice(0, 500).join(''), score: candidates.get(r.id)!.get(r.revision)! })).sort(compareLexical).slice(0, limit);
         return { results, mode, degradedReason };

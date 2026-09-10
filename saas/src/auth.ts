@@ -30,6 +30,8 @@ export interface AuthPrincipal {
   emailVerified?: boolean;
   displayName?: string;
   expiresAt: number;
+  issuedAt?: number;
+  identityLifecycle?: string[];
   permission: 'read' | 'write';
 }
 export type WorkspaceSignIn = (principal: AuthPrincipal, externalToken?: string) =>
@@ -165,6 +167,8 @@ export function createAuthController(
         typeof payload.scope !== 'string' || payload.scope.length > 1024) throw new IdentityDenied();
     const scopes = new Set(payload.scope.split(/\s+/));
     if (!scopes.has('memory:read')) throw new IdentityDenied();
+    if (payload.memory_lifecycle !== undefined && (!Array.isArray(payload.memory_lifecycle) || payload.memory_lifecycle.length > 2
+        || payload.memory_lifecycle.some(value => typeof value !== 'string' || new TextEncoder().encode(value).length > 4096))) throw new IdentityDenied();
     return {
       issuer: settings.issuer, subject: sub,
       ...(scopes.has('email') && typeof payload.email === 'string' && payload.email.length <= 254
@@ -172,6 +176,8 @@ export function createAuthController(
       ...(scopes.has('profile') && typeof payload.name === 'string' && payload.name.length <= 256
         ? { displayName: payload.name } : {}),
       expiresAt: exp * 1000,
+      issuedAt: iat * 1000,
+      ...(payload.memory_lifecycle !== undefined ? { identityLifecycle: payload.memory_lifecycle as string[] } : {}),
       permission: scopes.has('memory:write') && scopes.has('memory:delete') ? 'write' : 'read',
     };
   }

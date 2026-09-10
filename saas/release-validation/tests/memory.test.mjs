@@ -38,12 +38,17 @@ async function productionFixture() {
  return {db,token:session.token,key,spaceId};
 }
 
-for(const race of [false,true]) test('supersession requires update authority'+(race?' in the mutating SQL':' on the original five schemas'),async()=>{
+for(const race of [false,true]) test('supersession requires update authority'+(race?' in the mutating SQL':' after upgrading original foundation data'),async()=>{
  const {db,token,key,spaceId}=await productionFixture();
  try {
   const store=new MemoryStore(db,()=>at),inline=new MemoryService(db,()=>at),original=await inline.create(token,spaceId,{body:'Keep this fact'});
   const actor=db.raw.prepare('SELECT actor_credential_id,account_id FROM spaces WHERE id=?').get(spaceId);
   db.raw.prepare("INSERT INTO release_operations(id,account_id,space_id,client_key,request_hash,action,memory_id,actor_credential_id,created_at,period,units) VALUES('original',?,?,'original','fixture','create',?,?,?,'2026-09',1)").run(actor.account_id,spaceId,original.id,actor.actor_credential_id,at);
+  assert.deepEqual((await inline.list(token,spaceId)).results.map(row=>row.id),[original.id]);
+  // Seed with the deployed foundation/release baseline, then exercise today's
+  // release authority only after all of its required forward migrations.
+  for(const file of readdirSync(new URL('../../migrations/',import.meta.url)).filter(name=>/^\d{4}_.*\.sql$/.test(name)&&Number(name.slice(0,4))>6).sort())
+   db.raw.exec(readFileSync(new URL('../../migrations/'+file,import.meta.url),'utf8'));
   if(race){
    db.raw.prepare("UPDATE release_credential_policies SET capabilities='[\"create\",\"update\"]' WHERE credential_id=?").run(key.id);
    const runBatch=db.batch.bind(db);db.batch=statements=>{db.raw.prepare("UPDATE release_credential_policies SET capabilities='[\"create\"]' WHERE credential_id=?").run(key.id);return runBatch(statements);};

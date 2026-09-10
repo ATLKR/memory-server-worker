@@ -1,11 +1,11 @@
 # Memory by Allen Labs — hosted pilot
 
 **0.4.0-rc.3** is deployed at [memory.allenlabs.org](https://memory.allenlabs.org).
-The PR source is **0.4.0-rc.4**, including review fixes and forward migrations 8–21;
-this candidate has not been deployed. Apply migrations 8–21 before deploying it;
-the candidate readiness check requires schema 21. The current full local check
-passes 1,410 tests; native evidence and remaining acceptance gates are scoped in
-the integration record below.
+The PR source is **0.5.0-rc.1**, requiring central migrations **1–25** and HOT
+schema **1**. Staging currently runs the earlier schema-23 candidate; production
+still has migrations 1–7. Apply all remaining migrations before deploying the
+current source. These environments are pilots, not completed GA releases.
+Verification and remaining acceptance gates are scoped in the integration record.
 Real-account SSO now reaches the authenticated management console. See the
 [rc.3 corrections](docs/release/RC3_FIXES.md) for account-switching, retry,
 revocation and SCIM fixes. The maintained
@@ -25,10 +25,12 @@ See the [API contract](docs/release/API.ko.md) and
 [recovery procedure](docs/OPERATIONS.md#outbound-share-recovery).
 MCP clients/plugins can connect with PAT or central Better Auth SSO; see
 [connection instructions](docs/CONNECTING.md). Email proofs use native Cloudflare
-Email Service. AI extraction/hybrid search, Stripe and signed deprovisioning have
-adapters and tests but require live provider configuration. A five-minute cron
-performs bounded expiry cleanup; `BACKGROUND_JOBS_ENABLED=false` keeps provider
-processing off and `AUTO_ERASURE_ENABLED=false` preserves retained memories.
+Email Service. Actual staging AI extraction/hybrid search, scoped PATs and the
+official MCP client have passed bounded live probes. Native identity lifecycle
+delivery is implemented; its central publisher still needs live rollout.
+The selected GA is invite-only and metered, with paid billing disabled. A
+five-minute cron performs bounded maintenance and enabled provider jobs in
+staging. `AUTO_ERASURE_ENABLED=false` preserves retained memories.
 Unavailable ingestion, index rebuild and billing controls are disabled in the UI.
 The candidate also preserves one-time dialog results while issuance is pending,
 reconciles approved/cancelled extraction cards across refreshes, and disables
@@ -136,7 +138,14 @@ Standard stores service-readable plaintext. `zero_access` is rejected; no simula
 
 Conditional SQL writes enforce live permissions and preserve prior versions plus identifier-only audit atomically. Normal deletion is a tombstone: normal reads/search hide the record, but content/history remain. A separate recently reauthenticated erasure removes the memory payload and prior versions; identifier/audit records and backups are outside that operation. Automatic retention erasure remains disabled in the deployed pilot. Post-write reads check authority again; a write may commit before a concurrent revocation prevents its response.
 
-The deployed `DB` binding targets the dedicated `allenlabs-memory-production` database, separate from the legacy personal database. Migrations 1–7 are applied remotely and remain byte-identical. The candidate adds forward migrations for checkout recovery, resumable indexing/vector deletion, confirmed provider receipts, SCIM history, tenant-scoped lookup/pagination, durable reconciliation, execution-time deadline checks, and atomic domain verification with retained proof history. Apply every remaining numbered migration through `0021_domain-retention-schema.sql` before deploying rc.4; the [deployment table](docs/release/DEPLOYMENT.ko.md) lists the current prerequisites. `npm run db:local` applies numbered migrations locally. Migration checks freeze deployed baseline hashes, existing migration files cannot be regenerated, and Git attributes pin SQL files to LF. Future schema changes require new forward migrations before compatible code deployment.
+The production `DB` binding targets the dedicated `allenlabs-memory-production` database, separate from the legacy personal database. Production has migrations 1–7; staging has 1–23 and HOT schema 1. The current source requires every central migration through `0025_queue-episode-schema.sql`, plus `shard-migrations/0001_payloads.sql` on each HOT DB. Use the [deployment procedure](docs/release/DEPLOYMENT.ko.md) and the explicit environment config. `db:remote` applies HOT migrations before central migrations; deployment does not migrate automatically. Applied migrations remain immutable, and Git attributes pin SQL files to LF. Future schema changes require forward migrations before compatible code deployment.
+
+With `STORAGE_MODE=sharded`, central D1 retains authority, current revision pointers,
+receipts and metering. Private R2 stores canonical payloads; separate HOT D1 databases
+hold searchable text. A Space can span multiple HOT databases. Immutable placement,
+durable write intents and external erasure tombstones cover partial writes and retries.
+See [storage architecture](docs/SCALING.md) and
+[multi-store recovery](docs/release/MULTI_STORE_RECOVERY.md).
 
 Deadline admission uses the later of the application-bound time and the database
 statement's execution time. Waiting in the database queue cannot extend a
@@ -171,6 +180,6 @@ Brand text is escaped and control characters are rejected. Keep `SERVICE_ID`, is
 
 ## Following milestones
 
-Live email receipt and PAT issuance, external MCP-client installation, AI/payment/webhook acceptance, load tests and recovery drills remain outstanding. Pooled quotas, export, explicit sharing and individual-memory erasure are implemented; they do not establish a complete account-deletion or backup-erasure workflow. Zero-Access and physical D1 sharding/R2 offload remain unimplemented. Storage currently uses one dedicated D1 database and retains its per-database 10 GB limit. Real-account browser SSO has passed; the service remains a pilot.
+Remaining GA work includes actual email receipt/consumption, central lifecycle rollout, measured load and costs, operational alert response, and an isolated provider recovery drill. Physical D1 sharding and private R2 payloads are implemented and exercised on staging. Every D1 still has its own size limit, including the central metadata DB. Scoped PATs, official MCP client calls, AI retrieval/extraction, ten-level organization isolation, metering, sharing, export and memory deletion/restoration have live staging evidence; they must be checked against the final release revision. Complete account-deletion and backup-erasure operations still require a documented, verified process. Zero-Access is outside this release. Paid billing is excluded from the selected invite-only GA. See the [15 acceptance gates](docs/release/GA_ACCEPTANCE.md).
 
 See the [product design](../docs/superpowers/specs/2026-09-08-productization-design.md), [implementation plan](../docs/superpowers/plans/2026-09-08-productization.md), [operations runbook](docs/OPERATIONS.md), and [verification record](docs/VERIFICATION.md).

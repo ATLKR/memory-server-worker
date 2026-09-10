@@ -1,47 +1,53 @@
 # 배포·승격 절차
 
-## 저장소와 DB 분리
+## 현재 대상
 
-이 문서는 통합된 저장소의 배포 절차다. 현재 배포·검증 상태는 [INTEGRATION.md](INTEGRATION.md), 상세 운영 절차는 [상위 운영 문서](../OPERATIONS.md)를 따른다. ZIP 전용 assembler와 staging 예제는 이 저장소에 포함되어 있지 않다.
+후보는 **0.5.0-rc.1, 중앙 migrations 1–25와 HOT schema 1**을 요구한다. Production `memory.allenlabs.org`는 rc.3/중앙 1–7 그대로이며, staging `memory-staging.allenlabs.org`는 이전 revision `1a93820`/중앙 1–23/HOT 1이다. 24–25는 아직 배포하지 않았다. 기존 개인용 Worker와 DB는 별도 서비스다. 실제 적용 상태와 검증은 [INTEGRATION.md](INTEGRATION.md)에서 구분한다.
 
-기존 개인용 Worker와 DB는 별도 서비스다. `saas/wrangler.jsonc`는 실제 SaaS production을 가리키므로 staging 시험에 그대로 사용하지 않는다. staging에는 별도 도메인·D1·SSO client와 필요한 provider binding을 구성한다. 기존 production D1을 재생성하거나 UUID를 교체하지 않는다. 적용된 migration 1–7의 해시 검증을 제거하지 않는다.
+`wrangler.jsonc`는 production 대상이므로 staging 시험에 그대로 쓰지 않는다. staging 명령에는 항상 `--config .\wrangler.staging.jsonc`를 지정한다. 인수 없는 명령은 production 설정을 사용한다. 기존 production DB UUID를 재생성·교체하거나 개인용 DB로 대체하지 않는다.
 
-## 설정
+## 필수 설정과 마이그레이션
 
-| 종류 | 설정 |
-|---|---|
-| 기본 | `PUBLIC_ORIGIN`, 원본 중앙 SSO에 등록한 staging `SSO_CLIENT_ID`, 정확한 redirect URI `/auth/callback` 및 resource/audience |
-| D1 | 전용 `DB`. Production rc.3 적용 기록은 0001–0007이며, 이 PR Worker 배포 전에는 새 0008_checkout-schema.sql, 0009_job-progress-schema.sql, 0010_protocol-schema.sql, 0011_pagination-schema.sql, 0012_lookup-schema.sql, 0013_key-lookup-schema.sql, 0014_tenant-queue-schema.sql, 0015_workspace-lookup-schema.sql, 0016_retrieval-progress-schema.sql, 0017_vector-reconciliation-schema.sql, 0018_outbound-share-schema.sql, 0019_execution-time-schema.sql, 0020_domain-verification-schema.sql, 0021_domain-retention-schema.sql을 순서대로 적용. 새 환경은 0001–0021 적용. 후보 `/ready`의 필수 schema 버전은 21 |
-| 검색 | Workers AI binding `AI`, 1024차원 cosine Vectorize index `MEMORY_INDEX`. 실제 모델 출력으로 차원·응답을 확인하고 등록 |
-| 추출 | `PAYLOAD_KEY`: 무작위 32바이트 base64url. `.dev.vars`와 Git에 운영 secret을 커밋하지 않음 |
-| 메일 | Cloudflare Email Sending 등록 도메인, 네이티브 `EMAIL` binding, `MAIL_FROM`. [설정·검증](EMAIL.md) |
-| 회수 이벤트 | 중앙 인증 발행기와 같은 `IDENTITY_WEBHOOK_SECRET`; 다른 환경의 secret을 재사용하지 않음 |
-| 결제 | `STRIPE_SECRET_KEY`, `STRIPE_WEBHOOK_SECRET`, 계정에서 실제 검증한 고정 `STRIPE_API_VERSION`, `BILLING_PRICES_JSON` |
-| 유지보수 | 현재 5분 cron은 만료 임시 상태를 정리. `BACKGROUND_JOBS_ENABLED=false`, `AUTO_ERASURE_ENABLED=false` 유지. Provider 처리 활성화 시 호출당 index/ingest 기본 5개, billing event 기본 3개의 처리량과 backlog 검증 |
-| 관측성 | 선택적 Analytics Engine `METRICS`. 원본의 invocation logging 비활성화를 유지하여 OAuth code 포함 URL이 로그에 남지 않게 함 |
-| 승격 | 기본 `RELEASE_MODE=pilot`, 승인 전 `LIVE_ACCEPTANCE_ID`는 비워 둠 |
+| 항목 | 후보 계약 |
+| --- | --- |
+| 기본 | 정확한 `PUBLIC_ORIGIN`, 중앙 SSO `SSO_CLIENT_ID`, `/auth/callback` 및 resource/audience. 인증 UI/API는 기존 allen.company 도메인 유지 |
+| 중앙 D1 | `DB`, `migrations_dir: migrations`. 새 환경은 0001–0025 전부 적용. Production은 0008–0025, 현재 staging은 0024–0025를 추가 적용한 뒤 후보 배포 |
+| HOT/R2 | `STORAGE_MODE=sharded`, 서로 다른 물리 HOT D1, 최대 16 active/draining registry 항목, 비공개 `MEMORY_PAYLOADS`. 모든 HOT에 `shard-migrations/0001_payloads.sql` 적용 |
+| 가입·계량 | `GA_PROFILE=managed-ai-metered`, `ENROLLMENT_MODE=invite`, secret `ENROLLMENT_EMAIL_HASHES_JSON`, UTC 월 단위 AI 호출 예약 예산 |
+| AI·검색·추출 | `BACKGROUND_JOBS_ENABLED=true`, `AI`, 1024차원 cosine `MEMORY_INDEX`, `PAYLOAD_KEY`. 실제 provider 응답·색인 지연·검토 후 승인 확인 |
+| 메일 | 네이티브 `EMAIL`, `MAIL_FROM`, 등록된 발신 도메인. 실제 수신·proof 소비는 별도 수락 gate |
+| Identity lifecycle | Memory `IDENTITY_WEBHOOK_SECRET`와 중앙의 해당 환경 delivery secret. 중앙 발행기 배포는 별도 단계이며 현재 미배포 |
+| 결제·보존 | `PAID_BILLING_ENABLED=false`: 이번 GA에서 유료 결제 제외. `AUTO_ERASURE_ENABLED=false` 유지. 명시적 최근-proof 영구 제거는 별도 |
+| 이관 | `STORAGE_BACKFILL_ENABLED`는 명시적 opt-in. draining 설정은 기존 payload 자동 이동이 아님 |
+| 관측·승격 | invocation logging 비활성, `RELEASE_MODE=pilot`. 최종 증거의 `LIVE_ACCEPTANCE_JWS`와 대응 공개 키가 필요하며 ID 문자열만으로 승인되지 않음 |
 
-설정 파일만으로 원격 리소스가 준비되지는 않는다. 통합 저장소의 `package-lock.json`과 지원 Node 버전으로 재현하고, 실제 provider 설정과 수신·콜백은 별도로 검증한다.
+AI 호출 예약 예산은 production 최대 $20, staging $0.20이다. 고객 사용량도 별도로 계량한다. Memory 전체 Cloudflare 월 $50 목표는 Workers/D1/R2/Vectorize의 실제 청구·경보·중단 절차까지 관리해야 하며 AI 설정만으로 보장되지 않는다.
 
-0008은 checkout의 실제 시도 여부를 기록하고 시도한 요청의 만료 시각을 고정한다. 기존 행은 공급자 호출 이력을 단정할 수 없으므로 모두 시도된 요청으로 보존한다. 0009는 인덱싱·벡터 정리 진행 위치를 저장하여 제한된 작업을 다음 실행에서 이어간다. 0010은 공급자로 확인한 기존 결제 종료와 SCIM 삭제 이력을 보존한다. 0011은 페이지 조회용 인덱스를 추가한다. 0012–0013은 FTS 행과 멤버십의 정확한 조회를 적용한다. 0014는 Space별 검색과 목록, 제한된 작업 선택·유지보수 진행 상태를 추가하며 검색 인덱스를 재구축한다. 0015는 작업공간·키 후보와 본문 제거 대상 조회를 위한 인덱스·cursor를 추가한다. 0016은 Space별 운영 목록·재구축 인덱스와 비동기 벡터 삭제 확인 상태를 추가한다. 0017은 늦게 완료된 벡터 upsert를 정리할 수 있도록 삭제 대기 페이지의 재시도 시각과 간격을 저장한다. 0018은 `release_shares(space_id,created_at DESC,id DESC)`에 `release_shares_space_created` 인덱스를 추가하여 발급 이력을 Space별 최신순으로 제한 조회한다. 기존 grant와 시각은 보존한다.
+| 신규 migration | 역할 |
+| --- | --- |
+| 0008–0021 | checkout 재시도, queue 진행, SCIM tombstone, 범위별 조회, DB 실행 시각 admission, 원자적 DNS 검증·proof 보존. 기존 이력은 [과거 통합 기록](INTEGRATION.md#historical-040-rc4-integration-record)에 보존 |
+| 0022_payload-schema.sql | 중앙 payload pointer·논리 크기·durable intent·purge/retirement outbox, inline 호환 이관 |
+| 0023_operational-schema.sql | 서비스 전체 월별 provider 예약, 제한된 inline backfill index/cursor |
+| 0024_lifecycle-schema.sql | 순서 있는 계정/정확한 이메일 lifecycle 수신 및 서명된 최신 event의 로그인 전 적용 |
+| 0025_queue-episode-schema.sql | 현재 queue episode 시각. 원래 생성 시각 보존, 복원할 수 없는 과거 episode는 unknown |
 
-0019와 애플리케이션 SQL helper는 애플리케이션이 바인딩한 시각과 DB 문장이 실제 실행되는 시각 중 더 늦은 값을 기한 판단에 사용한다. DB 큐에서 기다리는 동안 credential·멤버십·최근 proof·복원 기간·ingest·lease가 만료되면 이전 시각만으로 나중의 변경을 허용하지 않는다. 기존 기록 시각과 변경 불가 이력은 보존하며, 최근 proof 사용 처리와 credential의 본인 확인 시각 갱신은 한 SQL 문장과 trigger에서 원자적으로 처리한다.
+모든 남은 migration은 선택 사항이 아니다. `/ready`는 중앙 25/HOT 1을 검사하며 구 schema에 최신 Worker를 배포하면 새 column/table 조회가 실패한다. 이미 적용한 migration은 변경하지 않는다. 22의 원격 parser 호환 구문도 검증된 파일 그대로 사용한다.
 
-0020은 DNS challenge 소비·도메인 생성/갱신·정확한 관리자 멤버십 연결을 하나의 검증 receipt와 trigger 문장으로 원자적으로 처리한다. 완료 receipt 재조회는 동일 계정의 현재 session·최근 proof·기존 멤버십과 회수되지 않은 관리자 위임·도메인 및 receipt 유효기간을 다시 확인하며, DNS 재조회나 기간 연장 없이 원래 `verifiedUntil`을 반환한다. 수락된 공급자 이메일 회수 이벤트는 정확한 계정·주소의 미사용 proof를 무효화한다. 기존 차단에 대한 backfill도 아직 사용·무효화되지 않은 해당 proof만 DB 실행 시각으로 처리하며, 소비된 proof와 변경 불가 이력은 보존한다.
+## 검증과 배포 순서
 
-0021은 미사용 DNS challenge의 만료 인덱스를 추가한다. 정리는 만료된 미사용 challenge를 한 번에 최대 100개 처리하고 소비된 DNS proof와 검증 receipt는 보존한다.
+1. revision·dirty 상태·대상 config를 확인하고 `npm ci`, `npm run check`, `npm run test:d1`을 실행한다. 현재 최종 전체 테스트 수는 재실행 후 통합 기록에 추가한다.
+2. 승인된 대상의 중앙/HOT/R2/Vectorize 리소스를 대조하고 복구 bookmark와 회수·erasure 증거를 보존한다. R2의 public domain 설정도 독립 확인한다.
+3. `npm run preflight -- --config .\wrangler.staging.jsonc`, `npm run build -- --config .\wrangler.staging.jsonc`로 대상과 bundle을 검증한다.
+4. `npm run db:remote -- --config .\wrangler.staging.jsonc`는 등록된 active/draining HOT 전체를 먼저 적용하고 중앙 DB를 마지막에 적용한다. 실패하면 적용된 DB/버전을 조사한 뒤 재개한다.
+5. `npm run deploy -- --config .\wrangler.staging.jsonc`는 깨끗한 Git source와 전체 check를 요구한다. deploy가 migration이나 native/live 검증을 대신 수행하지 않는다.
+6. 최종 revision에서 [GA_ACCEPTANCE.md](GA_ACCEPTANCE.md)의 15개 증거 gate를 실행한다. 이전 staging의 SSO/PAT·공식 SDK·AI·10단계 조직 격리·CRUD/복원/제거·계량 성공은 그 revision의 기록이며 최신 후보 승인으로 재사용하지 않는다.
+7. 실제 메일 수신·proof 소비, 중앙 lifecycle 배포/전송 지연·재시도·회수/재개, 격리 복구, 부하·비용·경보 대응을 완료한다. 유료 결제 시험은 이번 GA의 필수 gate가 아니다.
+8. 정확한 source/config/schema와 15개 증거 hash에 묶인 짧은 기한의 서명을 설치하고 운영자가 승격한다. `LIVE_ACCEPTANCE_ID`만 설정하거나 liveness 200을 확인한 것은 승인이 아니다.
 
-`/ready`의 schema 검사를 통과하려면 0021까지 적용해야 한다. **0008–0021은 PR에만 있으며 production 적용 기록은 rc.3와 0001–0007이다.** 현재 전체 로컬 검증은 1,410개 테스트를 통과했다. 완료된 native 기록은 데이터가 있는 5→21 업그레이드·큐 만료 6건·도메인 검증/보존 10건·인증/HTTP 7건을 포함한다. 각 실행의 소스 범위와 실환경 수락 조건은 [검증 기록](INTEGRATION.md)을 확인한다. 아래 절차는 배포 완료 기록이 아니다.
+중앙 lifecycle은 private source와 두 Worker/native D1에서 구현·검증되었지만 아직 중앙에 배포하지 않았다. 환경별 secret을 나누고 대상은 정확히 production 및 hyphenated staging origin만 허용한다. 순서 지연과 재전송을 포함해 실제 전송 후 확인한다.
 
-## 로컬·staging 순서
+## 복구 주의
 
-1. 검토할 Git revision과 작업 디렉터리 변경 사항을 확인한다. ZIP 통합은 이미 완료됐으므로 assembler를 다시 실행하지 않는다.
-2. `saas/`에서 지원 Node 버전으로 `npm ci`, `npm run check`, `npm run test:d1`을 실행한다. `check`는 migration source와 적용된 해시도 검증한다.
-3. 별도 staging resources와 SSO client를 만들고 secrets를 secret store에 넣는다. 승인된 staging DB에만 migrations를 적용한다. Cloudflare 명령의 대상 account/DB/domain을 사람이 확인한다.
-4. 본문에 개인정보가 없는 합성 데이터로 로그인, key, 검색, 삭제, export, 공유, 회수, 추출을 확인한다. 늦은 편집 응답이 최신 초안을 지우지 않는지, 확인된 공유 회수가 늦은 목록 응답으로 되돌아가지 않는지도 확인한다. 실제 provider 호출 비용과 메일 발송이 발생할 수 있으므로 이 단계부터 계정 운영자가 실행한다.
-5. 결제 test mode와 운영 복구 훈련을 통과시킨다. `LAUNCH-GATES.ko.md`의 추가 구현 항목까지 판정한다.
-6. 실제 production 변경 전 복구 기준과 권한 회수·erasure 기록을 확보한다. 새 migration이 있으면 호환성을 검토해 먼저 적용하고 새 Worker를 배포한다. 로컬 `preflight`는 원격 권한·provider readiness를 증명하지 않는다. 개별 provider endpoint와 실제 브라우저 smoke를 수행하고 임시 배포 credential을 회수한다.
+구버전 Worker만 다시 배포하는 것을 안전한 복구로 취급하지 않는다. 구 writer는 새 pointer·권한·제거 정책을 해석하지 못할 수 있다. 외부 트래픽을 차단한 격리 복구본에서 중앙 authority, R2 object/hash, HOT 재구축과 snapshot 이후의 회수·제거를 함께 확인한다.
 
-## 되돌리기 주의
-
-0006은 복원 및 본문 제거를 위한 상태 전이를 추가한다. 기존 Worker만 다시 배포하면 새 권한 정책·상태를 해석하지 못할 수 있다. **구버전 코드만 롤백하는 것을 안전한 복구로 취급하지 않는다.** 읽기 제한/정비 모드에서 원인을 수정해 앞으로 이동하거나, 독립 환경에 이전 DB를 복구한 뒤 이후 권한 회수와 영구 삭제를 재적용하고 인덱스를 재구축한 후 검증하여 승격한다.
+실제 전체 D1 export는 FTS virtual table에서 거절되었다. 일반 테이블을 명시해 실제 staging 중앙/HOT D1에서 내려받은 SQL을 독립 native D1로 복원하고, 보존된 모든 테이블의 내용·DDL/FTS 재구축·외래 키를 대조하는 검증은 통과했다. 이 읽기 전용 캡처는 쓰기를 중지하지 않은 관찰이므로 일관된 백업이나 원격 격리 복구 훈련의 완료를 의미하지 않는다. [MULTI_STORE_RECOVERY.md](MULTI_STORE_RECOVERY.md)와 [운영 문서](OPERATIONS.ko.md)를 따른다.

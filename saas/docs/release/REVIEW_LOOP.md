@@ -1,3 +1,57 @@
+# Current review checkpoint: 0.5.0-rc.1
+
+As of 2026-09-10, source requires central schema 25 and HOT schema 1. Production
+remains rc.3/central 1–7. Staging is the earlier `1a93820` revision with central
+1–23/HOT 1; lifecycle 24 and queue episode 25 are not deployed. Physical sharding,
+private canonical R2 payloads, invite admission and metered AI are implemented.
+Paid billing is excluded from the selected GA.
+
+Authentication35 finished with zero actionable findings on its reviewed source.
+The three Storage36 findings are corrected: current suspended-owner authority,
+restoration of missing HOT projections, and exact erased-payload hydration.
+Console37 found only an inaccurate encryption statement in the recovery guide;
+it now correctly limits PAYLOAD_KEY to temporary ingestion content. Tooling38
+identified eight issues across recovery, deployment source binding, queue metrics
+and documentation; each has a regression or a precise documentation correction.
+A fresh tooling pass will check the integrated result.
+
+Storage40 found that suspension could mark unfinished semantic indexing done.
+The correction retains the same queue episode and chunk progress, waits one minute
+without consuming the provider failure budget, and resumes after an explicit
+account resume. Three timing regressions pass, including suspension before the
+embedding call and before Vectorize upsert. The native D1 suspension suite passes
+seven tests. Authentication39 and Storage41 are fresh reviews in progress.
+
+The complete schema25 native suite passed after Storage36, including populated
+upgrades and actual workerd authority/storage behavior. The complete check passed
+after Tooling38 and again after Storage40: 1,830 tests (208 foundation, 210
+configuration/tooling, 1,406 release, and six clients). These are
+verification checkpoints, not a current all-domain zero-finding assertion.
+
+Earlier staging evidence for SSO/PAT/official SDK, AI, ten-level ACL isolation,
+CRUD/restore/erasure, metering and two physical HOT DBs applies to revision 1a93820.
+On that revision a native Cloudflare Email message was actually received by an
+exact-address temporary private receiver, and its proof was consumed successfully
+in the original SSO browser session. The receiver, routing rule, ciphertext object
+and temporary bucket were then removed, preserving existing mail routing.
+No permanent inbox or final-candidate mail acceptance is claimed.
+
+The production database and the central identity database were separately exported,
+protected with the operator's Windows DPAPI profile, and restored locally/native
+with preserved table contents and migration compatibility checks. These are
+unfenced pre-deployment safeguards, not off-device escrow or a complete recovery
+drill. Native lifecycle evidence covers 9 events/11 delivery attempts; the private
+central publisher is committed in its own draft PR but is not deployed.
+Final lifecycle delivery, consistent isolated provider recovery, load/cost and
+operational response remain gates. GA requires the signed 15-gate acceptance
+record, not a LIVE_ACCEPTANCE_ID string.
+
+## Historical rc.4 review record
+
+The original review rounds and counts below are retained as historical evidence.
+Their “current” or “final” statements belong to rc.4/schema21 and do not establish
+a zero-finding result or deployment for the present candidate.
+
 # PR #22 independent review loop
 
 Requested on 2026-09-09: review the full PR with fresh agents, fix every confirmed

@@ -4,6 +4,7 @@ import { batch, digest, one, rows, stmt } from './util.ts';
 import { deadline, embed } from './search.ts';
 import { columns, erasureStatements, MemoryStore, type MemoryRow } from './memory.ts';
 import { PayloadStore } from './payloads.ts';
+import { liveAccountSql } from './authority.ts';
 // Alias release_jobs, with one current-time binding. Completed review is also
 // terminal for extraction, even while the human decision is still pending.
 const retryableIngest = `EXISTS(SELECT 1 FROM release_ingests i WHERE i.id=release_jobs.id
@@ -12,6 +13,7 @@ const WORK_SLICE_MS = 240000;
 const INDEX_PROVIDER_CALLS = 20;
 const DELETE_RETRY_MS = 60000;
 const DELETE_RETRY_MAX_MS = 86400000;
+class OwnerSuspended extends Error {}
 export type Job = {
     id: string;
     memoryId: string | null;
@@ -86,17 +88,27 @@ export class Jobs {
         // One snapshot fences the lease, revision and tenant immediately before
         // each new provider request. Committed organization content belongs to
         // the organization even after its writer's credential expires.
-        const row = await one<{ eligible: number; leaseUntil: number }>(this.env.DB, `SELECT EXISTS(
+        const row = await one<{ eligible: number; suspended: number; leaseUntil: number }>(this.env.DB, `SELECT EXISTS(
             SELECT 1 FROM memories r JOIN spaces s ON s.id=r.space_id
             WHERE r.id=j.memory_id AND r.space_id=j.space_id AND r.revision=j.revision
                 AND r.deleted_at IS NULL AND r.erased_at IS NULL
-                AND (s.account_id IS NULL OR EXISTS(SELECT 1 FROM accounts a WHERE a.id=s.account_id AND a.disabled_at IS NULL))
+                AND (s.account_id IS NULL OR EXISTS(SELECT 1 FROM accounts a WHERE a.id=s.account_id AND ${liveAccountSql('a')}))
                 AND (s.organization_id IS NULL OR EXISTS(SELECT 1 FROM organizations o WHERE o.id=s.organization_id AND o.disabled_at IS NULL))
-            ) AS eligible,j.lease_until AS leaseUntil FROM release_jobs j WHERE j.id=? AND j.memory_id=? AND j.space_id=? AND j.revision=?
+            ) AS eligible,EXISTS(
+                SELECT 1 FROM memories r JOIN spaces s ON s.id=r.space_id JOIN accounts a ON a.id=s.account_id
+                JOIN provider_identities p ON p.account_id=a.id JOIN release_identity_lifecycle_state l
+                    ON l.issuer=p.issuer AND l.subject=p.subject AND l.address=''
+                WHERE r.id=j.memory_id AND r.space_id=j.space_id AND r.revision=j.revision
+                    AND r.deleted_at IS NULL AND r.erased_at IS NULL AND a.disabled_at IS NULL AND l.kind='account.suspended'
+            ) AS suspended,j.lease_until AS leaseUntil FROM release_jobs j WHERE j.id=? AND j.memory_id=? AND j.space_id=? AND j.revision=?
                 AND j.lease_token=? AND j.state='leased' AND j.lease_until>${sqlNow()}`,
             [job.id, job.memoryId, job.spaceId, job.revision, job.leaseToken, this.clock()]);
         if (!row || row.leaseUntil <= this.clock())
             throw Error('lease_lost');
+        // Suspension is reversible. Retain unfinished chunks without sending
+        // more plaintext or treating a paused owner as a provider failure.
+        if (!row.eligible && row.suspended)
+            throw new OwnerSuspended('owner_suspended');
         return Boolean(row.eligible);
     }
     async renew(job: Job): Promise<void> {
@@ -137,7 +149,15 @@ export class Jobs {
                 if (!result.success || result.meta.changes !== 1)
                     throw Error('lease_lost');
             }
-            catch {
+            catch (error) {
+                if (error instanceof OwnerSuspended) {
+                    const now = this.clock();
+                    await this.env.DB.prepare(`UPDATE release_jobs SET state='pending',attempt=MAX(attempt-1,0),
+                        available_at=${sqlNow()}+60000,last_error='owner_suspended',lease_token=NULL,lease_until=NULL
+                        WHERE id=? AND lease_token=? AND state='leased' AND lease_until>${sqlNow()}`)
+                        .bind(now, job.id, job.leaseToken, now).run();
+                    continue;
+                }
                 const exhausted = job.attempt >= 5;
                 const backoff = Math.min(3600000, 1000 * 2 ** job.attempt) + Math.floor(Math.random() * 1000);
                 const now = this.clock();
@@ -162,9 +182,9 @@ export class Jobs {
         if (!current || current.revision !== job.revision)
             return true;
         await this.renew(job);
-        const progress = await one<{ nextChunk: number; cleanupCursor: string; cleanupPending: string; cleanupRetryAt: number; cleanupRetryDelay: number }>(db,
+        const progress = await one<{ nextChunk: number; cleanupOnly: number; cleanupCursor: string; cleanupPending: string; cleanupRetryAt: number; cleanupRetryDelay: number }>(db,
             `SELECT next_chunk AS nextChunk,cleanup_cursor AS cleanupCursor,cleanup_pending AS cleanupPending,
-                cleanup_retry_at AS cleanupRetryAt,cleanup_retry_delay AS cleanupRetryDelay FROM release_jobs
+                cleanup_retry_at AS cleanupRetryAt,cleanup_retry_delay AS cleanupRetryDelay,cleanup_only AS cleanupOnly FROM release_jobs
                 WHERE id=? AND lease_token=? AND state='leased' AND lease_until>${sqlNow()}`, [job.id, job.leaseToken, this.clock()]);
         if (!progress)
             throw Error('lease_lost');
@@ -199,7 +219,7 @@ export class Jobs {
             await deadline(index.deleteByIds(ids));
             return true;
         };
-        if (current.deletedAt === null) {
+        if (current.deletedAt === null && !progress.cleanupOnly) {
             // Storage awaits precede the existing per-provider revision and
             // lease checks. Never send a placeholder or a stale cached payload.
             const [hydrated] = await this.store.hydrateRows([current]);
@@ -352,7 +372,7 @@ export class Jobs {
             // Raw targets advance even when obsolete or not yet due. Cursor
             // fencing makes overlapping scheduled invocations safe and bounded.
             await batch(db, [stmt(db, `UPDATE release_jobs SET state='pending',attempt=0,available_at=${sqlNow()},
-                next_chunk=CASE WHEN kind='upsert' THEN MAX(next_chunk,(SELECT (length(body)+1649)/1650 FROM memories WHERE id=release_jobs.memory_id)) ELSE 0 END,
+                next_chunk=CASE WHEN kind='upsert' THEN next_chunk ELSE 0 END,
                 cleanup_cursor='',cleanup_pending='[]',cleanup_retry_at=0,cleanup_retry_delay=60000,
                 cleanup_only=CASE WHEN kind='upsert' THEN 1 ELSE 0 END WHERE id IN (
                 SELECT j.id FROM release_jobs j LEFT JOIN release_erasure_ledger e ON e.memory_id=j.memory_id

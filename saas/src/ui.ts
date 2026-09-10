@@ -66,7 +66,7 @@ export const appScript = String.raw`(() => {
 const $ = id => document.getElementById(id);
 const state = { workspace: null, space: null, items: [], selected: null, draft: false, dirty: false, saving: false, workspaceLoading: false, nextCursor: null, query: '', authExpired: false, reconnecting: false, recovery: null };
 let listEpoch = 0, detailEpoch = 0, editEpoch = 0, editorEpoch = 0, workspaceEpoch = 0, dialogEpoch = 0, requestEpoch = 0, verifiedRequestEpoch = 0, authenticationEpoch = 0, searchTimer;
-let dialogPending = false, dialogAction = null, pendingMemoryOperation = null, logoutAccountId = null, logoutPending = false;
+let dialogPending = false, dialogAction = null, pendingMemoryOperation = null, logoutAccountId = null, logoutPending = false, pendingSelfRemoval = null;
 const date = value => { const at = new Date(value); return Number.isFinite(at.getTime()) ? new Intl.DateTimeFormat('ko-KR', { year: 'numeric', month: 'short', day: 'numeric' }).format(at) : '기한 없음'; };
 const node = (tag, className, content) => { const el = document.createElement(tag); if (className) el.className = className; if (content !== undefined) el.textContent = String(content); return el; };
 function status(message = '') { $('app-status').textContent = message; }
@@ -197,7 +197,8 @@ function signedOut(message = '') {
   $('welcome-error').textContent = message; $('welcome-error').hidden = !message;
 }
 function mayLeave() { return !state.dirty || window.confirm('저장하지 않은 내용이 있어요. 이 내용을 닫을까요?'); }
-function canWrite() { return Boolean(state.space && state.space.canWrite && !state.authExpired && !state.reconnecting && !state.workspaceLoading && !logoutPending); }
+function selfRemovalPending() { return Boolean(pendingSelfRemoval && pendingSelfRemoval.accountId === state.workspace?.account.id); }
+function canWrite() { return Boolean(state.space && state.space.canWrite && !state.authExpired && !state.reconnecting && !state.workspaceLoading && !logoutPending && !selfRemovalPending()); }
 function setSaving(value) { state.saving = value; $('memory-body').disabled = value; $('memory-source').disabled = value; updateActions(); }
 function updateActions() {
   const paused = state.authExpired || state.reconnecting || state.workspaceLoading || logoutPending;
@@ -210,7 +211,7 @@ function updateActions() {
   $('new-organization').disabled = paused || !state.workspace || !state.workspace.account.emails.length;
   $('search-query').disabled = paused || !state.space; $('load-more').disabled = paused;
   $('resume-session').disabled = state.reconnecting || logoutPending;
-  for (const button of document.querySelectorAll('#space-list button, #memory-list button')) button.disabled = paused || state.saving;
+  for (const button of document.querySelectorAll('#space-list button, #memory-list button')) button.disabled = paused || state.saving || selfRemovalPending();
   $('new-memory').disabled = !canWrite() || state.saving;
   $('save-memory').disabled = !canWrite() || state.saving || (!state.selected && !state.draft);
   $('delete-memory').disabled = !canWrite() || state.saving || !state.selected;
@@ -234,7 +235,7 @@ function renderList() {
   const list = $('memory-list'); list.replaceChildren();
   for (const item of state.items) {
     const button = node('button', 'memory-row'); button.type = 'button';
-    button.disabled = state.authExpired || state.reconnecting || state.saving || state.workspaceLoading || logoutPending;
+    button.disabled = state.authExpired || state.reconnecting || state.saving || state.workspaceLoading || logoutPending || selfRemovalPending();
     const excerpt = String(item.body ?? item.snippet ?? '');
     const title = excerpt.trim().split('\n')[0].slice(0, 90) || '메모리';
     button.append(node('strong', 'memory-row-title', title), node('span', 'memory-row-preview', excerpt.slice(0, 170)));
@@ -250,7 +251,7 @@ function renderList() {
   $('load-more').hidden = !state.nextCursor || Boolean(state.query);
 }
 async function selectMemory(id) {
-  if (!state.space || state.saving || state.authExpired || state.reconnecting || logoutPending) return;
+  if (!state.space || state.saving || state.authExpired || state.reconnecting || logoutPending || selfRemovalPending()) return;
   const epoch = ++detailEpoch, editing = editEpoch, displayed = editorEpoch, spaceId = state.space.id; status('메모리를 불러오는 중…'); clearError();
   try {
     const memory = await api('/v1/spaces/' + encodeURIComponent(spaceId) + '/memories/' + encodeURIComponent(id));
@@ -279,7 +280,7 @@ function renderSpaces() {
   $('space-list').replaceChildren();
   for (const space of state.workspace.spaces) {
     const button = node('button', 'space-button'); button.type = 'button';
-    button.disabled = state.authExpired || state.reconnecting || state.saving || state.workspaceLoading || logoutPending;
+    button.disabled = state.authExpired || state.reconnecting || state.saving || state.workspaceLoading || logoutPending || selfRemovalPending();
     button.append(node('span', 'space-symbol', space.organizationId ? '◫' : '◈'), node('span', 'space-name', space.name));
     if (!space.canWrite) button.append(node('span', 'space-readonly', '읽기'));
     if (state.space && space.id === state.space.id) button.setAttribute('aria-current', 'page');
@@ -455,16 +456,45 @@ function openMembers() {
         details.append(node('strong', '', member.email || member.accountId), node('span', '', ({ owner: '소유자', admin: '관리자', member: '멤버' })[member.role] + ' · ' + date(member.expiresAt)));
         const remove = node('button', 'text-button danger', '멤버십 해제'); remove.type = 'button'; remove.setAttribute('aria-label', (member.email || member.accountId) + ' 멤버십 해제');
         remove.addEventListener('click', async () => {
-          if (remove.disabled) return;
-          if (member.accountId === state.workspace.account.id && !mayLeave()) return;
+          if (remove.disabled || !state.workspace) return;
+          const actorAccountId = state.workspace.account.id, self = member.accountId === actorAccountId;
+          if (self && (selfRemovalPending() || !mayLeave())) return;
           if (!window.confirm('이 멤버의 조직 접근과 조직 API 키를 해제할까요? 개인 계정과 개인 메모리는 유지됩니다.')) return;
+          const removal = self ? { accountId: actorAccountId } : null;
+          if (removal) {
+            pendingSelfRemoval = removal; ++workspaceEpoch; ++listEpoch; ++detailEpoch; clearTimeout(searchTimer);
+            state.workspaceLoading = false; updateActions();
+          }
           remove.dataset.pending = 'true'; remove.disabled = true;
           try {
             await api('/v1/organizations/' + encodeURIComponent(organizationId) + '/memberships/' + encodeURIComponent(member.id), 'DELETE');
-            if (epoch !== dialogEpoch || current !== generation) return;
-            if (member.accountId === state.workspace.account.id) { closeDialog(); await loadWorkspace(); }
-            else { row.remove(); updateOwnerControls(); if (!list.children.length) list.append(node('p', 'field-help', '표시할 멤버가 없어요.')); }
-          } catch (error) { if (epoch === dialogEpoch && current === generation) { showError(error, 'dialog-error'); delete remove.dataset.pending; remove.disabled = false; updateOwnerControls(); } }
+            if (state.workspace?.account.id !== actorAccountId) return;
+            if (self) {
+              // The receipt belongs to the account, not the dialog generation.
+              // Remove known-revoked controls even if the refresh later fails.
+              state.workspace.organizations = state.workspace.organizations.filter(org => org.id !== organizationId);
+              state.workspace.spaces = state.workspace.spaces.filter(space => space.organizationId !== organizationId);
+              if (state.space?.organizationId === organizationId) {
+                state.space = null; state.items = []; state.nextCursor = null; renderEditor(null);
+                $('space-title').textContent = '작업 공간'; $('breadcrumb').textContent = '작업 공간';
+              }
+              renderSpaces(); updateActions();
+              if (epoch === dialogEpoch) {
+                if (select.value === organizationId) closeDialog();
+                else for (const option of [...select.options]) if (option.value === organizationId) option.remove();
+              }
+              if (pendingSelfRemoval === removal) pendingSelfRemoval = null;
+              await loadWorkspace();
+            } else if (epoch === dialogEpoch && current === generation) {
+              row.remove(); updateOwnerControls(); if (!list.children.length) list.append(node('p', 'field-help', '표시할 멤버가 없어요.'));
+            }
+          } catch (error) {
+            const currentView = epoch === dialogEpoch && current === generation;
+            if (state.workspace?.account.id === actorAccountId && (self || currentView)) showError(error, currentView ? 'dialog-error' : 'app-error');
+            if (currentView) { delete remove.dataset.pending; remove.disabled = false; updateOwnerControls(); }
+          } finally {
+            if (removal && pendingSelfRemoval === removal) { pendingSelfRemoval = null; updateActions(); }
+          }
         });
         row.append(details, remove); list.append(row);
       }

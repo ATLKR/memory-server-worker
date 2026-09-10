@@ -31,6 +31,8 @@ export function openLocalDatabase({ workspace = false, release = false, clock } 
     raw.exec(readFileSync(new URL('../domain-retention-schema.sql', import.meta.url), 'utf8'));
     raw.exec(readFileSync(new URL('../payload-schema.sql', import.meta.url), 'utf8'));
     raw.exec(readFileSync(new URL('../operational-schema.sql', import.meta.url), 'utf8'));
+    raw.exec(readFileSync(new URL('../lifecycle-schema.sql', import.meta.url), 'utf8'));
+    raw.exec(readFileSync(new URL('../queue-episode-schema.sql', import.meta.url), 'utf8'));
   }
   function prepare(sql) {
     const statement = raw.prepare(sql);

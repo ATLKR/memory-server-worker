@@ -1,4 +1,5 @@
 import { sqlNow } from '../sql-clock.ts';
+import { receiveLifecycle } from './lifecycle.ts';
 import type { Database, ReleaseEnv, Capability } from './types.ts';
 import { readSettings } from '../config.ts';
 import { requireMethod } from '../api.ts';
@@ -399,6 +400,8 @@ export class Admin {
         if (!/^\d{10}$/.test(timestamp) || !equal(await hmac(this.env.IDENTITY_WEBHOOK_SECRET ?? '', timestamp + '.' + raw), sig) || Math.abs(this.clock() / 1000 - Number(timestamp)) > 300)
             fail(401, 'invalid_signature');
         const event = requestObject(raw);
+        if (event.version === 2) return receiveLifecycle(this.db, this.clock, event, raw, Number(timestamp) * 1000);
+        if (event.version !== undefined && event.version !== 1) fail(400, 'unsupported_identity_event');
         const eventId = id(event.id), subject = str(event.subject, 512), kind = str(event.type, 64);
         if (event.issuer !== ISSUER || !['email.revoked', 'account.disabled'].includes(kind))
             fail(400, 'unsupported_identity_event');

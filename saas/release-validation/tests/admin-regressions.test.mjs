@@ -24,6 +24,8 @@ async function fixture(t){
   f.raw.exec(readFileSync(new URL('../../retrieval-progress-schema.sql',import.meta.url),'utf8'));
   f.raw.exec(readFileSync(new URL('../../vector-reconciliation-schema.sql',import.meta.url),'utf8'));
   f.raw.exec(readFileSync(new URL('../../outbound-share-schema.sql',import.meta.url),'utf8'));
+  for(const schema of ['execution-time','domain-verification','domain-retention','payload','operational','lifecycle','queue-episode'])
+    f.raw.exec(readFileSync(new URL('../../'+schema+'-schema.sql',import.meta.url),'utf8'));
   f.db.batch=async statements=>{f.raw.exec('BEGIN IMMEDIATE');try{const results=[];for(const statement of statements)results.push(await statement.all());f.raw.exec('COMMIT');return results;}catch(error){f.raw.exec('ROLLBACK');throw error;}};
   const workspace=new WorkspaceService(f.db,()=>NOW),owner=await workspace.signIn(principal('owner'));
   f.raw.prepare('UPDATE credentials SET reauthenticated_at=? WHERE token_digest=?').run(NOW,await digest(owner.token));

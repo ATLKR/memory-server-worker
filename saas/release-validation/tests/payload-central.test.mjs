@@ -49,7 +49,8 @@ test('delete and restore reuse immutable payload while retaining per-revision lo
   const pointer = f.db.raw.prepare('SELECT payload_id FROM memories WHERE id=?').get(first.id).payload_id;
   await f.store.remove(f.token, 's1', first.id, 1, 'retained-delete');
   const restored = await f.store.restore(f.token, 's1', first.id, 2, 'retained-restore');
-  assert.equal(restored.body, 'retained content'); assert.equal(f.payloads.stages, 1);
+  assert.equal(restored.body, 'retained content'); assert.equal(f.payloads.stages, 2, 'restore verifies or reconstructs the retained immutable projection');
+  assert.equal(f.payloads.values.size, 1, 'projection verification must reuse the existing payload identity');
   assert.equal(f.db.raw.prepare('SELECT payload_id FROM memories WHERE id=?').get(first.id).payload_id, pointer);
   assert.equal(f.db.raw.prepare('SELECT storage_bytes n FROM release_pools WHERE id=?').get('account:alice').n, size * 3);
 });

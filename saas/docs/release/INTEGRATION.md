@@ -1,3 +1,64 @@
+# Current candidate: 0.5.0-rc.1
+
+## Source and deployment checkpoint — 2026-09-10
+
+| Scope | Recorded state |
+| --- | --- |
+| Current source | 0.5.0-rc.1; central migrations 1–25; HOT schema 1 |
+| Production | Unchanged 0.4.0-rc.3; central migrations 1–7 |
+| Staging | Earlier revision `1a93820`; central migrations 1–23; HOT 1 |
+| Not deployed | Public lifecycle 24, queue episode 25 and current post-staging fixes; central private lifecycle publisher |
+
+Every remaining migration is required before deploying the current Worker:
+production needs 8–25; current staging needs 24–25. Each HOT uses
+`shard-migrations/0001_payloads.sql`. No current full-suite total is claimed
+until the combined rerun finishes. Historical counts below belong to rc.4.
+
+The candidate implements physical data-only D1 sharding and private R2 canonical
+current/history payloads, with central authority, immutable pointers, exact
+logical sizes, receipts and durable preparation/cleanup. The registry allows
+up to 16 active/draining shards and preserves stored placement. Draining does
+not move old data automatically. Inline backfill is opt-in and bounded.
+The central metadata DB and every HOT remain finite.
+
+Earlier staging live evidence covers real SSO, scoped PATs, the official MCP SDK,
+AI retrieval/reviewed extraction, ten-level independent organization ACLs,
+CRUD/restore/erasure and metering. One Space wrote across two physical HOT DBs
+and hydrated private R2 payloads. These results apply to that earlier deployment,
+not automatically to the latest candidate. The mail receiver is being deployed;
+actual receipt and proof consumption remain pending.
+
+Public/private ordered identity lifecycle and signed JWT lifecycle heads are
+implemented. Native two-Worker/D1 tests recorded 9 immutable events and 11 delivery
+attempts, including false/lost acknowledgment, suspension/resume and delayed
+positive-event delivery without losing a fresh owner. The central publisher
+has not been deployed; its under-two-minute eventual-delivery target still needs
+live backlog-age and retry evidence.
+
+The actual provider rejected full D1 export containing FTS virtual tables.
+An explicit regular-table exporter with DDL/derived-index reconstruction is under
+native verification. This is not yet a successful provider recovery drill.
+
+The selected GA is **invite-only and metered, with AI enabled and paid billing
+excluded**. Memory's $50/month Cloudflare target needs measured infrastructure
+costs and operator response alongside AI reservation caps. `LIVE_ACCEPTANCE_ID`
+alone is insufficient: readiness requires all 15 passed gate records in an
+Ed25519-signed, expiring JWS bound to the exact source/config/schema, plus current
+technical checks. See [GA_ACCEPTANCE.md](GA_ACCEPTANCE.md).
+
+Authentication35 finished with zero actionable findings on its reviewed source.
+Storage36 reported three findings now assigned for correction; affected domains
+require fresh review after those changes.
+Console34's successful-self-removal reconciliation and outdated deployment
+instructions have been corrected; fresh console review follows. No current
+zero-finding conclusion or final full-suite count is recorded here.
+
+## Historical 0.4.0-rc.4 integration record
+
+Everything below this heading retains the earlier rc.4 integration and deployment
+history. References to “current”, pending work or final tests within that historical
+record describe its then-current source, not the schema-25 candidate above.
+
 # Integrated release candidate: 0.4.0-rc.4
 
 This is the maintained integration record. Other files in this folder originated

@@ -2,11 +2,19 @@ import type { Actor, Capability, Database, Value } from './types.ts';
 import { fail, id, one, tokenHash } from './util.ts';
 import { SQL_NOW_MS, sqlNow } from '../sql-clock.ts';
 export const INTERACTIVE = "c.kind='session' AND c.id NOT LIKE 'oauth:%'";
+/** An account's resumable lifecycle is separate from terminal disabled_at.
+ * Use the same current primary snapshot as the grant or provider admission. */
+export function liveAccountSql(account: 'owner' | 'grantor_account' | 'a'): string {
+    return `${account}.disabled_at IS NULL AND NOT EXISTS(
+        SELECT 1 FROM provider_identities lifecycle_identity JOIN release_identity_lifecycle_state lifecycle
+          ON lifecycle.issuer=lifecycle_identity.issuer AND lifecycle.subject=lifecycle_identity.subject AND lifecycle.address=''
+        WHERE lifecycle_identity.account_id=${account}.id AND lifecycle.kind<>'account.resumed')`;
+}
 /** Aliases sh=share, s=source Space. One timestamp binding. The immutable
  * browser credential identifies the grantor account, not the grant's lifetime. */
 export function shareGrantorAuthority(share: 'sh' | 'release_shares' = 'sh', expiry: '?' | '0' = '?'): string {
     return `EXISTS(SELECT 1 FROM credentials grantor JOIN accounts grantor_account
-        ON grantor_account.id=grantor.account_id AND grantor_account.disabled_at IS NULL
+        ON grantor_account.id=grantor.account_id AND ${liveAccountSql('grantor_account')}
       WHERE grantor.id=${share}.creator_credential_id AND (
         (s.account_id=grantor.account_id AND s.organization_id IS NULL
           AND ${share}.creator_membership_id IS NULL AND ${share}.creator_email_id IS NULL)
@@ -27,7 +35,7 @@ export function authority(action: Capability): string {
     const cap = action; // Closed TypeScript union; never constructed from request SQL.
     return `c.token_digest=? AND c.expires_at>${sqlNow()} AND c.membership_expires_at>${sqlNow()}
   AND s.security_mode='managed'
-  AND (s.account_id IS NULL OR EXISTS(SELECT 1 FROM accounts owner WHERE owner.id=s.account_id AND owner.disabled_at IS NULL))
+  AND (s.account_id IS NULL OR EXISTS(SELECT 1 FROM accounts owner WHERE owner.id=s.account_id AND ${liveAccountSql('owner')}))
   AND (s.organization_id IS NULL OR EXISTS(SELECT 1 FROM organizations owner WHERE owner.id=s.organization_id AND owner.disabled_at IS NULL)) AND (
    (${INTERACTIVE} AND ${cap === 'read' ? '1' : "c.permission='write'"})
    OR EXISTS(SELECT 1 FROM release_credential_policies p,json_each(p.capabilities) a WHERE p.credential_id=c.id AND a.value='${cap}'

@@ -9,11 +9,17 @@
   "preview_urls": false,
   "routes": [{ "pattern": "memory.allenlabs.org", "custom_domain": true }],
   "vars": {
+    "DEPLOYMENT_ENVIRONMENT": "production",
     "RELEASE_MODE": "pilot",
+    "GA_PROFILE": "managed-ai-metered",
+    "PAID_BILLING_ENABLED": "false",
+    "ENROLLMENT_MODE": "invite",
+    "AI_MONTHLY_BUDGET_MICROUSD": "20000000",
     "AUTO_ERASURE_ENABLED": "false",
-    "BACKGROUND_JOBS_ENABLED": "false",
+    "BACKGROUND_JOBS_ENABLED": "true",
+    "STORAGE_MODE": "sharded",
+    "STORAGE_SHARDS_JSON": "[{\"id\":\"hot-01\",\"binding\":\"HOT_01\",\"mode\":\"active\"},{\"id\":\"hot-02\",\"binding\":\"HOT_02\",\"mode\":\"active\"}]",
     "MAIL_FROM": "memory@allenlabs.org",
-    "LIVE_ACCEPTANCE_ID": "",
     "PUBLIC_ORIGIN": "https://memory.allenlabs.org",
     "SSO_CLIENT_ID": "M5w1jhX2WjRD3PyJDwS_QosyAaHm4TWSyVCkzebqNrA",
     "PRODUCT_NAME": "Memory by Allen Labs",
@@ -28,10 +34,25 @@
     // Dedicated SaaS database, isolated from the legacy personal service.
     "database_id": "a186c3b4-9092-4619-97b0-cda5b99d9b5d",
     "migrations_dir": "migrations"
+  }, {
+    "binding": "HOT_01",
+    "database_name": "allenlabs-memory-production-hot-01",
+    "database_id": "037bcfea-0bbd-4937-8616-91206faf82b1",
+    "migrations_dir": "shard-migrations"
+  }, {
+    "binding": "HOT_02",
+    "database_name": "allenlabs-memory-production-hot-02",
+    "database_id": "5e16ed77-d614-4166-8154-e234295e7793",
+    "migrations_dir": "shard-migrations"
   }],
+  "r2_buckets": [{ "binding": "MEMORY_PAYLOADS", "bucket_name": "allenlabs-memory-production-payloads" }],
+  "ai": { "binding": "AI" },
+  "vectorize": [{ "binding": "MEMORY_INDEX", "index_name": "allenlabs-memory-production-index" }],
+  "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "allenlabs_memory_production" }],
   "ratelimits": [{ "name": "REQUEST_LIMITER", "namespace_id": "2086090801", "simple": { "limit": 120, "period": 60 } }],
   "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["memory@allenlabs.org"] }],
-  // Expired transient-state cleanup only; provider jobs and memory erasure stay off.
+  // Physical payload cleanup and bounded provider jobs run every five minutes.
+  // Legacy body backfill is enabled separately after a verified production backup.
   "triggers": { "crons": ["*/5 * * * *"] },
   // Auth callback URLs contain codes: invocation/request logs stay disabled.
   "observability": { "enabled": false },

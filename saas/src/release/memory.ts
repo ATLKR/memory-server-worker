@@ -90,20 +90,34 @@ export class MemoryStore {
           SELECT ?,space_id,'[external]',NULL,1,created_at,created_at,actor_credential_id,?,'{}',?,?,?,?,?,?,?,? FROM release_operations WHERE id=?`,
             [item.memoryId, value.kind, value.eventTime, value.supersedesMemoryId, ref.id, ref.shardId, ref.objectKey, ref.sha256, ref.bytes, item.logicalBytes, operationId]);
     }
-    async hydrateRows<T extends MemoryRow>(values: T[]): Promise<T[]> {
+    async hydrateRows<T extends MemoryRow>(values: T[], input: { omitErased?: boolean } = {}): Promise<T[]> {
         const hydrated: T[] = [];
         for (let offset = 0; offset < values.length; offset += 4) {
-            hydrated.push(...await Promise.all(values.slice(offset, offset + 4).map(async row => {
+            const part = await Promise.all(values.slice(offset, offset + 4).map(async row => {
                 if (!row.payloadId) return row;
                 if (!this.payloads?.enabled || !row.payloadShardId || !row.payloadObjectKey || !row.payloadSha256 || !row.payloadBytes)
                     fail(503, 'payload_storage_unavailable');
-                const value = await this.payloads.read({ spaceId: row.spaceId, memoryId: row.id }, {
-                    id: row.payloadId, shardId: row.payloadShardId, objectKey: row.payloadObjectKey, sha256: row.payloadSha256, bytes: row.payloadBytes });
+                let value;
+                try {
+                    value = await this.payloads.read({ spaceId: row.spaceId, memoryId: row.id }, {
+                        id: row.payloadId, shardId: row.payloadShardId, objectKey: row.payloadObjectKey, sha256: row.payloadSha256, bytes: row.payloadBytes });
+                } catch (error) {
+                    // Permanent erasure can finish between the bounded central
+                    // page read and external hydration. Omit only that exact,
+                    // centrally confirmed erasure; corruption or an unexplained
+                    // provider tombstone must still fail. Callers retain their
+                    // raw cursor and perform their normal final authority check.
+                    if (input.omitErased && error instanceof ReleaseError && error.code === 'payload_purged'
+                        && await one(this.db, `/* payload-erasure-race */ SELECT id FROM memories WHERE id=? AND space_id=? AND erased_at IS NOT NULL`, [row.id, row.spaceId]))
+                        return null;
+                    throw error;
+                }
                 const encoded = canonical(value);
                 if (await digest(encoded) !== row.payloadSha256 || new TextEncoder().encode(encoded).length !== row.payloadBytes)
                     fail(503, 'payload_integrity_failed');
                 return { ...row, body: value.body, source: value.source, provenance: canonical(value.provenance) };
-            })));
+            }));
+            for (const row of part) if (row !== null) hydrated.push(row);
         }
         return hydrated;
     }
@@ -211,7 +225,7 @@ export class MemoryStore {
             await requireSpace(this.db, token, spaceId, 'read', this.clock);
             return fail(404, 'memory_not_found');
         }
-        const [hydrated] = await this.hydrateRows([row]);
+        const [hydrated] = await this.hydrateRows([row], { omitErased: true });
         const allowed = await this.confirmRead(hash, spaceId, [row], { deleted: includeDeleted ? undefined : false });
         if (!allowed.has(row.id))
             fail(404, 'memory_not_found');
@@ -349,7 +363,8 @@ export class MemoryStore {
         let prepared: PreparedPayloads | undefined;
         if (this.payloads?.enabled) {
             const actor = await requireSpace(this.db, token, spaceId, 'update', this.clock);
-            const existing = await one(this.db, 'SELECT id FROM release_operations WHERE account_id=? AND space_id=? AND client_key=?', [actor.accountId, spaceId, key]);
+            const lookup = () => one(this.db, 'SELECT id FROM release_operations WHERE account_id=? AND space_id=? AND client_key=?', [actor.accountId, spaceId, key]);
+            const existing = await lookup();
             let value = { body: input.body, source: source ?? null, provenance: { originKind: 'user' } as Provenance };
             if (!existing) {
                 const hash = await tokenHash(token), at = this.clock();
@@ -358,9 +373,15 @@ export class MemoryStore {
                 const old = await one<MemoryRow>(this.db, `SELECT ${columns} FROM memories r JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
                   WHERE r.id=? AND s.id=? AND r.revision=? AND r.deleted_at IS NULL AND r.erased_at IS NULL AND ${authority('update')}`,
                     [memoryId, spaceId, input.expectedRevision, ...params(hash, at, 'update')]);
-                if (!old) fail(409, 'revision_conflict');
-                const [hydrated] = await this.hydrateRows([old]);
-                value = { body: input.body, source: source === undefined ? hydrated!.source : source, provenance: JSON.parse(hydrated!.provenance) as Provenance };
+                if (!old) {
+                    // An identical operation may have committed after lookup.
+                    // Existing preparation/commit validates its request digest
+                    // and current authority without staging another payload.
+                    if (!await lookup()) fail(409, 'revision_conflict');
+                } else {
+                    const [hydrated] = await this.hydrateRows([old]);
+                    value = { body: input.body, source: source === undefined ? hydrated!.source : source, provenance: JSON.parse(hydrated!.provenance) as Provenance };
+                }
             }
             prepared = await this.preparePayloads(token, spaceId, { action: 'update', cap: 'update', key, input: requestInput,
                 memoryId, expectedRevision: input.expectedRevision, items: [{ ...value, memoryId }] });
@@ -392,6 +413,40 @@ export class MemoryStore {
     async restore(token: string, spaceId: string, memoryId: string, expectedRevision: number, key: string): Promise<WriteResult> {
         id(memoryId);
         integer(expectedRevision, 1, Number.MAX_SAFE_INTEGER - 1);
+        if (this.payloads?.enabled) {
+            str(key, 128);
+            if (!/^[A-Za-z0-9._:-]{1,128}$/.test(key)) fail(400, 'invalid_operation_id');
+            const hash = await tokenHash(token), actor = await requireSpace(this.db, token, spaceId, 'update', this.clock);
+            const existing = await one(this.db, 'SELECT id FROM release_operations WHERE account_id=? AND space_id=? AND client_key=?', [actor.accountId, spaceId, key]);
+            if (!existing) {
+                const at = this.clock();
+                const retained = await one<MemoryRow>(this.db, `SELECT ${columns} FROM memories r JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
+                    WHERE r.id=? AND s.id=? AND r.revision=? AND r.deleted_at IS NOT NULL AND r.erased_at IS NULL AND r.payload_id IS NOT NULL AND ${authority('update')}`,
+                    [memoryId, spaceId, expectedRevision, ...params(hash, at, 'update')]);
+                if (retained) {
+                    const [value] = await this.hydrateRows([retained]);
+                    const checkedAt = this.clock();
+                    const current = await one<{ expiresAt: number; restoreUntil: number; checkedAt: number }>(this.db, `/* restore-projection */
+                        SELECT min(c.expires_at,c.membership_expires_at,${accessExpiry('update')}) AS expiresAt,${SQL_NOW_MS} AS checkedAt,
+                            r.deleted_at+coalesce((SELECT retention_days FROM release_space_policies WHERE space_id=s.id),30)*86400000 AS restoreUntil
+                        FROM memories r JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
+                        WHERE r.id=? AND s.id=? AND r.revision=? AND r.payload_id=? AND r.deleted_at IS NOT NULL AND r.erased_at IS NULL AND ${authority('update')}`,
+                        [memoryId, spaceId, expectedRevision, retained.payloadId!, ...params(hash, checkedAt, 'update')]);
+                    const returnedAt = Math.max(this.clock(), current?.checkedAt ?? 0);
+                    if (current && current.expiresAt <= returnedAt) fail(403, 'access_denied');
+                    if (current && current.restoreUntil > returnedAt) {
+                        // Recovery retains trash in canonical R2 and rebuilds
+                        // only live HOT heads. Recreate the immutable projection
+                        // before publication, using create-only storage and its
+                        // permanent purge/retirement fences. The restore command
+                        // below still admits authority/revision/retention atomically.
+                        await this.payloads.stage({ spaceId, memoryId }, { id: retained.payloadId!, shardId: retained.payloadShardId!,
+                            objectKey: retained.payloadObjectKey!, sha256: retained.payloadSha256!, bytes: retained.payloadBytes! },
+                        { body: value!.body, source: value!.source, provenance: JSON.parse(value!.provenance) as Provenance });
+                    }
+                }
+            }
+        }
         const result = await this.commit(token, spaceId, 'restore', 'update', key, {}, memoryId, expectedRevision, 1, (op, actor, at) => [
             stmt(this.db, `UPDATE memories SET deleted_at=NULL,updated_at=MAX(updated_at,(SELECT created_at FROM release_operations WHERE id=?)),revision=revision+1,actor_credential_id=? WHERE id=? AND EXISTS(SELECT 1 FROM release_operations WHERE id=?)`, [op, actor, memoryId, op])
         ]);
@@ -408,14 +463,21 @@ export class MemoryStore {
     }
     async erase(token: string, spaceId: string, memoryId: string, expectedRevision: number, confirmation: string, key: string): Promise<{
         id: string;
-        status: string;
+        status: 'access_removed_cleanup_pending';
+        accessRemoved: true;
+        payloadCleanup: 'not_confirmed';
+        indexCleanup: 'not_confirmed';
     }> {
         id(memoryId);
         integer(expectedRevision, 1, Number.MAX_SAFE_INTEGER - 1);
         if (confirmation !== memoryId)
             fail(400, 'confirmation_required');
         await this.commit(token, spaceId, 'erase', 'delete', key, { confirmation }, memoryId, expectedRevision, 0, (op, actor, at) => erasureStatements(this.db, memoryId, at, actor, 'EXISTS(SELECT 1 FROM release_operations WHERE id=?)', [op]), true);
-        return { id: memoryId, status: 'source_erased_index_cleanup_pending' };
+        // This is an acknowledgment of central access removal. R2/hot payload
+        // and vector cleanup complete independently; a replay is not a new
+        // observation that any physical copy has been removed.
+        return { id: memoryId, status: 'access_removed_cleanup_pending', accessRemoved: true,
+            payloadCleanup: 'not_confirmed', indexCleanup: 'not_confirmed' };
     }
     async spaces(token: string, input: {
         limit?: number;
@@ -508,7 +570,7 @@ export class MemoryStore {
    ${input.deleted ? '' : 'AND NOT EXISTS(SELECT 1 FROM memories successor WHERE successor.supersedes_id=r.id)'}
    AND r.created_at<=? AND (r.created_at<? OR (r.created_at=? AND r.id>?)) AND ${authority('read')} ORDER BY r.created_at DESC,r.id LIMIT ?`, [spaceId, before, before, before, after, ...params(hash, at, 'read'), limit + 1]);
         const page = all.slice(0, limit), last = page.at(-1);
-        const hydrated = await this.hydrateRows(page);
+        const hydrated = await this.hydrateRows(page, { omitErased: true });
         const allowed = await this.confirmRead(hash, spaceId, page, { deleted: Boolean(input.deleted), currentFact: !input.deleted });
         const results = hydrated.filter(row => allowed.has(row.id)).map(row => ({ ...memoryRow(row), ...(input.deleted ? allowed.get(row.id)! : {}) }));
         return { results, nextCursor: all.length > limit && last ? encodeCursor(resource, [last.createdAt, last.id]) : null };

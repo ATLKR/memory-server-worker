@@ -77,7 +77,7 @@ export class Transfers {
         v.payload_sha256 AS payloadSha256,v.payload_bytes AS payloadBytes,v.logical_bytes AS logicalBytes
    FROM versions v JOIN memories current ON current.id=v.id AND current.erased_at IS NULL
    JOIN spaces s ON s.id=v.space_id CROSS JOIN active_credentials c WHERE s.id=? AND ${authority('export')} ORDER BY v.id`, [JSON.stringify(page), spaceId, ...params(hash, fresh, 'export')]) : [];
-        const hydrated = await this.store.hydrateRows(all);
+        const hydrated = await this.store.hydrateRows(all, { omitErased: true });
         // Session validity and current authority share the final SQL snapshot.
         // Compare expiry facts after its await too, without opening another read
         // boundary after the authorization check.

@@ -14,6 +14,9 @@ import { Admin } from '../../src/release/admin.ts';
 import { Ingest } from '../../src/release/ingest.ts';
 import { Jobs } from '../../src/release/jobs.ts';
 import { IdentityService } from '../../src/identity.ts';
+import { payloadShard, payloadBucket } from './payload-fixture.mjs';
+import { PayloadStore } from '../../src/release/payloads.ts';
+import { WorkspaceService } from '../../src/workspace.ts';
 
 async function browser(t, path, setup, variables = {}) {
   const f = await fixture();
@@ -48,6 +51,20 @@ async function browser(t, path, setup, variables = {}) {
   const submit = id => byId(id).dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
   return { ...f, app, settings, w, byId, submit, settle, calls, switchAccount: () => { token = f.other; }, intercept: fn => { responseInterceptor = fn; }, beforeRequest: fn => { requestInterceptor = fn; } };
 }
+
+test('management erasure reports access removal while physical source and index cleanup remain unconfirmed', async t => {
+ const shard=payloadShard(),r2=payloadBucket();t.after(()=>shard.raw.close());
+ const variables={STORAGE_MODE:'sharded',STORAGE_SHARDS_JSON:JSON.stringify([{id:'one',binding:'HOT',mode:'active'}]),HOT:shard,MEMORY_PAYLOADS:r2};let memory;
+ const f=await browser(t,'/manage',async f=>{const payloads=new PayloadStore({...variables,DB:f.db},()=>at),store=new MemoryStore(f.db,()=>at,payloads);memory=await store.create(f.token,'s1',{body:'private body',source:'private retained source'},'erase-ui-source');await store.remove(f.token,'s1',memory.id,1,'erase-ui-trash');return f.token;},variables);
+ f.byId('trash').click();await f.settle();f.w.prompt=()=>memory.id;
+ [...f.byId('memories').querySelectorAll('button')].find(button=>button.textContent==='영구 제거').click();await f.settle();
+ assert.equal(f.calls.find(call=>call.path.endsWith('/erase')).status,200);
+ assert.match(f.byId('status').textContent,/접근 차단/);assert.match(f.byId('status').textContent,/정리 확인 대기/);
+ assert.match(f.byId('result').textContent,/access_removed_cleanup_pending/);
+ assert.match(f.byId('receipt-list').textContent,/payloadCleanup/);assert.match(f.byId('receipt-list').textContent,/not_confirmed/);
+ assert.ok([...r2.objects.values()].some(row=>row.text.includes('private retained source')));
+ assert.equal(f.byId('memories').children.length,0);
+});
 
 for(const dismissal of ['dialog-close','dialog-cancel','escape'])test('a pending invitation survives '+dismissal+' until its one-time receipt is shown',async t=>{
  const f=await browser(t,'/');[...f.byId('space-list').querySelectorAll('button')].find(button=>button.textContent.includes('Team')).click();await f.settle();
@@ -461,6 +478,44 @@ test('root member management disables removal of its known last owner', async t 
   assert.equal(owner.querySelector('button').disabled, true); assert.match(owner.textContent, /마지막 소유자/);
   assert.doesNotMatch(owner.textContent,/먼저 지정|소유자.*초대|승격/);
   owner.querySelector('button').click(); await f.settle(); assert.equal(f.calls.some(c => c.method === 'DELETE'), false);
+});
+
+for(const view of ['closed','new-dialog','retargeted','refresh-fails'])test('root reconciles confirmed self-removal after member view is '+view,async t=>{
+ let second;
+ const f=await browser(t,'/',async f=>{f.db.raw.exec("UPDATE memberships SET role='owner' WHERE id='m2'");if(view==='retargeted')second=await new WorkspaceService(f.db,()=>at).createOrganization(f.token,{name:'Second organization',emailId:'e1'});return f.token;});
+ [...f.byId('space-list').querySelectorAll('button')].find(button=>button.textContent.includes('Team')).click();await f.settle();
+ f.byId('manage-members').click();await f.settle();
+ let release,reached;const held=new Promise(resolve=>{release=resolve;}),waiting=new Promise(resolve=>{reached=resolve;});
+ f.intercept(async(path,init,response)=>{if(path.endsWith('/memberships/m1')){assert.equal(response.status,204);reached();await held;}if(view==='refresh-fails'&&path==='/v1/workspace')return new Response('{}',{status:500});return response;});
+ [...f.byId('members-list').querySelectorAll('button')].find(button=>button.getAttribute('aria-label').startsWith('alice@example.com')).click();await waiting;
+ try{
+   if(view==='retargeted'){f.byId('field-organizationId').value=second.id;f.byId('field-organizationId').dispatchEvent(new f.w.Event('change'));}
+   else{f.byId('dialog-close').click();assert.equal(f.byId('memory-dialog').open,false);}
+   if(view==='new-dialog'){f.byId('accept-invite').click();f.byId('field-token').value='Unrelated invitation draft';}
+   assert.equal(f.byId('new-memory').disabled,true);assert.equal(f.byId('save-memory').disabled,true);
+   assert.equal(f.byId('memory-body').readOnly,true);assert.equal(f.byId('memory-source').readOnly,true);
+   f.byId('new-memory').click();assert.equal(f.byId('memory-body').value,'');
+ }finally{release();}
+ await f.settle();
+ assert.notEqual(f.db.raw.prepare("SELECT revoked_at FROM memberships WHERE id='m1'").get().revoked_at,null);
+ assert.ok(f.calls.filter(call=>call.path==='/v1/workspace').length>=2);
+ assert.doesNotMatch(f.byId('space-list').textContent,/Team/);
+ if(view==='retargeted'&&!f.byId('invite-members').hidden)assert.match(f.byId('space-title').textContent,/Second organization/);
+ else assert.equal(f.byId('invite-members').hidden,true);
+ if(view==='new-dialog'){assert.equal(f.byId('memory-dialog').open,true);assert.equal(f.byId('field-token').value,'Unrelated invitation draft');}
+ if(view==='retargeted'){assert.equal(f.byId('memory-dialog').open,true);assert.equal(f.byId('field-organizationId').value,second.id);assert.ok(![...f.byId('field-organizationId').options].some(option=>option.value==='org'));}
+ if(view==='refresh-fails'){assert.equal(f.byId('new-memory').disabled,true);assert.equal(f.byId('save-memory').disabled,true);}
+});
+
+test('root ignores a late successful self-removal after an account-switch boundary',async t=>{
+ const f=await browser(t,'/',async f=>{f.db.raw.exec("UPDATE memberships SET role='owner' WHERE id='m2'");return f.token;});
+ f.byId('manage-members').click();await f.settle();let release,reached;const held=new Promise(resolve=>{release=resolve;}),waiting=new Promise(resolve=>{reached=resolve;});
+ f.intercept(async(path,init,response)=>{if(path.endsWith('/memberships/m1')){assert.equal(response.status,204);reached();await held;}return response;});
+ [...f.byId('members-list').querySelectorAll('button')].find(button=>button.getAttribute('aria-label').startsWith('alice@example.com')).click();await waiting;
+ try{f.byId('dialog-close').click();f.switchAccount();f.byId('manage-members').click();for(let n=0;n<100&&f.byId('welcome').hidden;n++)await new Promise(resolve=>setTimeout(resolve,5));assert.equal(f.byId('workspace').hidden,true);}finally{release();}
+ await f.settle();assert.equal(f.byId('workspace').hidden,true);assert.equal(f.byId('welcome').hidden,false);
+ assert.equal(f.calls.filter(call=>call.path==='/v1/workspace').length,1);
+ assert.notEqual(f.db.raw.prepare("SELECT revoked_at FROM memberships WHERE id='m1'").get().revoked_at,null);
 });
 
 test('management stale extraction cancellation does not report success after approval', async t => {

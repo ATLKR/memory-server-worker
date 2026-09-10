@@ -6,6 +6,24 @@ retained in [VERIFICATION.md](VERIFICATION.md); the latest deployment is documen
 proof delivery is covered in [release/EMAIL.md](release/EMAIL.md). Treat these
 documents as the source of truth for release behavior.
 
+## Current source and environments
+
+The candidate is **0.5.0-rc.1, central schema 25 and HOT schema 1**. Production
+remains rc.3 with central migrations 1–7. Staging at
+`https://memory-staging.allenlabs.org` runs the earlier `1a93820` revision with
+central migrations 1–23 and HOT 1; 24–25 are not deployed. All remaining migrations
+are mandatory before the current Worker is deployed. Historical rc.4 test counts
+do not describe this candidate.
+
+The selected GA is invite-only and metered, including AI retrieval and reviewed
+extraction, with paid billing disabled. Earlier staging live evidence covers SSO,
+scoped PATs, the official MCP SDK, AI, ten-level independent organization ACLs,
+CRUD/restore/erasure and metering. Mail receiver deployment/proof consumption,
+central lifecycle rollout and final-revision acceptance remain pending. Current
+Authentication35 finished with zero actionable findings; Storage36 reported
+three findings now assigned for correction. Affected domains will be reviewed
+again after fixes, and a fresh console review follows these corrections.
+
 ## Maintenance and diagnosis
 
 The source configures `*/5 * * * *` for expired transient-state cleanup. Each
@@ -23,15 +41,22 @@ migrations `0008_checkout-schema.sql`, `0009_job-progress-schema.sql`,
 `0014_tenant-queue-schema.sql`, `0015_workspace-lookup-schema.sql`,
 `0016_retrieval-progress-schema.sql`, `0017_vector-reconciliation-schema.sql`,
 `0018_outbound-share-schema.sql`, `0019_execution-time-schema.sql`,
-`0020_domain-verification-schema.sql` and `0021_domain-retention-schema.sql`
-before deploying its Worker; none has been applied to production. New environments
-apply migrations 1–21. The source readiness check requires schema version 21.
-The current full local check passes 1,410 tests with strict typechecking, all 21
-migration source comparisons and the seven frozen production hashes. Recorded
-native validation covers populated upgrades from 5 through 21, six queued-expiry
-cases, ten domain verification/retention checks and seven auth/HTTP tests. The
-[integration record](release/INTEGRATION.md) identifies the source scope of each
-run and the remaining live acceptance gates.
+`0020_domain-verification-schema.sql`, `0021_domain-retention-schema.sql`,
+`0022_payload-schema.sql`, `0023_operational-schema.sql`,
+`0024_lifecycle-schema.sql` and `0025_queue-episode-schema.sql`.
+None of migrations 8–25 has been applied to production. New environments apply
+central migrations 1–25 and `shard-migrations/0001_payloads.sql` to every HOT DB.
+Readiness requires central 25/HOT 1. The final full validation is to be rerun;
+the [integration record](release/INTEGRATION.md) scopes earlier native/local
+evidence and remaining live acceptance.
+
+Migration 22 adds immutable payload pointers, logical byte accounting, durable
+preparation intents and purge/retirement outboxes. Migration 23 adds aggregate
+UTC-month provider cost reservations and bounded inline-backfill progress.
+Migration 24 adds ordered account/exact-email lifecycle handling and verified
+JWT lifecycle heads before new sign-in claims. Migration 25 records current
+queue episode time without rewriting original creation time; unreconstructable
+older retry episode times remain unknown.
 
 Migration 19 and the application SQL helpers evaluate deadline admission at the
 later of the application-bound time and the database statement's execution time.
@@ -180,15 +205,19 @@ locate one FTS row through its indexed identifier.
 Migration 13 applies the same exact-membership lookup to foundation key issuance
 while retaining its validation, original membership/email binding and audit.
 
-Keep `BACKGROUND_JOBS_ENABLED=false` and `AUTO_ERASURE_ENABLED=false` for the
-current pilot configuration. The cron does not dispatch AI/vector/ingestion or
-billing jobs with the first switch off, and does not erase retained memories with
-the second switch off. Explicit, recently reauthenticated erasure is separate.
-Enabling provider processing requires its bindings/secrets and acceptance checks;
-unconfigured ingestion, index rebuild and billing controls remain disabled.
-`/ready` accepts a successful maintenance heartbeat younger than 15 minutes but
-still requires provider processing and all other readiness checks for HTTP 200.
-A cleanup heartbeat alone is not GA readiness.
+The current managed-AI candidate enables `BACKGROUND_JOBS_ENABLED=true` with
+configured AI/Vectorize and ingestion keys; earlier staging live probes exercised
+these providers. Keep `PAID_BILLING_ENABLED=false` and
+`AUTO_ERASURE_ENABLED=false`. Explicit recently reauthenticated erasure remains
+separate. The five-minute cron bounds provider work and maintenance; monitor
+backlog and current episode age rather than assuming completion every five minutes.
+
+`/ready` requires central 25/HOT 1, storage/provider/config checks, a recent
+heartbeat, invite enrollment, metered AI budget and the signed acceptance record.
+`LIVE_ACCEPTANCE_ID` alone is insufficient. The Ed25519 JWS binds all 15 required
+gates to the exact source/config/schema, with a maximum seven-day lifetime.
+A healthy cleanup heartbeat or liveness response does not perform those gates.
+See [GA acceptance](release/GA_ACCEPTANCE.md).
 
 Browser authentication failures return HTTP 400 with an `X-Auth-Failure` code such
 as `AUTH_CALLBACK_VALIDATION`, `AUTH_FLOW_CLAIM`, `AUTH_TOKEN_EXCHANGE_403`,
@@ -276,7 +305,7 @@ responses do not return earlier proposals.
 
 This runbook covers the Standard memory Worker in `saas/`, deployed at `https://memory.allenlabs.org`. It remains a hosted pilot. Version-specific test results, Worker version IDs and acceptance results belong in the maintained release integration record.
 
-## Recorded environment
+## Historical production bootstrap record (rc.3; unchanged)
 
 | Item | Confirmed state |
 | --- | --- |
@@ -356,13 +385,19 @@ npm run db:remote
 npm run deploy
 ```
 
-`preflight` checks local configuration, including the real D1 UUID, client ID, custom domain, alternate-host restrictions, and disabled invocation logging. It does not call the provider or prove remote readiness. `db:remote` runs preflight and applies migrations with `wrangler d1 migrations apply DB --remote`. `deploy` runs check and preflight before `wrangler deploy`; it does not apply D1 migrations or run `test:d1` for you. Stop on any failing command and inspect which remote migrations, if any, were applied before retrying.
+These argument-free commands target production. For staging, pass
+`-- --config .\wrangler.staging.jsonc` to preflight, build, db:remote and deploy.
+`preflight` validates local configuration without proving remote readiness.
+`db:remote` applies every registered active/draining HOT migration first, then
+central DB migrations. `deploy` requires a clean source and runs check/preflight;
+it does not apply migrations or run native/live acceptance. Stop on any failure
+and inspect which databases and versions were applied before retrying.
 
-All seven migrations are applied remotely in order. `migrations:check` verifies their frozen SHA-256 hashes, and `.gitattributes` pins SQL files to LF. To add a forward migration, register its source in `scripts/migrations.mjs`; `migrations:sync` can create the missing new file but refuses to rewrite an existing migration. Never edit an applied file to change production schema. Apply a required migration before deploying code that queries its new tables. Never roll back to a writer that ignores release capability policies. Revoke temporary maintenance tokens after use and verify cleanup.
+Production has only migrations 1–7 applied; staging has 1–23. Current source requires all central migrations through 25 and HOT 1. `migrations:check` verifies their frozen SHA-256 hashes, and `.gitattributes` pins SQL files to LF. To add a forward migration, register its source in `scripts/migrations.mjs`; `migrations:sync` can create the missing new file but refuses to rewrite an existing migration. Never edit an applied file to change production schema. Apply a required migration before deploying code that queries its new tables. Never roll back to a writer that ignores release capability policies. Revoke temporary maintenance tokens after use and verify cleanup.
 
 Real-account sign-in passed after the Workers redirect fix, including approval, callback and authenticated Space loading. No security protections were disabled. If login fails again, collect only the fixed failure stage and time, never real callback codes.
 
-For each rollout record the deployment version, migration state, test time and observed results. Validate public liveness, authentication/discovery and affected authenticated workflows. Live mail/PAT issuance, external MCP clients, multi-account organizational workflows, configured providers and recovery still require acceptance. Do not infer those outcomes from consent, local tests or liveness alone.
+For each rollout record the deployment version, migration state, test time and observed results. Validate public liveness, authentication/discovery and affected authenticated workflows. Earlier staging has live PAT/official SDK, AI and organizational workflow evidence. Actual mail proof, central lifecycle rollout, load/recovery and final-revision acceptance remain separate gates. Do not infer those outcomes from consent, local tests or liveness alone.
 
 ## Daily operation and security
 
@@ -399,10 +434,52 @@ This database contains both memory and authorization history. An earlier restore
 4. Reapply or reconcile revoked/disabled accounts, organizations, claims, memberships, keys, email blocks, and consumed invitations. Invalidate restored sessions and pending OAuth/email proofs as appropriate. Never reopen using the restored authorization snapshot alone.
 5. Validate schema/migration compatibility, fresh login, tenant isolation, and known revoked-key/member denial while public traffic remains blocked. Reopen only after reconciliation and verification are recorded.
 
-User memory exports are implemented as bounded snapshots. They are not database backups or complete account exports. No scheduled long-term database backup exporter is implemented. A Time Travel window is not a permanent archive; design and test additional retention and access controls before relying on them.
+User memory exports are bounded snapshots, not database backups or complete
+account exports. Sharded recovery also needs immutable R2 payloads, all active/
+draining HOT metadata and tombstones, and post-snapshot revocation/erasure evidence.
+The actual provider rejected full D1 export because of FTS virtual tables.
+The explicit regular-table exporter with separate DDL/FTS reconstruction is under
+native verification; this is not yet a successful remote recovery drill.
+Follow [multi-store recovery](release/MULTI_STORE_RECOVERY.md). A Time Travel
+window is not a permanent archive or an atomic cross-store snapshot.
 
 ## Current release limits
 
 Normal deletion creates a tombstone. Recently reauthenticated explicit erasure removes individual memory payload/history while retaining identifier/audit records; automatic retention erasure is implemented but disabled in the pilot. Backups and complete account deletion are outside that erasure operation. See [release/OPERATIONS.ko.md](release/OPERATIONS.ko.md) for the data lifecycle.
 
-Pooled usage accounting, FTS5 search, exports and explicit shares are implemented. AI/Vectorize, payments and identity deprovisioning adapters need configuration and live acceptance; provider jobs remain disabled. Zero-Access encryption, physical sharding and R2 offload are not implemented, and the dedicated D1 database retains its per-database size limit. Managed memory is service-readable. Mail/PAT receipt, real MCP clients, load and recovery drills remain launch work; the service is a pilot.
+Physical HOT D1 sharding, canonical private R2 payloads, pooled accounting, FTS5,
+AI/Vectorize retrieval, reviewed ingestion, export and sharing are implemented.
+Managed memory remains service-readable; Zero-Access is unavailable. The central
+metadata DB and each HOT DB remain finite. See [SCALING.md](SCALING.md).
+
+The registry allows at most 16 active/draining entries and preserves existing
+payload placement. Draining stops new placement; it does not migrate existing
+objects. Keep referenced bindings until an independently verified migration
+removes their references. Inline conversion is opt-in with
+`STORAGE_BACKFILL_ENABLED=true`, bounded to one current and one history candidate
+per invocation. It preserves logical charges and exact content/revision.
+Private R2 keeps canonical current/history payloads; historical HOT copies retire
+through durable outboxes. Erasure receipts confirm central access removal,
+not completed external cleanup.
+
+Invite enrollment and provider reservations are separate from user quotas.
+Production AI reservation cap is $20/month and staging $0.20/month. Memory's
+overall $50/month Cloudflare target needs separate actual billing, capacity and
+alert response; this AI cap cannot enforce every infrastructure charge. Paid
+billing stays excluded. Mail proof, lifecycle live rollout, load, alerts and
+isolated provider recovery remain acceptance work.
+
+The public/private lifecycle implementation and native two-Worker test cover
+9 immutable events and 11 delivery attempts, including false/lost acknowledgments
+and resume. The central publisher is not deployed. Its eventual-delivery target
+is under two minutes and must be measured with oldest pending age. Account
+suspension revokes old authority; resume requires fresh SSO and does not restore
+old credentials or organization memberships. Exact-email re-verification permits
+a new verified claim, not old ACL revival. Verified signed lifecycle heads apply
+before new claims so delayed delivery does not revoke post-transition ownership.
+Account deletion and existing v1 permanent blocks remain terminal.
+Outgoing personal shares are unavailable while their owning account is suspended.
+An explicit resume may make those retained grants usable again; it does not
+restore revoked recipient email claims, old sessions/PATs or organization
+memberships. Organization content remains governed by that organization's current
+authority rather than the former writer's personal lifecycle.

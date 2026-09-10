@@ -5,12 +5,14 @@ import { DatabaseSync } from 'node:sqlite';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { PayloadStore } from '../src/release/payloads.ts';
 import { canonical } from '../src/release/util.ts';
-import { ftsQuery } from '../src/release/search.ts';
+import { ftsQuery, Search } from '../src/release/search.ts';
 import { applySql } from './apply-sql.mjs';
 import { WorkspaceService } from '../src/workspace.ts';
 import { MemoryStore } from '../src/release/memory.ts';
 import { PayloadMaintenance } from '../src/release/payload-maintenance.ts';
 import { LegacyBackfill } from '../src/release/payload-backfill.ts';
+import { Ingest } from '../src/release/ingest.ts';
+import { Transfers } from '../src/release/transfer.ts';
 
 const content = { body: '₿budget 🫠alpha x🫠y cafe\u0301ine', source: 'Private source', provenance: { originKind: 'user' } };
 const code = value => error => error.code === value;
@@ -19,7 +21,7 @@ test('native physical D1 payload shards and private R2', { timeout: 180000 }, as
     const mf = new Miniflare(convertV4MiniflareOptions({ name: 'payload-storage-native-test', modules: true,
         compatibilityDate: '2026-09-08', compatibilityFlags: ['nodejs_compat'],
         script: 'export default {fetch(){return new Response("synthetic storage fixture");}}',
-        d1Databases: ['DB', 'HOT_ONE', 'HOT_TWO'], r2Buckets: ['MEMORY_PAYLOADS'],
+        d1Databases: ['DB', 'HOT_ONE', 'HOT_TWO', 'RECOVERED_ONE', 'RECOVERED_TWO'], r2Buckets: ['MEMORY_PAYLOADS'],
         outboundService: () => new Response('Outbound network disabled', { status: 503 }),
     }));
     t.after(() => mf.dispose());
@@ -139,6 +141,8 @@ test('native physical D1 payload shards and private R2', { timeout: 180000 }, as
             for (const file of migrations) await applySql(parser, db, readFileSync(new URL('../migrations/' + file, import.meta.url), 'utf8'));
             await applySql(parser, db, readFileSync(new URL('../payload-schema.sql', import.meta.url), 'utf8'));
             await applySql(parser, db, readFileSync(new URL('../operational-schema.sql', import.meta.url), 'utf8'));
+            await applySql(parser, db, readFileSync(new URL('../lifecycle-schema.sql', import.meta.url), 'utf8'));
+            await applySql(parser, db, readFileSync(new URL('../queue-episode-schema.sql', import.meta.url), 'utf8'));
         } finally { parser.close(); }
         const workspace = new WorkspaceService(db), identity = await workspace.signIn({ issuer: 'https://auth-api.allen.company', subject: 'native-storage-owner',
             email: 'storage-owner@example.test', emailVerified: true, permission: 'write', expiresAt: Date.now() + 900000 });
@@ -194,5 +198,89 @@ test('native physical D1 payload shards and private R2', { timeout: 180000 }, as
         assert.equal((await memories.get(identity.token, space.id, legacy.id)).body, 'native legacy current');
         assert.deepEqual(await db.prepare('SELECT storage_bytes FROM release_pools WHERE id=?').bind('account:' + identity.accountId).first(), before);
         assert.equal((await new PayloadMaintenance({ DB: db }, store).run()).retired, 1, 'historical-only conversion retires its hot projection');
+
+        // A provider may lose the acknowledgment after accepting the second
+        // object. The retained intent must resume without a partial publication.
+        let uploads = 0, failOnce = true;
+        const unreliableBucket = { head: key => bucket.head(key), get: key => bucket.get(key), async put(key, value, options) {
+            const result = await bucket.put(key, value, options);
+            if (value.length && ++uploads === 2 && failOnce) { failOnce = false; throw new Error('synthetic R2 acknowledgment lost'); }
+            return result;
+        } };
+        const ingestEnv = { ...env, DB: db, MEMORY_PAYLOADS: unreliableBucket, BACKGROUND_JOBS_ENABLED: 'true',
+            PAYLOAD_KEY: Buffer.alloc(32, 8).toString('base64url'), AI: { async run() { return { response: { memories: [
+                { body: 'I prefer Solarized Dark.', kind: 'fact', sourceMessageId: 'user', quote: 'I prefer Solarized Dark.' },
+                { body: 'I work in Asia/Seoul.', kind: 'fact', sourceMessageId: 'user', quote: 'I work in Asia/Seoul.' }
+            ] } }; } } };
+        const ingest = new Ingest(ingestEnv);
+        const submitted = await ingest.submit(identity.token, space.id, { messages: [
+            { id: 'user', role: 'user', content: 'I prefer Solarized Dark. I work in Asia/Seoul.' }
+        ] }, 'native-ingest-submit');
+        // Lease this exact ingestion so unrelated native index fixtures do not
+        // determine which job drain selects first.
+        const lease = crypto.randomUUID();
+        await db.prepare("UPDATE release_jobs SET state='leased',lease_token=?,lease_until=? WHERE id=? AND state='pending'")
+            .bind(lease, Date.now() + 120000, submitted.id).run();
+        await ingest.process({ id: submitted.id, leaseToken: lease });
+        const units = () => db.prepare('SELECT coalesce(sum(units),0) AS n FROM release_usage_events WHERE pool_id=?').bind('account:' + identity.accountId).first('n');
+        const beforeApproval = await units();
+        await assert.rejects(() => ingest.approve(identity.token, space.id, submitted.id, [0, 1], 'native-ingest-approve'), /synthetic R2 acknowledgment lost/);
+        assert.equal(await units(), beforeApproval);
+        assert.equal(await db.prepare('SELECT state FROM release_ingests WHERE id=?').bind(submitted.id).first('state'), 'review');
+        assert.equal(await db.prepare("SELECT count(*) FROM release_operations WHERE client_key='native-ingest-approve'").first('count(*)'), 0);
+        const partial = (await db.prepare("SELECT s.memory_id,s.state FROM release_payload_stages s JOIN release_payload_intents i ON i.id=s.intent_id WHERE i.client_key='native-ingest-approve' ORDER BY s.ordinal").all()).results;
+        assert.deepEqual(partial.map(row => row.state), ['ready', 'staging']);
+        for (const row of partial) assert.equal(await db.prepare('SELECT id FROM memories WHERE id=?').bind(row.memory_id).first(), null);
+        const approved = await ingest.approve(identity.token, space.id, submitted.id, [0, 1], 'native-ingest-approve');
+        assert.equal(approved.memories.length, 2); assert.equal(await units(), beforeApproval + 2);
+        const replayed = await ingest.approve(identity.token, space.id, submitted.id, [0, 1], 'native-ingest-approve');
+        assert.equal(replayed.replayed, true); assert.deepEqual(replayed.memories, approved.memories); assert.equal(await units(), beforeApproval + 2);
+        assert.deepEqual(await Promise.all(approved.memories.map(async memoryId => (await memories.get(identity.token, space.id, memoryId)).body)),
+            ['I prefer Solarized Dark.', 'I work in Asia/Seoul.']);
+
+        // The recovery contract retains trash in R2 but rebuilds only live HOT
+        // heads. Restore must fill the missing projection before acknowledging.
+        const trash = await memories.create(identity.token, space.id, { body: 'recoverableword native retained trash' }, 'native-recovery-trash');
+        await memories.remove(identity.token, space.id, trash.id, 1, 'native-recovery-delete');
+        const recoveredOne = await mf.getD1Database('RECOVERED_ONE'), recoveredTwo = await mf.getD1Database('RECOVERED_TWO');
+        for (const hot of [recoveredOne, recoveredTwo]) { const parser = new DatabaseSync(':memory:');
+            try { await applySql(parser, hot, readFileSync(new URL('../shard-migrations/0001_payloads.sql', import.meta.url), 'utf8')); } finally { parser.close(); } }
+        const recoveredEnv = { ...env, DB: db, HOT_ONE: recoveredOne, HOT_TWO: recoveredTwo }, recoveredPayloads = new PayloadStore(recoveredEnv), recovered = new MemoryStore(db, Date.now, recoveredPayloads);
+        const restored = await recovered.restore(identity.token, space.id, trash.id, 2, 'native-recovery-restore');
+        assert.equal(restored.body, 'recoverableword native retained trash');
+        assert.deepEqual((await new Search(recoveredEnv).query(identity.token, space.id, 'recoverableword')).results.map(row => row.id), [trash.id]);
+        assert.equal((await recoveredOne.prepare('SELECT count(*) AS n FROM payloads').first()).n + (await recoveredTwo.prepare('SELECT count(*) AS n FROM payloads').first()).n, 1);
+
+        for (const boundary of ['hot-retired', 'r2-purged']) {
+            const m = await recovered.create(identity.token, space.id, { body: 'terminal native restore fence' }, 'native-restore-' + boundary);
+            await recovered.remove(identity.token, space.id, m.id, 1, 'native-trash-' + boundary);
+            const row = await db.prepare('SELECT * FROM memories WHERE id=?').bind(m.id).first(), ctx = { spaceId: space.id, memoryId: m.id }, ref = {
+                id: row.payload_id, shardId: row.payload_shard_id, objectKey: row.payload_object_key, sha256: row.payload_sha256, bytes: row.payload_bytes };
+            if (boundary === 'hot-retired') await recoveredPayloads.retireHot(ctx, ref); else await recoveredPayloads.purge(ctx, ref);
+            await assert.rejects(() => recovered.restore(identity.token, space.id, m.id, 2, 'native-refused-' + boundary), code(boundary === 'hot-retired' ? 'payload_retired' : 'payload_purged'));
+            assert.equal((await db.prepare('SELECT revision FROM memories WHERE id=?').bind(m.id).first()).revision, 2);
+            assert.equal(await db.prepare('SELECT id FROM release_operations WHERE client_key=?').bind('native-refused-' + boundary).first(), null);
+        }
+
+        // A payload can disappear after an export page selects its retained
+        // revision. Final central erasure filtering must still return survivors.
+        const transient = await recovered.create(identity.token, space.id, { body: 'native page vanishes' }, 'native-page-vanish');
+        const transfer = new Transfers(db, Date.now, recoveredPayloads), snapshot = await transfer.startExport(identity.token, space.id);
+        const read = recoveredPayloads.read.bind(recoveredPayloads); let erasedDuringRead = false;
+        recoveredPayloads.read = async (ctx, ref) => {
+            if (ctx.memoryId === transient.id && !erasedDuringRead) { erasedDuringRead = true;
+                await recovered.remove(identity.token, space.id, transient.id, 1, 'native-page-delete');
+                await recovered.erase(identity.token, space.id, transient.id, 2, transient.id, 'native-page-erase');
+                await new PayloadStore(recoveredEnv).purge(ctx, ref); }
+            return read(ctx, ref);
+        };
+        // The preceding terminal-fence probes deliberately made inconsistent
+        // retained rows. Erase them centrally before testing unrelated export.
+        for (const boundary of ['hot-retired', 'r2-purged']) {
+            const row = await db.prepare('SELECT memory_id FROM release_operations WHERE client_key=?').bind('native-restore-' + boundary).first();
+            await recovered.erase(identity.token, space.id, row.memory_id, 2, row.memory_id, 'native-clean-' + boundary);
+        }
+        const page = await transfer.exportPage(identity.token, space.id, snapshot.id, null, 50);
+        assert.equal(erasedDuringRead, true); assert.ok(page.results.some(row => row.id === trash.id)); assert.ok(!page.results.some(row => row.id === transient.id));
     });
 });

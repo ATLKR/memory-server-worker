@@ -2,6 +2,7 @@ import type { Extension, ReleaseEnv, Value } from './types.ts';
 import { MemoryStore, type CreateInput } from './memory.ts';
 import { PayloadStore } from './payloads.ts';
 import { admitSignIn } from './enrollment.ts';
+import { applyVerifiedLifecycle } from './lifecycle.ts';
 import { PayloadMaintenance } from './payload-maintenance.ts';
 import { LegacyBackfill } from './payload-backfill.ts';
 import { evaluateReadiness } from './readiness.ts';
@@ -63,13 +64,17 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
         fail(421, 'invalid_host'); if (request.headers.has('origin') && request.headers.get('origin') !== origin)
         fail(403, 'origin_denied'); }
     async function ready(): Promise<Response> {
-        const result = await evaluateReadiness(env, { centralSchemaVersion: 23, hotSchemaVersion: 1, inspectStorage: () => inspectStorage(env), clock });
+        const result = await evaluateReadiness(env, { centralSchemaVersion: 25, hotSchemaVersion: 1, inspectStorage: () => inspectStorage(env), clock });
         return json(result, result.ready ? 200 : 503);
     }
     const identity = () => { if (!options.identity)
         fail(503, 'identity_adapter_missing'); return options.identity; };
     return {
-        beforeSignIn: principal => admitSignIn(env, principal),
+        async beforeSignIn(principal) {
+            await applyVerifiedLifecycle(db, clock, principal);
+            await admitSignIn(env, principal);
+        },
+        identityLifecycle: 2,
         workspaceSpaceAccess: (hash, at) => ({ read: authority('read'), readValues: params(hash, at, 'read'),
             write: authority('update'), writeValues: params(hash, at, 'update'),
             readExpires: accessExpiry('read'), writeExpires: accessExpiry('update'),

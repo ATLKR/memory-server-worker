@@ -75,7 +75,15 @@ test('operational lists seek the caller Space and account in display order',asyn
   const queries=capture(db),release=createRelease({DB:db,PUBLIC_ORIGIN:'https://memory.example.test'},{clock:()=>at});
   const get=async tail=>{const response=await release.route(new Request('https://memory.example.test/v1/spaces/s1/'+tail),token);assert.equal(response.status,200);return(await response.json()).results;};
   const ingests=await get('ingests'),jobs=await get('jobs');assert.equal(ingests.length,50);assert.equal(jobs.length,100);assert.ok([...ingests,...jobs].every(r=>r.id.startsWith('local-')));assert.equal(ingests[0].id,'local-0109');assert.equal(jobs[0].id,'local-0109');
-  const old=new DB();old.migrate(15);try{for(const q of queries.filter(q=>q.sql.includes('ORDER BY i.created_at')||q.sql.includes('ORDER BY created_at DESC,id'))){assert.match(plan(old,q),/SCAN (?:i|release_jobs)\b/);assert.doesNotMatch(plan(db,q),/SCAN (?:i|release_jobs)\b|TEMP B-TREE/);assert.match(plan(db,q),/release_(?:ingests_account_space_created|jobs_space_created)/);}}finally{old.close();}
+  const old=new DB();old.migrate(15);try{
+   const indexes=['release_ingests_account_space_created','release_jobs_space_created'];
+   for(const name of indexes)assert.equal(old.raw.prepare('SELECT name FROM sqlite_schema WHERE name=?').get(name),undefined,'Index is absent before migration16');
+   // Current authority SQL needs the current schema. Preserve the historical
+   // index comparison by removing only the two migration16 indexes afterwards.
+   for(const source of ['retrieval-progress','vector-reconciliation','outbound-share','execution-time','domain-verification','domain-retention','payload','operational','lifecycle','queue-episode'])old.raw.exec(readFileSync(new URL('../../'+source+'-schema.sql',import.meta.url),'utf8'));
+   for(const name of indexes)old.raw.exec('DROP INDEX '+name);
+   for(const q of queries.filter(q=>q.sql.includes('ORDER BY i.created_at')||q.sql.includes('ORDER BY created_at DESC,id'))){assert.match(plan(old,q),/SCAN (?:i|release_jobs)\b/);assert.doesNotMatch(plan(db,q),/SCAN (?:i|release_jobs)\b|TEMP B-TREE/);assert.match(plan(db,q),/release_(?:ingests_account_space_created|jobs_space_created)/);}
+  }finally{old.close();}
  }finally{db.close();}
 });
 

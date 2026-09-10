@@ -128,6 +128,7 @@ export interface ReleaseEnv extends StorageEnv {
     fetch?: typeof fetch;
 }
 export interface Extension {
+    identityLifecycle?: 2;
     beforeSignIn?(principal: unknown): Promise<void>;
     workspaceSpaceAccess?: import('../workspace.ts').WorkspaceSpaceAccess;
     publicRoute(request: Request): Promise<Response | null>;
