@@ -32,9 +32,12 @@ function role(value: unknown): 'member' | 'admin' {
   if (value !== 'member' && value !== 'admin') throw new MemoryInvalid();
   return value;
 }
-function protect(response: Response): Response {
+function protect(response: Response, pathname: string): Response {
   const out = new Response(response.body, response);
-  out.headers.set('content-security-policy', "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; object-src 'none'");
+  // Management forms submit JSON through fetch. Native GET submission would
+  // expose memory or verification proofs in URLs if its script did not load.
+  const formAction = pathname === '/manage' ? "'none'" : "'self'";
+  out.headers.set('content-security-policy', `default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action ${formAction}; frame-ancestors 'none'; object-src 'none'`);
   out.headers.set('x-content-type-options', 'nosniff');
   out.headers.set('referrer-policy', 'no-referrer');
   out.headers.set('permissions-policy', 'camera=(), microphone=(), geolocation=()');
@@ -172,6 +175,6 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
       ? 'Bearer realm="scim"'
       : `Bearer ${invalidToken ? 'error="invalid_token", ' : ''}resource_metadata="${settings.origin}/.well-known/oauth-protected-resource", scope="memory:read"`);
     if (response.status === 429) response.headers.set('retry-after', '60');
-    return protect(response);
+    return protect(response, new URL(request.url).pathname);
   };
 }
