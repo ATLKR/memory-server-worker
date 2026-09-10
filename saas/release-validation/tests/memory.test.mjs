@@ -5,6 +5,7 @@ import {DatabaseSync} from 'node:sqlite';
 import {readFileSync,readdirSync} from 'node:fs';
 import {WorkspaceService} from '../../src/workspace.ts';
 import {sqliteClock} from '../../dev/sqlite-clock.mjs';
+import {MemoryService} from '../../src/memory.ts';
 let MemoryStore;try{({MemoryStore}=await import('../../src/release/memory.ts'));}catch{}
 const input={body:'사용자 선호: 짧은 설명',provenance:{originKind:'user'}};
 test('memory implementation exists',()=>assert.ok(MemoryStore,'MemoryStore is missing'));
@@ -40,13 +41,15 @@ async function productionFixture() {
 for(const race of [false,true]) test('supersession requires update authority'+(race?' in the mutating SQL':' on the original five schemas'),async()=>{
  const {db,token,key,spaceId}=await productionFixture();
  try {
-  const store=new MemoryStore(db,()=>at),original=await store.create(token,spaceId,{body:'Keep this fact'},'original');
+  const store=new MemoryStore(db,()=>at),inline=new MemoryService(db,()=>at),original=await inline.create(token,spaceId,{body:'Keep this fact'});
+  const actor=db.raw.prepare('SELECT actor_credential_id,account_id FROM spaces WHERE id=?').get(spaceId);
+  db.raw.prepare("INSERT INTO release_operations(id,account_id,space_id,client_key,request_hash,action,memory_id,actor_credential_id,created_at,period,units) VALUES('original',?,?,'original','fixture','create',?,?,?,'2026-09',1)").run(actor.account_id,spaceId,original.id,actor.actor_credential_id,at);
   if(race){
    db.raw.prepare("UPDATE release_credential_policies SET capabilities='[\"create\",\"update\"]' WHERE credential_id=?").run(key.id);
    const runBatch=db.batch.bind(db);db.batch=statements=>{db.raw.prepare("UPDATE release_credential_policies SET capabilities='[\"create\"]' WHERE credential_id=?").run(key.id);return runBatch(statements);};
   }
   await assert.rejects(()=>store.create(key.token,spaceId,{body:'Replace without authority',supersedesMemoryId:original.id},'replace'),e=>e.status===403);
-  assert.deepEqual((await store.list(token,spaceId)).results.map(row=>row.id),[original.id]);
+  assert.deepEqual((await inline.list(token,spaceId)).results.map(row=>row.id),[original.id]);
   assert.equal(db.raw.prepare('SELECT count(*) n FROM release_operations').get().n,1);
   assert.equal(db.raw.prepare('SELECT sum(units) n FROM release_usage_counters').get().n,1);
  } finally {db.close();}

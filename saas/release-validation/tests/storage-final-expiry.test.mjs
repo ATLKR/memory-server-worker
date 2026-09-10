@@ -24,12 +24,12 @@ for(const expiry of ['credential','membership','lease','ingest'])test('ingest di
 });
 
 for(const stage of ['embedding','upsert'])test('indexing starts no '+stage+' after the final eligibility read crosses lease expiry',async()=>{
- const {db,token}=await fixture();let now=at,reads=0;const calls=[];
+ const {db,token}=await fixture();let now=at;const calls=[];
  try{
   const memory=await new MemoryStore(db,()=>now).create(token,'s1',{body:'Index source'},'create');
   const env={DB:db,AI:{async run(){calls.push('embedding');return{data:[Array(1024).fill(.1)]};}},MEMORY_INDEX:{async upsert(){calls.push('upsert');}}};
   const jobs=new Jobs(env,()=>now),job=await jobs.claim();
-  afterFirst(db,sql=>sql.startsWith('SELECT EXISTS('),()=>{if(++reads===(stage==='embedding'?1:2))now=db.raw.prepare('SELECT lease_until FROM release_jobs WHERE id=?').get(job.id).lease_until+1;});
+  afterFirst(db,sql=>sql.startsWith('SELECT EXISTS('),()=>{if(stage==='embedding'||calls.includes('embedding'))now=db.raw.prepare('SELECT lease_until FROM release_jobs WHERE id=?').get(job.id).lease_until+1;});
   await assert.rejects(()=>jobs.index(job),/lease_lost/);assert.deepEqual(calls,stage==='embedding'?[]:['embedding']);
   assert.equal(db.raw.prepare('SELECT revision FROM memories WHERE id=?').get(memory.id).revision,1);
  }finally{db.close();}

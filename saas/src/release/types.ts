@@ -1,3 +1,4 @@
+import type { StorageEnv } from './payload-types.ts';
 /** Small structural interfaces; production uses native Workers bindings. */
 export type Value = string | number | null;
 export interface Result<T = Record<string, unknown>> {
@@ -78,12 +79,22 @@ export interface VectorIndex {
 export interface AI {
     run(model: string, input: Record<string, unknown>): Promise<unknown>;
 }
-export interface ReleaseEnv {
+export interface ReleaseEnv extends StorageEnv {
     DB: Database;
     PUBLIC_ORIGIN?: string;
     SSO_CLIENT_ID?: string;
     PRODUCT_NAME?: string;
     PRODUCT_SUPPORT_EMAIL?: string;
+    ENROLLMENT_MODE?: 'open' | 'invite';
+    ENROLLMENT_EMAIL_HASHES_JSON?: string; // Operator-managed signup roster; store as a secret.
+    AI_MONTHLY_BUDGET_MICROUSD?: string; // Conservative provider reservation, separate from user usage units.
+    STORAGE_BACKFILL_ENABLED?: 'true' | 'false';
+    GA_PROFILE?: string;
+    DEPLOYMENT_ENVIRONMENT?: string;
+    SOURCE_REVISION?: string;
+    PAID_BILLING_ENABLED?: 'true' | 'false';
+    LIVE_ACCEPTANCE_PUBLIC_KEY?: string;
+    LIVE_ACCEPTANCE_JWS?: string;
     REQUEST_LIMITER: {
         limit(input: {
             key: string;
@@ -117,6 +128,7 @@ export interface ReleaseEnv {
     fetch?: typeof fetch;
 }
 export interface Extension {
+    beforeSignIn?(principal: unknown): Promise<void>;
     workspaceSpaceAccess?: import('../workspace.ts').WorkspaceSpaceAccess;
     publicRoute(request: Request): Promise<Response | null>;
     route(request: Request, token: string): Promise<Response | null>;

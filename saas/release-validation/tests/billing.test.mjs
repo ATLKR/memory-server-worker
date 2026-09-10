@@ -50,15 +50,21 @@ for(const [name,changes] of [
  ['malformed prices',{BILLING_PRICES_JSON:'{'}],
  ['invalid price plan',{BILLING_PRICES_JSON:JSON.stringify({price_test:{plan:'team',monthlyUnits:0,storageBytes:1000}})}],
  ['paused processing',{BACKGROUND_JOBS_ENABLED:'false'}],
+ ['explicit paid billing disabled',{PAID_BILLING_ENABLED:'false'}],
+ ['metered GA profile',{GA_PROFILE:'managed-ai-metered',PAID_BILLING_ENABLED:'false'}],
  ['complete configuration',{}]
-])test('billing config, readiness and API availability agree: '+name,async t=>{
+])test('billing config and API availability agree while GA readiness treats paid billing separately: '+name,async t=>{
  const {db,token}=await fixture();t.after(()=>db.close());const calls=[];
  const env={DB:db,PUBLIC_ORIGIN:'https://memory.allenlabs.org',BACKGROUND_JOBS_ENABLED:'true',STRIPE_SECRET_KEY:'synthetic',STRIPE_WEBHOOK_SECRET:'w'.repeat(64),STRIPE_API_VERSION:'synthetic',BILLING_PRICES_JSON:JSON.stringify({price_test:{plan:'team',monthlyUnits:10000,storageBytes:1048576000}}),REQUEST_LIMITER:{limit:async()=>({success:true})},fetch:async(url)=>{calls.push(String(url));return Response.json(String(url).endsWith('/customers')?{id:'cus_test'}:String(url).endsWith('/billing_portal/sessions')?{url:'https://billing.stripe.com/p/session/test'}:{id:'cs_test',url:'https://checkout.stripe.com/c/pay/test'});},...changes};
  const release=createRelease(env,{clock:()=>at}),billing=new Billing(env,()=>at),enabled=name==='complete configuration';
  const config=await release.route(new Request(env.PUBLIC_ORIGIN+'/v1/release/config'),token);
  assert.equal(config.status,200);assert.equal((await config.json()).features.billing,enabled);
+ assert.equal(billing.configuration().available,enabled);
  const readiness=await release.publicRoute(new Request(env.PUBLIC_ORIGIN+'/ready'));
- assert.equal((await readiness.json()).checks.billing,enabled);
+ const readinessResult=await readiness.json();
+ assert.equal(readinessResult.checks.paidBillingDisabled,env.PAID_BILLING_ENABLED==='false');
+ assert.equal(Object.hasOwn(readinessResult.checks,'billing'),false);
+ assert.equal(readinessResult.ready,false);
  if(enabled){
   assert.equal((await billing.checkout(token,'s1','price_test','availability')).url,'https://checkout.stripe.com/c/pay/test');
   assert.equal((await billing.portal(token,'s1')).url,'https://billing.stripe.com/p/session/test');

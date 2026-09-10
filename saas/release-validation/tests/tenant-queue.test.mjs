@@ -67,7 +67,7 @@ test('lexical scope is exact, applies to the whole body OR group and contributes
   await store.create(other,'s2',{body:'beta beta alpha'},'foreign');
   const search=new Search({DB:db},()=>at),queries=capture(db),result=await search.query(token,'s1','alpha beta',10,'search');
   assert.deepEqual(result.results.map(r=>r.id),[local.id]);
-  const lexical=queries.find(q=>q.sql.startsWith('SELECT r.id,r.revision FROM release_fts'));assert.ok(lexical);
+  const lexical=queries.find(q=>q.sql.startsWith('/* lexical-candidates */'));assert.ok(lexical);
   assert.equal(lexical.values[0],'tenant : "t7331" AND body : ("alpha"* OR "beta"*)');assert.doesNotMatch(lexical.sql,/bm25\(|ORDER BY rank/);
   assert.equal((await search.query(token,'s1','t7331',10,'tenant-term')).results.length,0);
   assert.equal(db.raw.prepare('SELECT tenant FROM release_fts WHERE memory_id=?').get(local.id).tenant,'t7331');

@@ -2,7 +2,8 @@ import type { ReleaseEnv, Memory, Value } from './types.ts';
 import { sqlNow } from '../sql-clock.ts';
 import { batch, digest, one, rows, stmt } from './util.ts';
 import { deadline, embed } from './search.ts';
-import { erasureStatements } from './memory.ts';
+import { columns, erasureStatements, MemoryStore, type MemoryRow } from './memory.ts';
+import { PayloadStore } from './payloads.ts';
 // Alias release_jobs, with one current-time binding. Completed review is also
 // terminal for extraction, even while the human decision is still pending.
 const retryableIngest = `EXISTS(SELECT 1 FROM release_ingests i WHERE i.id=release_jobs.id
@@ -24,7 +25,8 @@ export class Jobs {
     env: ReleaseEnv;
     clock: () => number;
     ingest?: (job: Job) => Promise<void>;
-    constructor(env: ReleaseEnv, clock: () => number = Date.now) { this.env = env; this.clock = clock; }
+    store: MemoryStore;
+    constructor(env: ReleaseEnv, clock: () => number = Date.now) { this.env = env; this.clock = clock; this.store = new MemoryStore(env.DB, clock, new PayloadStore(env, clock)); }
     async claim(): Promise<Job | null> {
         const at = this.clock(), token = crypto.randomUUID();
         // Retire a bounded indexed page of exhausted leases. Terminal ingests
@@ -156,13 +158,7 @@ export class Jobs {
         const stopAt = this.clock() + WORK_SLICE_MS;
         let providerCalls = 0;
         const canCall = (count: number) => providerCalls + count <= INDEX_PROVIDER_CALLS && this.clock() < stopAt;
-        const current = await one<{
-            id: string;
-            body: string;
-            revision: number;
-            deletedAt: number | null;
-            erasedAt: number | null;
-        }>(db, 'SELECT id,body,revision,deleted_at AS deletedAt,erased_at AS erasedAt FROM memories WHERE id=? AND space_id=?', [job.memoryId, job.spaceId]);
+        const current = await one<MemoryRow>(db, `SELECT ${columns} FROM memories r WHERE r.id=? AND r.space_id=?`, [job.memoryId, job.spaceId]);
         if (!current || current.revision !== job.revision)
             return true;
         await this.renew(job);
@@ -204,7 +200,10 @@ export class Jobs {
             return true;
         };
         if (current.deletedAt === null) {
-            const chars = Array.from(current.body), chunks: string[] = [];
+            // Storage awaits precede the existing per-provider revision and
+            // lease checks. Never send a placeholder or a stale cached payload.
+            const [hydrated] = await this.store.hydrateRows([current]);
+            const chars = Array.from(hydrated!.body), chunks: string[] = [];
             for (let offset = 0; offset < chars.length; offset += 1650)
                 chunks.push(chars.slice(offset, offset + 1800).join(''));
             const prefix = (await digest(current.id)).slice(0, 36), namespace = await digest(job.spaceId);
@@ -219,7 +218,9 @@ export class Jobs {
                 if (!await this.indexable(job))
                     return true;
                 providerCalls += 2;
-                const values = await embed(this.env, chunks[n]!);
+                const values = await embed(this.env, chunks[n]!, async () => {
+                    if (!await this.indexable(job)) throw Error('index_authority_lost');
+                });
                 const vectorId = `${prefix}:${current.revision}:${n}`;
                 // Record the identifier BEFORE the network side effect. A crashed or timed
                 // out upsert remains discoverable by an erasure/reconciliation sweep.

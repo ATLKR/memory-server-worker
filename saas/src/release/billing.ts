@@ -20,6 +20,10 @@ export class Billing {
         out[price] = { plan: str(p.plan, 64), monthlyUnits: integer(p.monthlyUnits, 1), storageBytes: integer(p.storageBytes, 1) };
     } return out; }
     configuration(): { available: boolean; prices: Record<string, Plan> } {
+        const policy = this.env;
+        if (policy.PAID_BILLING_ENABLED === 'false' || policy.GA_PROFILE === 'managed-ai-metered' ||
+            (policy.RELEASE_MODE === 'ga' && policy.PAID_BILLING_ENABLED !== 'true'))
+            return { available: false, prices: {} };
         let prices: Record<string, Plan>;
         try { prices = this.plans(); }
         catch { return { available: false, prices: {} }; }

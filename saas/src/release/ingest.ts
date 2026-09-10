@@ -2,6 +2,8 @@ import type { ReleaseEnv, Provenance } from './types.ts';
 import type { Job } from './jobs.ts';
 import { sqlNow } from '../sql-clock.ts';
 import { MemoryStore } from './memory.ts';
+import { PayloadStore } from './payloads.ts';
+import { reserveProvider } from './provider-budget.ts';
 import { authority, params, requireSpace, interactive, accessExpiry } from './authority.ts';
 import { batch, canonical, decrypt, digest, encrypt, exact, fail, id, integer, object, one, stmt, str, tokenHash } from './util.ts';
 import { deadline } from './search.ts';
@@ -33,7 +35,7 @@ export class Ingest {
     env: ReleaseEnv;
     clock: () => number;
     store: MemoryStore;
-    constructor(env: ReleaseEnv, clock: () => number = Date.now) { this.env = env; this.clock = clock; this.store = new MemoryStore(env.DB, clock); }
+    constructor(env: ReleaseEnv, clock: () => number = Date.now) { this.env = env; this.clock = clock; this.store = new MemoryStore(env.DB, clock, new PayloadStore(env, clock)); }
     async submit(token: string, spaceId: string, input: {
         messages: unknown;
     }, key: string) {
@@ -77,6 +79,7 @@ export class Ingest {
         if (!row)
             fail(403, 'ingest_authority_expired');
         const source = messages(await decrypt(this.env.PAYLOAD_KEY, row.ciphertext, job.id));
+        await reserveProvider(this.env, 'extraction');
         // Decryption yields; a revoked organization credential or reclaimed job
         // must be caught before sending the now-plaintext source to the provider.
         if (!await authorized(this.clock()))
@@ -167,12 +170,22 @@ export class Ingest {
         const candidates = JSON.parse(row.proposals ?? '[]') as Proposal[];
         if (indices.some(n => !candidates[n]))
             fail(400, 'invalid_selection');
-        const memoryIds = indices.map(() => crypto.randomUUID());
+        const selectedContent = indices.map(n => {
+            const p = candidates[n]!;
+            const provenance: Provenance = { originKind: 'agent', sourceEventId: ingestId, sourceMessageIds: [p.sourceMessageId], extractorVersion: 'llama33-evidence-v1' };
+            return { body: p.body, source: 'ingest:' + ingestId, provenance, kind: p.kind };
+        });
+        const prepared = this.store.payloads?.enabled && selectedContent.length ? await this.store.preparePayloads(token, spaceId, {
+            action: 'approve_ingest', cap: 'create', key, input: { ingestId, selected: indices }, memoryId: null, expectedRevision: null,
+            items: selectedContent.map(({ body, source, provenance }) => ({ body, source, provenance }))
+        }) : undefined;
+        const memoryIds = prepared ? prepared.items.map(item => item.memoryId) : indices.map(() => crypto.randomUUID());
         const committed = await this.store.commit(token, spaceId, 'approve_ingest', 'create', key, { ingestId, selected: indices }, null, null, indices.length, (op, credential, at) => [
             stmt(this.env.DB, `INSERT INTO release_ingest_approvals(operation_id,ingest_id,approval_hash,result_ids,created_at) SELECT id,?,?,?,${sqlNow('created_at')} FROM release_operations WHERE id=?`, [ingestId, hash, canonical(memoryIds), op]),
-            ...indices.map((n, i) => { const p = candidates[n]!; const provenance: Provenance = { originKind: 'agent', sourceEventId: ingestId, sourceMessageIds: [p.sourceMessageId], extractorVersion: 'llama33-evidence-v1' }; return stmt(this.env.DB, `INSERT INTO memories(id,space_id,body,source,revision,created_at,updated_at,actor_credential_id,kind,provenance) SELECT ?,space_id,?,?,1,created_at,created_at,?,?,? FROM release_operations WHERE id=?`, [memoryIds[i]!, p.body, 'ingest:' + ingestId, credential, p.kind, canonical(provenance), op]); }),
+            ...selectedContent.map((value, i) => prepared?.items[i] ? this.store.preparedCreate(op, prepared.items[i], value) :
+                stmt(this.env.DB, `INSERT INTO memories(id,space_id,body,source,revision,created_at,updated_at,actor_credential_id,kind,provenance) SELECT ?,space_id,?,?,1,created_at,created_at,?,?,? FROM release_operations WHERE id=?`, [memoryIds[i]!, value.body, value.source, credential, value.kind, canonical(value.provenance), op])),
             stmt(this.env.DB, `UPDATE release_ingests SET state='approved',ciphertext=NULL,proposals=NULL,approval_hash=?,result_ids=? WHERE id=? AND EXISTS(SELECT 1 FROM release_operations WHERE id=?)`, [hash, canonical(memoryIds), ingestId, op])
-        ]);
+        ], false, undefined, prepared);
         const done = await one<{
             resultIds: string;
         }>(this.env.DB, 'SELECT result_ids AS resultIds FROM release_ingests WHERE id=?', [ingestId]);

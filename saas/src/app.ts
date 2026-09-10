@@ -49,6 +49,7 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
   const memory = new MemoryService(db, clock);
   const memoryApi = createMemoryApi(db, clock);
   const auth = createAuthController(db, settings.auth, async (p, token) => {
+    await options.release?.beforeSignIn?.(p);
     const session = await workspace.signIn(p, token);
     await options.release?.signedIn(p, session, token !== undefined);
     return session;

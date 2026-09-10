@@ -1,5 +1,11 @@
 import type { Extension, ReleaseEnv, Value } from './types.ts';
 import { MemoryStore, type CreateInput } from './memory.ts';
+import { PayloadStore } from './payloads.ts';
+import { admitSignIn } from './enrollment.ts';
+import { PayloadMaintenance } from './payload-maintenance.ts';
+import { LegacyBackfill } from './payload-backfill.ts';
+import { evaluateReadiness } from './readiness.ts';
+import { inspectStorage } from './storage-readiness.ts';
 import { Search } from './search.ts';
 import { Jobs } from './jobs.ts';
 import { Ingest } from './ingest.ts';
@@ -38,7 +44,7 @@ function key(request: Request, input: Record<string, unknown>): string { const h
 function content(input: Record<string, unknown>): CreateInput { const { operationId, ...rest } = input; return rest as CreateInput; }
 /** Called only after original app.ts has authenticated the bearer/session. */
 export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Extension {
-    const clock = options.clock ?? Date.now, db = env.DB, store = new MemoryStore(db, clock), search = new Search(env, clock), ingest = new Ingest(env, clock), transfers = new Transfers(db, clock), admin = new Admin(env, clock), billing = new Billing(env, clock), jobs = new Jobs(env, clock);
+    const clock = options.clock ?? Date.now, db = env.DB, payloads = new PayloadStore(env, clock), store = new MemoryStore(db, clock, payloads), search = new Search(env, clock), ingest = new Ingest(env, clock), transfers = new Transfers(db, clock, payloads), admin = new Admin(env, clock), billing = new Billing(env, clock), jobs = new Jobs(env, clock);
     jobs.ingest = j => ingest.process(j);
     const settings = readSettings(env), origin = settings.origin;
     const guarded = async (run: () => Promise<Response | null>, scim = false): Promise<Response | null> => { try {
@@ -56,12 +62,14 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
     function originCheck(request: Request) { if (new URL(request.url).origin !== origin)
         fail(421, 'invalid_host'); if (request.headers.has('origin') && request.headers.get('origin') !== origin)
         fail(403, 'origin_denied'); }
-    async function ready(): Promise<Response> { const checks: Record<string, boolean> = {}; checks.schema = Boolean(await one(db, 'SELECT version FROM release_meta WHERE version=21')); checks.sso = Boolean(env.SSO_CLIENT_ID); checks.semantic = Boolean(env.AI && env.MEMORY_INDEX); checks.encryptedIngest = Boolean(env.PAYLOAD_KEY && env.AI); checks.mail = Boolean(env.EMAIL && env.MAIL_FROM); checks.deprovisioning = Boolean(env.IDENTITY_WEBHOOK_SECRET); checks.billing = billing.configuration().available; const heartbeat = await one<{
-        at: number;
-    }>(db, "SELECT last_success_at AS at FROM release_heartbeats WHERE name='maintenance'"); checks.maintenance = Boolean(heartbeat && clock() >= heartbeat.at && clock() - heartbeat.at < 900000); checks.backgroundJobs = env.BACKGROUND_JOBS_ENABLED === 'true'; checks.operatorAcceptance = env.RELEASE_MODE === 'ga' && Boolean(env.LIVE_ACCEPTANCE_ID); const ready = Object.values(checks).every(Boolean); return json({ ready, stage: ready ? 'operator-enabled-ga' : 'release-candidate', checks, notice: 'Readiness is configuration/heartbeat checking, not independent security or production certification.' }, ready ? 200 : 503); }
+    async function ready(): Promise<Response> {
+        const result = await evaluateReadiness(env, { centralSchemaVersion: 23, hotSchemaVersion: 1, inspectStorage: () => inspectStorage(env), clock });
+        return json(result, result.ready ? 200 : 503);
+    }
     const identity = () => { if (!options.identity)
         fail(503, 'identity_adapter_missing'); return options.identity; };
     return {
+        beforeSignIn: principal => admitSignIn(env, principal),
         workspaceSpaceAccess: (hash, at) => ({ read: authority('read'), readValues: params(hash, at, 'read'),
             write: authority('update'), writeValues: params(hash, at, 'update'),
             readExpires: accessExpiry('read'), writeExpires: accessExpiry('update'),
@@ -84,8 +92,10 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                         return ready();
                     if (url.pathname === '/webhooks/identity' && requireMethod(request, 'POST'))
                         return admin.identityWebhook(request);
-                    if (url.pathname === '/webhooks/stripe' && requireMethod(request, 'POST'))
+                    if (url.pathname === '/webhooks/stripe' && requireMethod(request, 'POST')) {
+                        if (env.PAID_BILLING_ENABLED === 'false') return json({ error: 'billing_unavailable' }, 503);
                         return billing.webhook(request);
+                    }
                     const scim = /^\/scim\/v2\/([^/]+)\/Users(?:\/([^/]+))?$/.exec(url.pathname);
                     if (scim)
                         return admin.scim(request, pathIdentifier(scim[1]!), scim[2] === undefined ? undefined : pathIdentifier(scim[2]!));
@@ -340,6 +350,15 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
             const hash = await tokenHash(session.token), at = clock();
             await db.prepare(`INSERT INTO release_credential_policies(credential_id,capabilities,space_ids,verified_oauth) SELECT c.id,?,NULL,1 FROM active_credentials c WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND c.kind='session' AND c.id LIKE 'oauth:%' ON CONFLICT(credential_id) DO UPDATE SET capabilities=excluded.capabilities,verified_oauth=1 WHERE release_credential_policies.verified_oauth=0`).bind(canonical(caps), hash, at).run();
         },
-        async scheduled() { await jobs.maintain(); if (env.BACKGROUND_JOBS_ENABLED === 'true') { await jobs.drain(5); await billing.reconcile(); await billing.drain(3); } await db.prepare("INSERT INTO release_heartbeats(name,last_success_at) VALUES('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at").bind(clock()).run(); }
+        async scheduled() {
+            await jobs.maintain();
+            await new PayloadMaintenance(env, payloads, clock).run();
+            await new LegacyBackfill(env, store, clock).run();
+            if (env.BACKGROUND_JOBS_ENABLED === 'true') {
+                await jobs.drain(5);
+                if (env.PAID_BILLING_ENABLED !== 'false') { await billing.reconcile(); await billing.drain(3); }
+            }
+            await db.prepare("INSERT INTO release_heartbeats(name,last_success_at) VALUES('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at").bind(clock()).run();
+        }
     };
 }

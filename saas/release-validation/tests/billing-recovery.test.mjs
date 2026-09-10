@@ -155,6 +155,10 @@ test('migration eight preserves populated checkout history and freezes attempted
   db.raw.exec(readFileSync(new URL('../../migrations/0020_domain-verification-schema.sql', import.meta.url), 'utf8'));
   assert.equal(await readiness(), false);
   db.raw.exec(readFileSync(new URL('../../migrations/0021_domain-retention-schema.sql', import.meta.url), 'utf8'));
+  assert.equal(await readiness(), false);
+  db.raw.exec(readFileSync(new URL('../../migrations/0022_payload-schema.sql', import.meta.url), 'utf8'));
+  assert.equal(await readiness(), false);
+  db.raw.exec(readFileSync(new URL('../../migrations/0023_operational-schema.sql', import.meta.url), 'utf8'));
   assert.equal(await readiness(), true);
   for (const sql of ["UPDATE release_checkout_requests SET checkout_attempted=0 WHERE id='unknown'",
     "UPDATE release_checkout_requests SET expires_at=expires_at+1000 WHERE id='unknown'",

@@ -38,7 +38,7 @@ for(const boundary of ['before-embedding','before-index'])for(const change of ['
  const {db,token}=await fixture();const sent=[];
  try {
   const mutate=()=>db.raw.exec(change==='credential'?"UPDATE credentials SET revoked_at=1 WHERE id='session:alice'":change==='account'?"UPDATE accounts SET disabled_at=1 WHERE id='alice'":"UPDATE organizations SET disabled_at=1 WHERE id='org'");
-  if(boundary==='before-embedding')afterRows(db,'SELECT r.id,r.revision FROM release_fts',mutate);
+  if(boundary==='before-embedding')afterRows(db,'/* lexical-candidates */',mutate);
   const env={DB:db,AI:{async run(){sent.push('embedding');if(boundary==='before-index')mutate();return{data:[Array(1024).fill(.1)]};}},MEMORY_INDEX:{async query(){sent.push('index');return{matches:[]};}}};
   await assert.rejects(()=>new Search(env,()=>at).query(token,change==='organization'?'so':'s1','private query',10,'search'),error=>error.status===403);
   assert.deepEqual(sent,boundary==='before-embedding'?[]:['embedding']);

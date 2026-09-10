@@ -23,7 +23,7 @@ const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 try {
   const db = await mf.getD1Database('DB');
   const migrations = readdirSync(new URL('../migrations/', import.meta.url)).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
-  assert.equal(migrations.length, 21);
+  assert.equal(migrations.length, 23);
   for (const name of migrations) await applySql(parser, db, readFileSync(new URL('../migrations/' + name, import.meta.url), 'utf8'));
   const workspace = new WorkspaceService(db);
   async function setup(name, organization = false) {

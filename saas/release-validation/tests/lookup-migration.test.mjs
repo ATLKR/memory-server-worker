@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {DB,fixture,at} from './db.mjs';
 import {MemoryStore} from '../../src/release/memory.ts';
+import {MemoryService} from '../../src/memory.ts';
 import {digest} from '../../src/release/util.ts';
 import {WorkspaceService} from '../../src/workspace.ts';
 
@@ -12,10 +13,22 @@ test('lookup migration backfills canonical FTS rows and preserves retained data 
   db.raw.exec("INSERT INTO accounts(id) VALUES('alice');");
   db.raw.prepare("INSERT INTO credentials(id,account_id,kind,token_digest,expires_at,reauthenticated_at) VALUES('session:alice','alice','session',?,?,?)").run(await digest(token),at+900000,at);
   db.raw.prepare("INSERT INTO spaces VALUES('s1','Personal','alice',NULL,'managed',?,'session:alice')").run(at);
-  const store=new MemoryStore(db,()=>at),live=await store.create(token,'s1',{body:'original word',source:'retained source'},'live');
+  // Seed and exercise this historical schema through its inline SQL contract;
+  // the current release reader intentionally requires the current schema.
+  const store=new MemoryService(db,()=>at);
+  store.restore=async(_token,_space,memoryId,revision)=>db.raw.prepare('UPDATE memories SET deleted_at=NULL,revision=revision+1 WHERE id=? AND revision=?').run(memoryId,revision);
+  store.erase=async(_token,_space,memoryId)=>{
+   db.raw.prepare("INSERT INTO release_erasure_permits VALUES(?,'session:alice',?)").run(memoryId,at);
+   db.raw.prepare('DELETE FROM memory_versions WHERE memory_id=?').run(memoryId);
+   db.raw.prepare("UPDATE memories SET body='[erased]',source=NULL,provenance='{}',event_time=NULL,erased_at=?,revision=revision+1 WHERE id=?").run(at,memoryId);
+   db.raw.prepare('INSERT INTO release_erasure_ledger(memory_id,space_id,erased_at) SELECT id,space_id,erased_at FROM memories WHERE id=?').run(memoryId);
+   db.raw.prepare('DELETE FROM release_erasure_permits WHERE memory_id=?').run(memoryId);
+  };
+  const live=await store.create(token,'s1',{body:'original word',source:'retained source'},'live');
   await store.update(token,'s1',live.id,{body:'current word',expectedRevision:1},'update');
   const trash=await store.create(token,'s1',{body:'trashed word',source:'trash source'},'trash');await store.remove(token,'s1',trash.id,1,'trash-delete');
   const erased=await store.create(token,'s1',{body:'erased word',source:'erased source'},'erased');await store.remove(token,'s1',erased.id,1,'erased-delete');await store.erase(token,'s1',erased.id,2,erased.id,'erase');
+  db.raw.prepare("INSERT INTO release_operations(id,account_id,space_id,client_key,request_hash,action,memory_id,actor_credential_id,created_at,period,units) VALUES('historic-usage','alice','s1','historic-usage','fixture','search',NULL,'session:alice',?,'2026-09',1)").run(at);
   const retained=['memories','memory_versions','memory_audit_events','release_jobs','credentials','memberships','release_pools','release_usage_events','release_erasure_ledger'];
   const snapshots=new Map(retained.map(table=>[table,db.raw.prepare('SELECT * FROM '+table+' ORDER BY rowid').all()]));
   const searchBefore=db.raw.prepare('SELECT memory_id,space_id,body FROM release_fts ORDER BY memory_id').all();

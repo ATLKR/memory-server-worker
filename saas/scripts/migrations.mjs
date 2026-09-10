@@ -13,7 +13,7 @@ const deployedHashes = [
   '5e8412358d9096244720d21e5ae12f2c12c10a624dd2c5622c5f79b2fea15dac',
   'f31ebfb8bd1e811e9c2582cc1e08433444d99b22e61775d66469f94dbbb1fec9',
 ];
-const sources = ['schema.sql', 'memory-schema.sql', 'product-schema.sql', 'auth-schema.sql', 'hierarchy-schema.sql', 'release-schema.sql', 'maintenance-schema.sql', 'checkout-schema.sql', 'job-progress-schema.sql', 'protocol-schema.sql', 'pagination-schema.sql', 'lookup-schema.sql', 'key-lookup-schema.sql', 'tenant-queue-schema.sql', 'workspace-lookup-schema.sql', 'retrieval-progress-schema.sql', 'vector-reconciliation-schema.sql', 'outbound-share-schema.sql', 'execution-time-schema.sql', 'domain-verification-schema.sql', 'domain-retention-schema.sql'];
+const sources = ['schema.sql', 'memory-schema.sql', 'product-schema.sql', 'auth-schema.sql', 'hierarchy-schema.sql', 'release-schema.sql', 'maintenance-schema.sql', 'checkout-schema.sql', 'job-progress-schema.sql', 'protocol-schema.sql', 'pagination-schema.sql', 'lookup-schema.sql', 'key-lookup-schema.sql', 'tenant-queue-schema.sql', 'workspace-lookup-schema.sql', 'retrieval-progress-schema.sql', 'vector-reconciliation-schema.sql', 'outbound-share-schema.sql', 'execution-time-schema.sql', 'domain-verification-schema.sql', 'domain-retention-schema.sql', 'payload-schema.sql', 'operational-schema.sql'];
 const out = new URL('../migrations/', import.meta.url);
 await mkdir(out, { recursive: true });
 for (const [index, source] of sources.entries()) {

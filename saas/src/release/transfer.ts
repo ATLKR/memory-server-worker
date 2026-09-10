@@ -1,7 +1,8 @@
 import type { Database, Memory } from './types.ts';
 import { SQL_NOW_MS, sqlNow } from '../sql-clock.ts';
 import { authority, params, requireSpace, interactive, recentSql, INTERACTIVE, shareGrantorAuthority, accessExpiry } from './authority.ts';
-import { memoryRow } from './memory.ts';
+import { memoryRow, MemoryStore, type MemoryRow } from './memory.ts';
+import type { PayloadBackend } from './payload-intents.ts';
 import { decodeCursor, encodeCursor, fail, id, integer, one, rows, str, tokenHash } from './util.ts';
 interface OutboundShare {
     id: string;
@@ -15,7 +16,8 @@ interface OutboundShare {
 export class Transfers {
     db: Database;
     clock: () => number;
-    constructor(db: Database, clock: () => number = Date.now) { this.db = db; this.clock = clock; }
+    store: MemoryStore;
+    constructor(db: Database, clock: () => number = Date.now, payloads?: PayloadBackend) { this.db = db; this.clock = clock; this.store = new MemoryStore(db, clock, payloads); }
     async startExport(token: string, spaceId: string): Promise<{
         id: string;
         expiresAt: number;
@@ -61,18 +63,21 @@ export class Transfers {
                 WHERE space_id=? AND memory_id>? AND id<=? GROUP BY memory_id ORDER BY memory_id LIMIT ?`,
             [spaceId, after, session.watermark, limit + 1]);
         const page = targets.slice(0, limit), last = page.at(-1), fresh = this.clock();
-        const all = page.length ? await rows<Omit<Memory, 'provenance'> & {
-            provenance: string;
-        }>(this.db, `WITH target AS MATERIALIZED (
+        const all = page.length ? await rows<MemoryRow>(this.db, `WITH target AS MATERIALIZED (
     SELECT json_extract(value,'$.memoryId') AS memory_id,json_extract(value,'$.revision') AS revision FROM json_each(?)
    ), versions AS (
-    SELECT r.id,r.space_id,r.body,r.source,r.revision,r.created_at,r.updated_at,r.deleted_at,r.event_time,r.kind,r.provenance,r.supersedes_id
+    SELECT r.id,r.space_id,r.body,r.source,r.revision,r.created_at,r.updated_at,r.deleted_at,r.event_time,r.kind,r.provenance,r.supersedes_id,
+        r.payload_id,r.payload_shard_id,r.payload_object_key,r.payload_sha256,r.payload_bytes,r.logical_bytes
       FROM target t JOIN memories r ON r.id=t.memory_id AND r.revision=t.revision
-    UNION ALL SELECT v.memory_id,v.space_id,v.body,v.source,v.revision,v.created_at,v.updated_at,v.deleted_at,v.event_time,v.kind,v.provenance,v.supersedes_id
+    UNION ALL SELECT v.memory_id,v.space_id,v.body,v.source,v.revision,v.created_at,v.updated_at,v.deleted_at,v.event_time,v.kind,v.provenance,v.supersedes_id,
+        v.payload_id,v.payload_shard_id,v.payload_object_key,v.payload_sha256,v.payload_bytes,v.logical_bytes
       FROM target t JOIN memory_versions v ON v.memory_id=t.memory_id AND v.revision=t.revision
-   ) SELECT v.id,v.space_id AS spaceId,v.body,v.source,v.revision,v.created_at AS createdAt,v.updated_at AS updatedAt,v.deleted_at AS deletedAt,v.event_time AS eventTime,v.kind,v.provenance,v.supersedes_id AS supersedesMemoryId,NULL AS erasedAt
+   ) SELECT v.id,v.space_id AS spaceId,v.body,v.source,v.revision,v.created_at AS createdAt,v.updated_at AS updatedAt,v.deleted_at AS deletedAt,v.event_time AS eventTime,v.kind,v.provenance,v.supersedes_id AS supersedesMemoryId,NULL AS erasedAt,
+        v.payload_id AS payloadId,v.payload_shard_id AS payloadShardId,v.payload_object_key AS payloadObjectKey,
+        v.payload_sha256 AS payloadSha256,v.payload_bytes AS payloadBytes,v.logical_bytes AS logicalBytes
    FROM versions v JOIN memories current ON current.id=v.id AND current.erased_at IS NULL
    JOIN spaces s ON s.id=v.space_id CROSS JOIN active_credentials c WHERE s.id=? AND ${authority('export')} ORDER BY v.id`, [JSON.stringify(page), spaceId, ...params(hash, fresh, 'export')]) : [];
+        const hydrated = await this.store.hydrateRows(all);
         // Session validity and current authority share the final SQL snapshot.
         // Compare expiry facts after its await too, without opening another read
         // boundary after the authorization check.
@@ -100,7 +105,7 @@ export class Transfers {
         if (current.exportExpiresAt === null || current.exportExpiresAt <= returnedAt)
             fail(404, 'export_not_found');
         const allowed = new Set(JSON.parse(current.memoryIds) as string[]);
-        return { format: 'memory-export-v1', results: all.filter(row => allowed.has(row.id)).map(memoryRow), nextCursor: targets.length > limit && last ? encodeCursor(exportId, [last.memoryId]) : null, watermark: session.watermark };
+        return { format: 'memory-export-v1', results: hydrated.filter(row => allowed.has(row.id)).map(memoryRow), nextCursor: targets.length > limit && last ? encodeCursor(exportId, [last.memoryId]) : null, watermark: session.watermark };
     }
     async share(token: string, spaceId: string, email: string, days = 7): Promise<{
         id: string;

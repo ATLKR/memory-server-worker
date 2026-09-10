@@ -1,7 +1,10 @@
 import type { Database, Memory, ReleaseEnv } from './types.ts';
 import { sqlNow } from '../sql-clock.ts';
 import { authority, params, requireSpace, interactive, recentSql } from './authority.ts';
-import { columns, memoryRow, MemoryStore } from './memory.ts';
+import { columns, memoryRow, MemoryStore, type MemoryRow } from './memory.ts';
+import { PayloadStore } from './payloads.ts';
+import { compareLexical, shardedLexical, type LexicalHead } from './payload-search.ts';
+import { reserveProvider } from './provider-budget.ts';
 import { digest, fail, id, integer, object, rows, str, tokenHash, stmt, batch } from './util.ts';
 import { unicode61Token } from './unicode61.ts';
 export const EMBEDDING_MODEL = '@cf/baai/bge-m3';
@@ -30,9 +33,12 @@ finally {
     if (timer)
         clearTimeout(timer);
 } }
-export async function embed(env: ReleaseEnv, text: string): Promise<number[]> {
+export async function embed(env: ReleaseEnv, text: string, beforeSend?: () => Promise<void>): Promise<number[]> {
     if (!env.AI)
         fail(503, 'semantic_not_configured');
+    if (new TextEncoder().encode(text).length > 8000) fail(413, 'embedding_input_too_large');
+    await reserveProvider(env, 'embedding');
+    if (beforeSend) await beforeSend();
     const out = object(await deadline(env.AI!.run(EMBEDDING_MODEL, { text: [text] })));
     const data = out.data;
     if (!Array.isArray(data) || !Array.isArray(data[0]) || data[0].length !== 1024 || data[0].some(x => typeof x !== 'number' || !Number.isFinite(x)))
@@ -43,7 +49,8 @@ export class Search {
     env: ReleaseEnv;
     clock: () => number;
     store: MemoryStore;
-    constructor(env: ReleaseEnv, clock: () => number = Date.now) { this.env = env; this.clock = clock; this.store = new MemoryStore(env.DB, clock); }
+    payloads: PayloadStore;
+    constructor(env: ReleaseEnv, clock: () => number = Date.now) { this.env = env; this.clock = clock; this.payloads = new PayloadStore(env, clock); this.store = new MemoryStore(env.DB, clock, this.payloads); }
     async query(token: string, spaceId: string, query: string, limit = 10, operationId = crypto.randomUUID()): Promise<{
         results: (Memory & {
             snippet: string;
@@ -60,18 +67,20 @@ export class Search {
         const operation = await this.store.commit(token, spaceId, 'search', 'read', operationId, { query, limit }, null, null, 1, () => []);
         const at = this.clock(), tenant = 't' + [...new TextEncoder().encode(spaceId)].map(value => value.toString(16).padStart(2, '0')).join('');
         const candidateLimit = Math.max(40, limit);
-        let lexical: {
-            id: string;
-            revision: number;
-        }[] = [];
+        let lexical: LexicalHead[] = [];
         if (expression)
-            lexical = await rows(db, `SELECT r.id,r.revision FROM release_fts JOIN memories r ON r.id=release_fts.memory_id JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
+            lexical = await rows(db, `/* lexical-candidates */ SELECT r.id,r.revision,
+                (length(CAST(highlight(release_fts,2,'[',']') AS BLOB))-length(CAST(release_fts.body AS BLOB)))*1.0
+                    /(length(CAST(release_fts.body AS BLOB))+80) AS score
+                FROM release_fts JOIN memories r ON r.id=release_fts.memory_id JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
     WHERE release_fts MATCH ? AND s.id=? AND r.deleted_at IS NULL AND r.erased_at IS NULL
+    AND r.payload_id IS NULL
     AND NOT EXISTS(SELECT 1 FROM memories successor WHERE successor.supersedes_id=r.id)
     AND ${authority('read')}
-    ORDER BY (length(CAST(highlight(release_fts,2,'[',']') AS BLOB))-length(CAST(release_fts.body AS BLOB)))*1.0
-        /(length(CAST(release_fts.body AS BLOB))+80) DESC,r.id LIMIT ?`,
+    ORDER BY score DESC,r.id LIMIT ?`,
                 [`tenant : "${tenant}" AND body : (${expression})`, spaceId, ...params(hash, at, 'read'), candidateLimit]);
+        lexical = [...lexical, ...await shardedLexical(db, this.payloads, hash, spaceId, expression, candidateLimit, this.clock)]
+            .sort(compareLexical).slice(0, candidateLimit);
         // Retain each revision until D1 identifies the current one. A stale
         // higher-ranked chunk must not hide a later current-revision match.
         const candidates = new Map<string, Map<number, number>>();
@@ -86,7 +95,7 @@ export class Search {
             try {
                 const namespace = await digest(spaceId);
                 await requireSpace(db, token, spaceId, 'read', this.clock);
-                const vector = await embed(this.env, query);
+                const vector = await embed(this.env, query, async () => { await requireSpace(db, token, spaceId, 'read', this.clock); });
                 await requireSpace(db, token, spaceId, 'read', this.clock);
                 const result = await deadline(this.env.MEMORY_INDEX.query(vector, { namespace, topK: candidateLimit, returnMetadata: 'all' }));
                 // An index is only a candidate source. Neither metadata text nor authority is trusted.
@@ -115,13 +124,12 @@ export class Search {
         // current authorization predicates under D1's SQL parameter limit.
         const ids = [...candidates.keys()];
         const fresh = this.clock();
-        const final = ids.length ? await rows<Omit<Memory, 'provenance'> & {
-            provenance: string;
-        }>(db, `SELECT ${columns} FROM memories r JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
+        const final = ids.length ? await rows<MemoryRow>(db, `SELECT ${columns} FROM memories r JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
    WHERE s.id=? AND r.id IN (SELECT value FROM json_each(?)) AND r.deleted_at IS NULL AND r.erased_at IS NULL
    AND NOT EXISTS(SELECT 1 FROM memories successor WHERE successor.supersedes_id=r.id) AND ${authority('read')}`, [spaceId, JSON.stringify(ids), ...params(hash, fresh, 'read')]) : [];
-        const allowed = await this.store.confirmRead(hash, spaceId, final, { deleted: false, currentFact: true });
-        const results = final.filter(r => allowed.has(r.id) && candidates.get(r.id)?.has(r.revision)).map(r => ({ ...memoryRow(r), snippet: Array.from(r.body).slice(0, 500).join(''), score: candidates.get(r.id)!.get(r.revision)! })).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, limit);
+        const hydrated = await this.store.hydrateRows(final);
+        const allowed = await this.store.confirmRead(hash, spaceId, hydrated, { deleted: false, currentFact: true });
+        const results = hydrated.filter(r => allowed.has(r.id) && candidates.get(r.id)?.has(r.revision)).map(r => ({ ...memoryRow(r), snippet: Array.from(r.body).slice(0, 500).join(''), score: candidates.get(r.id)!.get(r.revision)! })).sort(compareLexical).slice(0, limit);
         return { results, mode, degradedReason };
     }
     async rebuild(token: string, spaceId: string): Promise<void> {
