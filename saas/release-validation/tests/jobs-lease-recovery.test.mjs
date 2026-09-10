@@ -8,7 +8,7 @@ function enqueue(db,id,kind='upsert') {
  if(kind==='ingest')db.raw.prepare("INSERT INTO release_ingests(id,account_id,space_id,actor_credential_id,ciphertext,expires_at,created_at) VALUES(?,'alice','s1','session:alice','encrypted',?,?)").run(id,at+86400000,at);
 }
 function worker(db,clock) {
- const jobs=new Jobs({DB:db,AI:{},MEMORY_INDEX:{},PAYLOAD_KEY:'configured'},clock);
+ const jobs=new Jobs({DB:db,AI:{},MEMORY_INDEX:{},PAYLOAD_KEY:Buffer.alloc(32,7).toString('base64url')},clock);
  jobs.ingest=async()=>{};
  return jobs;
 }

@@ -21,7 +21,7 @@ export function readSettings(env: Variables): Settings {
   const origin = env.PUBLIC_ORIGIN ?? PUBLIC_ORIGIN;
   const url = new URL(origin);
   if (url.origin !== origin || url.protocol !== 'https:' || url.username || url.password) throw new Error('Invalid public origin');
-  const supportEmail = text(env.PRODUCT_SUPPORT_EMAIL, 'support@allenlabs.org', 254);
+  const supportEmail = text(env.PRODUCT_SUPPORT_EMAIL, 'allenlim@allenlabs.org', 254);
   if (supportEmail.trim() !== supportEmail) throw new Error('Invalid support email');
   // Validate the mailbox without replacing its configured display spelling.
   try { canonicalEmail(supportEmail); } catch { throw new Error('Invalid support email'); }

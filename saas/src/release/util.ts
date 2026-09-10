@@ -232,23 +232,36 @@ export async function hmac(secret: string, value: string): Promise<string> {
 }
 export function equal(a: string, b: string): boolean { let d = a.length ^ b.length; for (let i = 0; i < Math.max(a.length, b.length); i++)
     d |= (a.charCodeAt(i) || 0) ^ (b.charCodeAt(i) || 0); return d === 0; }
+/** Public identifier for a random encryption key; never the key itself. */
+export async function payloadKeyId(secret: string): Promise<string> {
+    const bytes = unbase64url(secret);
+    if (bytes.length !== 32)
+        fail(503, 'payload_key_invalid');
+    return digest('memory-payload-key-v2\0' + base64url(bytes));
+}
 export async function encrypt(secret: string, value: unknown, aad: string): Promise<string> {
     const bytes = unbase64url(secret);
     if (bytes.length !== 32)
         fail(503, 'payload_key_invalid');
     const key = await crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['encrypt']);
     const iv = crypto.getRandomValues(new Uint8Array(12));
-    const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc.encode(aad) }, key, enc.encode(canonical(value))));
-    return base64url(iv) + '.' + base64url(ciphertext);
+    const keyId = await payloadKeyId(secret);
+    const ciphertext = new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, additionalData: enc.encode(canonical(['memory-payload-v2', keyId, aad])) }, key, enc.encode(canonical(value))));
+    return 'v2.' + keyId + '.' + base64url(iv) + '.' + base64url(ciphertext);
 }
 export async function decrypt(secret: string, value: string, aad: string): Promise<unknown> {
-    const [iv, data, ...rest] = value.split('.');
+    const parts = value.split('.');
+    const versioned = parts[0] === 'v2';
+    if (versioned && (parts.length !== 4 || !/^[a-f0-9]{64}$/.test(parts[1] ?? '') || parts[1] !== await payloadKeyId(secret)))
+        fail(500, 'invalid_ciphertext');
+    const [iv, data, ...rest] = versioned ? parts.slice(2) : parts;
     if (!iv || !data || rest.length)
         fail(500, 'invalid_ciphertext');
     const bytes = unbase64url(secret);
     if (bytes.length !== 32)
         fail(503, 'payload_key_invalid');
     const key = await crypto.subtle.importKey('raw', bytes, 'AES-GCM', false, ['decrypt']);
-    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unbase64url(iv), additionalData: enc.encode(aad) }, key, unbase64url(data));
+    const additionalData = versioned ? canonical(['memory-payload-v2', parts[1], aad]) : aad;
+    const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: unbase64url(iv), additionalData: enc.encode(additionalData) }, key, unbase64url(data));
     return JSON.parse(new TextDecoder().decode(plain));
 }

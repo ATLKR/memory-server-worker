@@ -1,6 +1,6 @@
 import type { ReleaseEnv, Memory, Value } from './types.ts';
 import { sqlNow } from '../sql-clock.ts';
-import { batch, digest, one, rows, stmt } from './util.ts';
+import { batch, digest, one, payloadKeyId, rows, stmt } from './util.ts';
 import { deadline, embed } from './search.ts';
 import { columns, erasureStatements, MemoryStore, type MemoryRow } from './memory.ts';
 import { PayloadStore } from './payloads.ts';
@@ -30,7 +30,7 @@ export class Jobs {
     store: MemoryStore;
     constructor(env: ReleaseEnv, clock: () => number = Date.now) { this.env = env; this.clock = clock; this.store = new MemoryStore(env.DB, clock, new PayloadStore(env, clock)); }
     async claim(): Promise<Job | null> {
-        const at = this.clock(), token = crypto.randomUUID();
+        const at = this.clock();
         // Retire a bounded indexed page of exhausted leases. Terminal ingests
         // retain done precedence, without filtering an entire backlog first.
         await this.env.DB.prepare(`UPDATE release_jobs
@@ -51,6 +51,11 @@ export class Jobs {
         // Scalar IDs in one JSON array avoid workerd's compound-SELECT limit.
         // Fairness follows pending availability or an abandoned lease's expiry;
         // only these at-most-eight candidates participate in the final sort.
+        const canIngest = Boolean(this.env.AI && this.env.PAYLOAD_KEY && this.ingest);
+        // The durable rotation guard must reject an old worker's claim before
+        // its undecryptable attempt consumes the new submission's retry budget.
+        // Other job kinds keep treating the entire token as an opaque lease.
+        const token = (canIngest ? `v2.${await payloadKeyId(this.env.PAYLOAD_KEY!)}.` : '') + crypto.randomUUID();
         const branches: string[] = [], values: Value[] = [token, at];
         const include = (kind: 'upsert' | 'delete' | 'ingest', cleanupOnly: number) => {
             branches.push(`(SELECT id FROM release_jobs INDEXED BY release_jobs_pending_claim
@@ -67,7 +72,7 @@ export class Jobs {
             include('upsert', 1);
             include('delete', 0);
         }
-        if (this.env.AI && this.env.PAYLOAD_KEY && this.ingest)
+        if (canIngest)
             include('ingest', 0);
         if (!branches.length)
             return null;

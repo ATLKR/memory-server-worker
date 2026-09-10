@@ -9,6 +9,7 @@ import type { Settings } from './config.ts';
 import { SERVICE_VERSION } from './config.ts';
 import { appScript, renderPage, renderStyles } from './ui.ts';
 import { handleMcp } from './mcp.ts';
+import { BUILD_FINGERPRINT, BUILD_REVISION } from './release/build-info.ts';
 
 export interface ApplicationOptions {
   release?: import('./release/types.ts').Extension;
@@ -65,7 +66,8 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
       if (url.pathname === '/') return new Response(options.release ? renderPage(settings.brand, true, settings.origin).replace(/<body([^>]*)>/, '<body$1><p><a href="/manage">서비스 관리</a></p>') : renderPage(settings.brand, false, settings.origin), { headers: { 'content-type': 'text/html; charset=utf-8' } });
       if (url.pathname === '/assets/app.js') return new Response(appScript, { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
       if (url.pathname === '/assets/app.css') return new Response(renderStyles(settings.brand), { headers: { 'content-type': 'text/css; charset=utf-8' } });
-      if (url.pathname === '/health') return json({ status: 'ok', version: SERVICE_VERSION, mode: 'managed' });
+      if (url.pathname === '/health') return json({ status: 'ok', version: SERVICE_VERSION, mode: 'managed',
+        build: { sourceRevision: BUILD_REVISION, resourceFingerprint: BUILD_FINGERPRINT, payloadFormat: 2 } });
       if (url.pathname === '/.well-known/oauth-protected-resource' || url.pathname === '/.well-known/oauth-protected-resource/mcp') return json({
         resource: settings.origin, resource_name: settings.brand.name,
         authorization_servers: [settings.auth.issuer],

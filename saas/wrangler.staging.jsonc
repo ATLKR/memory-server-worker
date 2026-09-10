@@ -25,7 +25,7 @@
     "PRODUCT_NAME": "Memory by Allen Labs · Staging",
     "PRODUCT_SHORT_NAME": "Memory Staging",
     "PRODUCT_DESCRIPTION": "Memory 서비스의 격리된 출시 검증 환경",
-    "PRODUCT_SUPPORT_EMAIL": "support@allenlabs.org",
+    "PRODUCT_SUPPORT_EMAIL": "allenlim@allenlabs.org",
     "PRODUCT_ACCENT_COLOR": "#276747"
   },
   "d1_databases": [
