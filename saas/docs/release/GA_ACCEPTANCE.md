@@ -68,10 +68,18 @@ Get-Content -Raw -LiteralPath "$acceptanceDir\operator-private.pem" | node --exp
 
 예시 날짜를 그대로 재사용하지 않는다. 만료는 현재 시각과 **가장 오래된 gate 관찰 시각으로부터 7일 이내**여야 한다. 환경변수 `MEMORY_ACCEPTANCE_PRIVATE_KEY`도 지원하지만 stdin과 동시에 사용하지 않는다. 도구는 실제 증거 해시·모든 check 결과·대상 일치·서명 키를 검증하며, 기존 output을 덮어쓰지 않는다. 서명된 JWS와 공개 키를 해당 배포에 설치하는 단계는 별도 운영 변경이다. 이 도구는 네트워크 시험, secret 설치, 배포 또는 GA 승격을 수행하지 않는다.
 
-`LIVE_ACCEPTANCE_ID` 문자열만으로는 승인되지 않는다. `/ready`는 번들의 source/리소스 지문과 일치하는 서명, current schema·HOT/R2 검사·heartbeat·필수 binding·초대 설정·AI 예산을 확인한다. 같은 source/config에서 `pilot`→`ga`만 바꾸는 승격은 서명을 무효화하지 않는다. 같은 source에서 표시용 `PRODUCT_NAME`, `PRODUCT_SHORT_NAME`, `PRODUCT_DESCRIPTION`, `PRODUCT_ACCENT_COLOR`만 바꾸어도 리소스 지문은 유지된다. 지원 연락처·인증 client·origin·예산·샤드는 계속 지문에 포함되며, source 또는 주요 리소스·정책 변경은 새 검증과 서명이 필요하다. 공개 응답에는 안전한 기록 ID와 boolean만 나오며 evidence나 내부 리소스 지문은 나오지 않는다.
+`LIVE_ACCEPTANCE_ID` 문자열만으로는 승인되지 않는다. `/ready`는 번들의 source/리소스 지문과 일치하는 서명, current schema·HOT/R2 검사·heartbeat·필수 binding·초대 설정·AI 예산을 확인한다. 같은 source/config에서 `pilot`→`ga`만 바꾸는 승격은 서명을 무효화하지 않는다. 같은 source에서 표시용 `PRODUCT_NAME`, `PRODUCT_SHORT_NAME`, `PRODUCT_DESCRIPTION`, `PRODUCT_ACCENT_COLOR`만 바꾸어도 리소스 지문은 유지된다. 지원 연락처·인증 client·origin·예산·샤드는 계속 지문에 포함되며, source 또는 주요 리소스·정책 변경은 새 검증과 서명이 필요하다. `/ready`에는 안전한 기록 ID와 boolean만 나오며 비공개 evidence는 나오지 않는다. `/health`의 `build`는 실제 번들에 고정된 `sourceRevision`, `resourceFingerprint` 해시와 `payloadFormat`을 반환한다. 이는 배포 대상 확인용이며 원문 리소스 ID나 비밀 값을 포함하지 않는다. 관리 화면에서 바뀐 실제 binding은 별도로 대조해야 한다.
 
 ## 운영상 남는 범위
 
 Worker binding에는 실제 CF UUID를 조회하는 인터페이스가 없다. 수락 담당자는 서명 전에 CF 배포 설정·DB/Vectorize/R2/Analytics ID·R2 공개 설정을 독립적으로 대조해야 한다. 이후 관리 UI에서 설정을 바꾸면 기존 번들만으로 모든 외부 변경을 즉시 감지할 수 없다. 짧은 증거 만료와 변경 절차를 함께 적용한다.
 
 자동 live 시나리오 실행기·CF binding 대조 수집기·전체 외부 백업/restore orchestrator·실제 pager 연결은 이 서명 도구가 제공하지 않는다. [운영 절차](OPERATIONS.ko.md)에 따라 실행·증거 수집 책임을 정한다. 서비스 수준, RPO/RTO, 지원 연락처, 보존·탈퇴/전체 개인정보 삭제 방식은 실제 운영 결정과 이행 증거가 필요하다. 서명은 운영자 수락 기록이며 제3자 인증이나 법규 준수 보증이 아니다.
+
+## 런타임 암호화 키 복구
+
+임시 ingestion 암호문은 AES-GCM v2 envelope에 공개 키 식별자를 포함한다. 기존 두 부분 envelope도 동일한 기존 키로 읽을 수 있지만, 키 식별자가 과거 암호문을 복호화하거나 분실한 키를 대체하지는 않는다.
+
+기존 키를 사용할 수 없어 교체한다면 먼저 해당 환경의 암호문 보유 여부와 실행 중 ingestion을 확인한다. 새 ingestion 저장을 일시 중지하고, 저장된 암호문이 0개임을 다시 확인한 뒤 새 키와 정확히 일치하는 영구 DB guard를 설치한다. guard는 release_ingests의 INSERT/UPDATE와 release_jobs의 ingestion lease claim을 모두 검사해야 한다. 그래야 교체 후 늦게 도착한 이전 Worker가 옛 키로 저장하거나 새 작업의 재시도 횟수를 소진하지 않는다. 새 코드와 키의 실제 설치, 빌드 식별자, binding, readiness, 새 키의 저장·추출을 확인한다. 일시 중지 guard를 제거한 뒤에도 키 guard는 유지하고 NULL 처리에 의한 취소·만료·삭제를 허용한다. 불확실한 쓰기는 재시도하지 말고 보존한 intent와 현재 provider 상태로 조정한다.
+
+백업에는 당시의 키 guard가 그대로 포함된다. 격리 복구 후에는 과거 guard와 일치하는 escrow 키를 사용하거나, 별도로 검증한 교체 절차를 거쳐야 한다. schema 버전만으로 키 복구 또는 운영 승격이 완료되었다고 판단하지 않는다. 키 값은 별도 비밀 저장소에 보관하고 읽어 되돌려 대조하며, Git·운영 로그·명령 인수에 넣지 않는다.
