@@ -22,7 +22,7 @@
     "build": "node --experimental-strip-types scripts/deployment-command.mjs build",
     "test:d1": "npm run build && node --experimental-strip-types --experimental-sqlite test/d1.integration.mjs && node --experimental-strip-types --experimental-sqlite test/execution-time.integration.mjs && node --experimental-strip-types --experimental-sqlite test/domain-verification.integration.mjs && node --experimental-strip-types --experimental-sqlite test/auth-runtime.integration.mjs && node --experimental-strip-types --experimental-sqlite test/storage-runtime.integration.mjs",
     "deploy": "node --experimental-strip-types scripts/deployment-command.mjs deploy",
-    "test:config": "node --experimental-strip-types --test scripts/preflight.test.mjs scripts/acceptance-record.test.mjs",
+    "test:config": "node --experimental-strip-types --experimental-sqlite --test scripts/preflight.test.mjs scripts/acceptance-record.test.mjs scripts/migrations.test.mjs",
     "test:release": "node --experimental-strip-types --experimental-sqlite --test release-validation/tests/*.test.mjs",
     "eval:lexical": "node --experimental-strip-types --experimental-sqlite release-validation/tools/run-lexical-eval.mjs",
     "test:client": "python -m unittest discover -s client -p test_*.py && node --experimental-strip-types --experimental-sqlite --test client/connecting.test.mjs"

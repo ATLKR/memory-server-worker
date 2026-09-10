@@ -55,9 +55,9 @@ CREATE TABLE release_payload_archives(
  payload_id TEXT PRIMARY KEY REFERENCES release_payload_stages(id),memory_id TEXT NOT NULL,revision INTEGER NOT NULL,
  target TEXT NOT NULL CHECK(target IN ('current','history')),created_at INTEGER NOT NULL);
 CREATE TRIGGER release_payload_intent_budget BEFORE INSERT ON release_payload_intents BEGIN
- SELECT CASE WHEN coalesce((SELECT bytes FROM release_payload_stage_accounts WHERE account_id=NEW.account_id),0)+NEW.reserved_bytes>8388608
+ SELECT (CASE WHEN coalesce((SELECT bytes FROM release_payload_stage_accounts WHERE account_id=NEW.account_id),0)+NEW.reserved_bytes>8388608
    OR coalesce((SELECT quantity FROM release_payload_stage_accounts WHERE account_id=NEW.account_id),0)+NEW.item_count>200
- THEN RAISE(ABORT,'release_payload_budget') END;
+ THEN RAISE(ABORT,'release_payload_budget') END);
 END;
 CREATE TRIGGER release_payload_intent_reserve AFTER INSERT ON release_payload_intents BEGIN
  INSERT INTO release_payload_stage_accounts VALUES(NEW.account_id,NEW.reserved_bytes,NEW.item_count)
@@ -162,11 +162,11 @@ DROP VIEW release_version_sizes;
 CREATE VIEW release_version_sizes AS SELECT memory_id,revision,space_id,coalesce(memory_versions.logical_bytes,length(CAST(memory_versions.body AS BLOB))+coalesce(length(CAST(memory_versions.source AS BLOB)),0)+length(CAST(memory_versions.provenance AS BLOB))) AS bytes FROM memory_versions;
 DROP TRIGGER release_storage_guard_insert;
 CREATE TRIGGER release_storage_guard_insert BEFORE INSERT ON memories BEGIN
- SELECT CASE WHEN EXISTS(SELECT 1 FROM release_space_pools sp JOIN release_pools p ON p.id=sp.pool_id WHERE sp.space_id=NEW.space_id AND p.storage_bytes+coalesce(NEW.logical_bytes,length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB)))>p.storage_limit_bytes) THEN RAISE(ABORT,'release_storage') END;
+ SELECT (CASE WHEN EXISTS(SELECT 1 FROM release_space_pools sp JOIN release_pools p ON p.id=sp.pool_id WHERE sp.space_id=NEW.space_id AND p.storage_bytes+coalesce(NEW.logical_bytes,length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB)))>p.storage_limit_bytes) THEN RAISE(ABORT,'release_storage') END);
 END;
 DROP TRIGGER release_storage_guard_update;
 CREATE TRIGGER release_storage_guard_update BEFORE UPDATE ON memories WHEN NEW.revision<>OLD.revision AND NEW.deleted_at IS NULL AND NEW.erased_at IS NULL BEGIN
- SELECT CASE WHEN EXISTS(SELECT 1 FROM release_space_pools sp JOIN release_pools p ON p.id=sp.pool_id WHERE sp.space_id=NEW.space_id AND p.storage_bytes+coalesce(NEW.logical_bytes,length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB)))>p.storage_limit_bytes) THEN RAISE(ABORT,'release_storage') END;
+ SELECT (CASE WHEN EXISTS(SELECT 1 FROM release_space_pools sp JOIN release_pools p ON p.id=sp.pool_id WHERE sp.space_id=NEW.space_id AND p.storage_bytes+coalesce(NEW.logical_bytes,length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB)))>p.storage_limit_bytes) THEN RAISE(ABORT,'release_storage') END);
 END;
 DROP TRIGGER release_storage_insert;
 CREATE TRIGGER release_storage_insert AFTER INSERT ON memories BEGIN UPDATE release_pools SET storage_bytes=storage_bytes+coalesce(NEW.logical_bytes,length(CAST(NEW.body AS BLOB))+coalesce(length(CAST(NEW.source AS BLOB)),0)+length(CAST(NEW.provenance AS BLOB))) WHERE id=(SELECT pool_id FROM release_space_pools WHERE space_id=NEW.space_id); END;
