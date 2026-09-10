@@ -63,6 +63,71 @@ async function passedEvidence(f, manifestHash) {
   const path = join(f.dir, 'drill.json'); await writeFile(path, JSON.stringify(evidence)); return { path, evidence };
 }
 
+const canonical = value => JSON.stringify(sort(value));
+function sort(value) { return Array.isArray(value) ? value.map(sort) : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(k => [k, sort(value[k])])) : value; }
+async function historicalFixture(t) {
+  const f = await fixture(t), i = f.inventory, at = i.capturedAt, c = f.source, version = '11111111-1111-4111-8111-111111111111';
+  const modules = [{ name: 'worker.js', bytes: 7, sha256: hash('fixture') }];
+  const policy = { format: 1, contract: 'memory-payload-monotonic-v1', accountId: c.account_id, workerName: c.name, bucketName: c.r2_buckets[0].bucket_name, bucketCreatedAt: at - 1000,
+    sourceRevision: revision, resourceFingerprint: i.context.resourceFingerprint, writerSourceSha256: hash('reviewed writer source'),
+    versions: [{ id: version, sourceRevision: revision, writerSourceSha256: hash('reviewed writer source'), modules, receiptSha256: hash('retained deployment') }],
+    coordinator: { issuedAt: at - 100, expiresAt: at + 100, scope: 'exclusive-operators-during-capture', activeWriters: [c.name], evidenceSha256: hash('operator inventory') } };
+  const prefix = '/accounts/' + c.account_id, script = prefix + '/workers/scripts/' + c.name, bucket = prefix + '/r2/buckets/' + policy.bucketName;
+  const observation = { format: 1, observedAt: at, accountId: c.account_id, workerName: c.name, currentVersionId: version,
+    versionPages: [{ page: 1, perPage: 100, items: [{ id: version, createdAt: at - 500 }] }], modules,
+    bindings: [...c.d1_databases.map(d => ({ name: d.binding, type: 'd1', id: d.database_id })), { name: 'MEMORY_PAYLOADS', type: 'r2_bucket', bucket_name: policy.bucketName }, ...Object.entries(c.vars).map(([name, text]) => ({ name, type: 'plain_text', text }))],
+    bucket: { name: policy.bucketName, createdAt: policy.bucketCreatedAt, lifecycleRules: [] }, activeWriters: [{ name: c.name, buckets: [policy.bucketName] }],
+    requestEvidence: [script + '/content/v2', script + '/settings', script + '/deployments', script + '/versions?page=1&per_page=100', bucket, bucket + '/lifecycle', prefix + '/workers/scripts'].map(path => ({ method: 'GET', path, sha256: hash(path) })) };
+  const objects = i.objects.map(o => ({ key: o.key, size: i.currentHeads[0].payload.bytes, etag: 'actual-etag', custom_metadata: o.metadata }));
+  const scan = { startedAt: at, completedAt: at, pageSize: 200, objects, pages: [{ cursor: null, nextCursor: null, count: objects.length, terminal: 'explicit', sha256: hash(canonical(objects)) }], listingSha256: hash(canonical(objects)) };
+  const artifacts = await Promise.all([...i.exports, ...i.objects].map(async o => { const bytes = await readFile(join(f.dir, o.file)); return { file: o.file, bytes: bytes.length, sha256: hash(bytes) }; }));
+  const p = i.currentHeads[0].payload, row = { id: 'm1', space_id: 's1', deleted_at: null, erased_at: null, revision: 1, payload_id: p.id, payload_shard_id: p.shardId, payload_object_key: p.objectKey, payload_sha256: p.sha256, payload_bytes: p.bytes };
+  const reconciliation = { format: 1, capturedAt: at, sourceFingerprint: i.context.resourceFingerprint, central: { heads: [row], history: [], stages: [{ ...row, id: p.id, memory_id: 'm1' }], purges: [], erasures: [], accounts: [], emails: [], intents: [], retirements: [], lifecycle: { events: [], heads: [], receipts: [], proofs: [], guards: ['release_lifecycle_event_time','release_lifecycle_jwt_time'].map(name => { const sql = 'CREATE TRIGGER ' + name + ' BEFORE INSERT ON fixture BEGIN SELECT 1; END'; return { name, sql, sha256: hash(sql) }; }) } } };
+  reconciliation.central.permanent = { providerRevocations: [], externalBlocks: [], domainBlocks: [], receipts: [], domains: [], revocations: [] };
+  const body = { ...i }; delete body.capture;
+  const evidence = { format: 2, mode: 'immutable-historical-cut-v1', startedAt: at, capturedAt: at, consistentAtCut: at, context: i.context, policy, sourceBefore: observation, sourceAfter: structuredClone(observation),
+    before: { DB: 'd1-1', HOT_A: 'd1-2', HOT_B: 'd1-3' }, after: { DB: 'd1-1', HOT_A: 'd1-2', HOT_B: 'd1-3' }, scanA: scan, scanB: structuredClone(scan),
+    downloads: objects.map(o => ({ key: o.key, bytes: o.size, sha256: o.custom_metadata.sha256, metadataSha256: hash(canonical(o.custom_metadata)), metadataBasis: 'matching-complete-scans', etag: o.etag })),
+    artifacts, reconciliation: {}, inventoryBodySha256: hash(canonical(body)), complete: true,
+    assumption: 'Coordinator excludes out-of-band administrative/S3 writers during this bounded interval; provider reads do not prove absence of global credentials.' };
+  const saveHistorical = async () => {
+    const bytes = Buffer.from(JSON.stringify(reconciliation)); await writeFile(join(f.dir, 'reconciliation.json'), bytes);
+    evidence.reconciliation = { file: 'reconciliation.json', bytes: bytes.length, sha256: hash(bytes) };
+    const record = Buffer.from(JSON.stringify(evidence)); await writeFile(join(f.dir, 'capture-evidence.json'), record);
+    i.capture = { mode: evidence.mode, writesStopped: false, providersDrained: null, inventoryComplete: true, consistentAtCut: at, evidenceRef: 'capture-evidence.json', evidenceSha256: hash(record) };
+    await f.save();
+  };
+  await saveHistorical(); return { ...f, evidence, reconciliation, saveHistorical };
+}
+
+test('historical cut preserves explicit unstopped semantics and hashes both evidence sidecars', async t => {
+  const f = await historicalFixture(t), result = await f.prepare();
+  assert.equal((await f.verify(result.manifestSha256)).status, 'verified');
+  const manifest = JSON.parse(await readFile(f.manifestPath)); assert.equal(manifest.files.length, 6);
+  assert.equal(manifest.inventory.capture.writesStopped, false); assert.equal(manifest.inventory.capture.providersDrained, null);
+  await writeFile(join(f.dir, 'reconciliation.json'), '{}'); await assert.rejects(f.verify(result.manifestSha256), /hash|SHA|changed|reconciliation/i);
+});
+for (const [name, mutate] of [
+  ['changed primary bookmark', f => { f.evidence.after.DB = 'new'; }],
+  ['incomplete terminal scan', f => { f.evidence.scanB.pages[0].terminal = null; }],
+  ['overwritten payload', f => { f.evidence.scanB.objects[0].etag = 'changed'; }],
+  ['missing object', f => { f.evidence.scanB.objects = []; }],
+  ['download missing metadata binding', f => { delete f.evidence.downloads[0].metadataSha256; }],
+  ['invented stopped assertion', f => { f.evidence.providersDrained = true; }],
+  ['missing writer history', f => { f.evidence.policy.versions = []; }],
+  ['unknown provider writer', f => { f.evidence.sourceAfter.activeWriters.push({ name: 'other', buckets: [f.evidence.policy.bucketName] }); }],
+  ['expired coordinator interval', f => { f.evidence.policy.coordinator.expiresAt = f.inventory.capturedAt; }],
+  ['missing lifecycle history', f => { delete f.reconciliation.central.lifecycle; }],
+  ['missing standing revocations', f => { delete f.reconciliation.central.permanent; }],
+  ['missing central history object', f => { f.reconciliation.central.history.push({ ...f.reconciliation.central.heads[0], payload_id: 'missing', payload_object_key: 'payload/v1/missing' }); }],
+  ['evidence path traversal', f => { f.evidence.reconciliation.file = '../private.json'; }],
+]) test('historical validator refuses ' + name, async t => {
+  const f = await historicalFixture(t); mutate(f); await f.saveHistorical();
+  // Preserve a deliberately modified sidecar path after the helper refreshes hashes.
+  if (name === 'evidence path traversal') { f.inventory.capture.evidenceRef = '../private.json'; await f.save(); }
+  await assert.rejects(f.prepare());
+});
+
 test('prepare hashes real exports and payloads; verify and quarantine plan preserve private contents', async t => {
   const f = await fixture(t), result = await f.prepare();
   assert.match(result.manifestSha256, /^[a-f0-9]{64}$/);

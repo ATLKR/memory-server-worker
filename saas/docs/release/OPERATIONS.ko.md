@@ -1,6 +1,6 @@
 # 운영·복구
 
-현재 후보는 **0.5.0-rc.1/중앙 25/HOT 1**이다. Production은 rc.3/중앙 1–7, staging은 이전 revision `1a93820`/중앙 1–23/HOT 1이다. 24–25는 아직 배포하지 않았다. 아래 현재 계약과 [통합 기록](INTEGRATION.md)의 과거 rc.4 검증을 구분한다. 선택한 GA는 초대 기반·사용량 계량·AI 검색/추출이며 유료 결제는 비활성으로 제외한다.
+현재 후보는 **0.5.0-rc.1/중앙 25/HOT 1**이다. Production은 rc.3/중앙 1–7, staging은 revision `141f65f`/중앙 1–25/HOT 1이다. 후속 수정과 1분 cron 설정은 아직 배포하지 않았다. 아래 현재 계약과 [통합 기록](INTEGRATION.md)의 과거 rc.4 검증을 구분한다. 선택한 GA는 초대 기반·사용량 계량·AI 검색/추출이며 유료 결제는 비활성으로 제외한다.
 
 ## 원본과 파생 데이터
 
@@ -16,13 +16,13 @@
 
 `release_jobs`는 pending/leased/done/dead 상태와 attempt, lease_token, lease_until을 가진다. 120초 lease와 fencing으로 늦은 worker가 현재 결과를 덮어쓰지 않게 한다. 긴 인덱싱은 각 조각 사이에 동일한 유효 lease를 갱신하며, 만료되거나 다른 worker에 넘어간 lease는 되살리지 않는다. 실패 5회 후 dead로 가며 `/manage`에서 허용된 운영자가 재시도할 수 있다. 인덱스 재구축은 현재 revision별로 작업을 다시 만들고 실행 중 lease를 강제로 초기화하지 않는다.
 
-현재 후보와 이전 staging은 `BACKGROUND_JOBS_ENABLED=true`로 AI/vector/검토형 추출을 처리하며 5분 cron의 호출당 작업량은 제한되어 있다. `PAID_BILLING_ENABLED=false`, `AUTO_ERASURE_ENABLED=false`는 유지한다. 외부 자료는 중앙 발행 전 준비되고 semantic 반영은 지연될 수 있다. backlog와 현재 episode의 oldest age를 유입량에 맞춰 감시하며 무제한 처리량이나 고정 복구 시간을 약속하지 않는다.
+현재 후보와 staging은 `BACKGROUND_JOBS_ENABLED=true`로 AI/vector/검토형 추출을 처리한다. 후보 cron은 1분이며 현재 배포본은 아직 5분이다. 호출당 작업량은 제한한다. 실환경에서 작업 대기로 제출자의 session이 만료된 경우 공급자 호출을 거부했고, 취소 후 새 credential로 새 제출을 하여 추출을 검증했다. `PAID_BILLING_ENABLED=false`, `AUTO_ERASURE_ENABLED=false`는 유지한다. 외부 자료는 중앙 발행 전 준비되고 semantic 반영은 지연될 수 있다. backlog와 현재 episode의 oldest age를 유입량에 맞춰 감시하며 무제한 처리량이나 고정 복구 시간을 약속하지 않는다.
 
 0025의 `queued_at`은 최초 queue 진입과 done/dead→pending의 새 episode를 기록하고 같은 episode의 재시도에서 유지한다. 원래 `created_at`을 현재 대기 시작으로 오해하지 않는다. 이전 retry episode 시각을 복원할 수 없으면 unknown으로 남는다. 중앙 UTC 월별 provider 예약과 고객 사용량은 별도 계량이다. Production AI 예약 상한 $20, staging $0.20만으로 전체 Memory Cloudflare 월 $50를 보장하지 않으므로 D1/R2/Workers/Vectorize 실제 비용과 경보·중단 대응도 확인한다.
 
 결제는 별도 DB lock과 유한량 consumer를 사용한다. webhook payload의 상태를 곧바로 적용하지 않고 공급자 현재 subscription을 조회한다. 이미 연결된 subscription은 주기적 재조회로 webhook 누락을 보완한다. 최초 subscription 생성 webhook 자체가 유실되어 아직 pool에 연결되지 않은 경우까지 자동 탐색하지는 않는다. 공급자 쪽 event replay와 checkout reconciliation 운영 절차가 필요하다. retry 한도를 넘긴 결제 이벤트는 운영자가 원인 해결 후 명시적으로 재처리해야 한다.
 
-이 PR의 0008 checkout migration은 customer 생성 실패와 Checkout 호출 후 응답 유실을 구분한다. 아직 Checkout을 시도하지 않은 요청만 첫 호출 직전에 35분 만료 시각을 원자적으로 기록하며, 동시에 재시도한 호출도 저장된 동일 시각을 쓴다. 이미 시도된 요청은 응답을 받지 못했더라도 시도 표시나 만료 시각을 바꾸지 않는다. 0008 이전 행도 공급자 이력을 알 수 없어 시도된 요청으로 보존한다. `session_id=NULL`만 보고 미시도로 판단하지 말고 기존 idempotency key로 공급자 결과를 재조정한다. 만료된 요청을 다시 시작할 때는 새 operation ID가 필요하다. Production은 0008–0025, 현재 staging은 0024–0025를 추가 적용한 뒤 이 후보를 배포한다. 새 환경은 중앙 0001–0025와 모든 HOT의 `shard-migrations/0001_payloads.sql`이 필요하다. 후보 `/ready`는 중앙 25/HOT 1을 요구한다. 전체 검증 수는 최종 재실행 뒤 기록하며 과거 rc.4 수치를 현재 통과로 읽지 않는다. [검증 기록](INTEGRATION.md)에서 각 실행과 live gate를 구분한다.
+이 PR의 0008 checkout migration은 customer 생성 실패와 Checkout 호출 후 응답 유실을 구분한다. 아직 Checkout을 시도하지 않은 요청만 첫 호출 직전에 35분 만료 시각을 원자적으로 기록하며, 동시에 재시도한 호출도 저장된 동일 시각을 쓴다. 이미 시도된 요청은 응답을 받지 못했더라도 시도 표시나 만료 시각을 바꾸지 않는다. 0008 이전 행도 공급자 이력을 알 수 없어 시도된 요청으로 보존한다. `session_id=NULL`만 보고 미시도로 판단하지 말고 기존 idempotency key로 공급자 결과를 재조정한다. 만료된 요청을 다시 시작할 때는 새 operation ID가 필요하다. Production은 0008–0025를 추가 적용한 뒤 이 후보를 배포한다. Staging에는 중앙 0001–0025가 이미 적용되어 있다. 새 환경은 중앙 0001–0025와 모든 HOT의 `shard-migrations/0001_payloads.sql`이 필요하다. 후보 `/ready`는 중앙 25/HOT 1을 요구한다. 전체 검증 수는 최종 재실행 뒤 기록하며 과거 rc.4 수치를 현재 통과로 읽지 않는다. [검증 기록](INTEGRATION.md)에서 각 실행과 live gate를 구분한다.
 
 0022는 payload pointer·논리 크기·intent·purge/retirement outbox, 0023은 월별 provider 예약과 inline 이관 cursor/index, 0024는 순서 있는 account/exact-email lifecycle, 0025는 queue episode 시각이다. 남은 migration은 결제 비활성 여부와 무관하게 모두 필수다.
 

@@ -26,7 +26,7 @@ again after fixes, and a fresh console review follows these corrections.
 
 ## Maintenance and diagnosis
 
-The source configures `*/5 * * * *` for expired transient-state cleanup. Each
+The source configures `* * * * *` for expired transient-state cleanup. Each
 invocation processes at most 100 rows per cleanup category: ingest payloads,
 export sessions, unused domain challenges, reauthentication challenges and
 past-day mail budgets. Consumed DNS proofs and immutable verification receipts
@@ -209,8 +209,8 @@ The current managed-AI candidate enables `BACKGROUND_JOBS_ENABLED=true` with
 configured AI/Vectorize and ingestion keys; earlier staging live probes exercised
 these providers. Keep `PAID_BILLING_ENABLED=false` and
 `AUTO_ERASURE_ENABLED=false`. Explicit recently reauthenticated erasure remains
-separate. The five-minute cron bounds provider work and maintenance; monitor
-backlog and current episode age rather than assuming completion every five minutes.
+separate. The one-minute cron bounds provider work and maintenance; monitor
+backlog and current episode age rather than assuming completion every minute.
 
 `/ready` requires central 25/HOT 1, storage/provider/config checks, a recent
 heartbeat, invite enrollment, metered AI budget and the signed acceptance record.

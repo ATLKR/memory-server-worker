@@ -282,5 +282,35 @@ test('native physical D1 payload shards and private R2', { timeout: 180000 }, as
         }
         const page = await transfer.exportPage(identity.token, space.id, snapshot.id, null, 50);
         assert.equal(erasedDuringRead, true); assert.ok(page.results.some(row => row.id === trash.id)); assert.ok(!page.results.some(row => row.id === transient.id));
+
+        // A matching request can commit and be erased while its overlapping
+        // caller is still awaiting the original native R2/HOT preparation.
+        for (const action of ['create', 'update', 'restore']) {
+            const stablePayloads = new PayloadStore(env), delayedPayloads = new PayloadStore(env);
+            const stable = new MemoryStore(db, Date.now, stablePayloads), delayed = new MemoryStore(db, Date.now, delayedPayloads);
+            const key = 'native-overlap-' + action, input = { body: 'overlapping immutable payload', source: 'native source' };
+            let original;
+            if (action !== 'create') original = await stable.create(identity.token, space.id, input, key + '-initial');
+            if (action === 'restore') await stable.remove(identity.token, space.id, original.id, 1, key + '-trash');
+            const invoke = target => action === 'create' ? target.create(identity.token, space.id, input, key)
+                : action === 'update' ? target.update(identity.token, space.id, original.id, { body: 'updated overlap', expectedRevision: 1 }, key)
+                    : target.restore(identity.token, space.id, original.id, 2, key);
+            const method = action === 'create' ? 'stage' : 'read', provider = delayedPayloads[method].bind(delayedPayloads);
+            let committed, intercepted = false;
+            delayedPayloads[method] = async (ctx, ref, ...args) => {
+                if (!intercepted) {
+                    intercepted = true; committed = await invoke(stable);
+                    await stable.remove(identity.token, space.id, committed.id, committed.revision, key + '-delete');
+                    await stable.erase(identity.token, space.id, committed.id, committed.revision + 1, committed.id, key + '-erase');
+                    await stablePayloads.purge(ctx, ref);
+                }
+                return provider(ctx, ref, ...args);
+            };
+            const outcome = await invoke(delayed);
+            assert.equal(intercepted, true); assert.equal(outcome.replayed, true); assert.equal(outcome.id, committed.id);
+            assert.equal(outcome.committedRevision, committed.revision); assert.equal(outcome.representation, 'receipt');
+            assert.equal('body' in outcome, false);
+            assert.equal(await db.prepare('SELECT count(*) AS n FROM release_operations WHERE client_key=?').bind(key).first('n'), 1);
+        }
     });
 });

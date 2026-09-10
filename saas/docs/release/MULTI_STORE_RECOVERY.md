@@ -6,13 +6,21 @@
 
 - 중앙 DB가 권한·현재 revision·발행·사용량의 기준이다. HOT는 본문/FTS 데이터이고 R2는 `payload/v1/<payloadId>`의 canonical JSON `{body,provenance,source}`를 보관한다. R2 원문과 SQL export에는 개인정보가 있으므로 bundle·manifest·증거 모두 공개 저장소 밖에 보관한다.
 - R2 metadata는 정확히 `payloadId,shardId,spaceId,memoryId,sha256,state`다. `state=purged`는 원래 SHA/context를 유지하는 **영구 0바이트 객체**다. HOT의 `payload_tombstones`도 영구 보존하며 늦은 재삽입을 막는다. 오래된 백업으로 살아 있는 R2를 덮어쓰지 않는다.
-- `release_payload_purges`의 미완료 작업, erasure ledger, HOT tombstone과 백업 이후의 회수·삭제 증거를 합쳐야 한다. 오래된 본문을 먼저 공개하고 나중에 삭제하는 순서는 허용되지 않는다. 쓰기와 개인정보 cleanup도 통제된 capture 동안 함께 정지·배출하고, capture 종료 후 재개한 작업을 별도 증거로 대조한다.
+- `release_payload_purges`의 미완료 작업, erasure ledger, HOT tombstone과 백업 이후의 회수·삭제 증거를 합쳐야 한다. 오래된 본문을 먼저 공개하고 나중에 삭제하는 순서는 허용되지 않는다. 아래 두 capture 방식 중 증명 가능한 방식을 명시하고, 그 시점 이후 작업을 별도 증거로 대조한다.
 - 오래된 중앙 DB를 복원하면 이미 회수한 credential·멤버십·공유·domain lease가 되살아날 수 있다. 외부 접근을 막은 채 복원하고, session/PAT/SCIM key·미사용 proof·pending invitation을 무효화한 뒤 현재 중앙 identity의 revoke/disable/email 상태, 명시적 Space 권한, 공유·domain 권한을 다시 확인한다. 불변 receipt·이미 소비된 proof·audit 기록을 삭제하여 이 문제를 숨기지 않는다.
 - HOT export는 보존·비교 자료다. 복구 시 오래된 HOT를 그대로 서비스하지 않는다. 영구 tombstone을 먼저 반영하고, **재조정한 중앙의 현재 유효 head와 검증된 R2**로 HOT/FTS를 재구축한다. trash·history의 cold-only 참조는 R2에 보존하고 현재 검색 head로 승격하지 않는다. Vectorize도 재조정한 권한과 revision으로 다시 만든다.
 
 ## Capture와 입력 형식
 
-서비스 쓰기·백그라운드 provider 작업을 차단하고 이미 실행 중인 작업의 종료/결과를 확인한다. 같은 capture 경계를 중앙 DB, 모든 active/draining HOT, R2 listing/object metadata와 본문에 적용한다. 분산된 provider 사이의 자동 원자적 snapshot을 이 도구가 제공하지 않는다. 경계·관찰 시각·조회·누락 확인은 실제 operator evidence로 남긴다. R2 listing은 모든 page를 수집하며 payload와 purged 객체를 모두 포함한다.
+기존 **정지 capture**는 서비스 쓰기·백그라운드 provider 작업을 차단하고 이미 실행 중인 작업의 종료/결과를 실제로 확인한 경우다. `writesStopped:true`와 operator evidence를 사용한다. 임시 503 Worker와 짧은 대기만으로 기존 HTTP가 모두 끝났다고 표시하지 않는다. Cloudflare는 연결된 HTTP 요청의 wall time에 일률적인 상한을 두지 않는다. [Workers 실행 제한](https://developers.cloudflare.com/workers/platform/limits/)
+
+**`immutable-historical-cut-v1`**은 정지·배출을 주장하지 않는 별도 방식이다. 중앙/모든 HOT의 primary D1 bookmark를 전체 조회·export·metadata 수집 전후에 읽어 각각 같음을 확인한다. 그 구간 안에서 R2를 두 번 완전히 순회하고 정렬된 key/size/ETag/여섯 metadata가 정확히 같아야 한다. 사이에 내려받은 각 객체의 실제 bytes·SHA-256·ETag를 확인하며, 다운로드 metadata의 근거는 두 번 일치한 전체 listing이다. REST GET이 metadata를 제공했다고 꾸미지 않는다. 첫 순회가 끝난 시각을 `consistentAtCut`으로 기록한다. bookmark 변화, 페이지 종료 불명확, 객체 추가·덮어쓰기·삭제·metadata 변화가 관찰되면 캡처를 실패 처리하고 새 구간에서 다시 시작한다. [D1 bookmark](https://developers.cloudflare.com/api/resources/d1/subresources/database/subresources/time_travel/), [R2 일관성](https://developers.cloudflare.com/r2/reference/consistency/)
+
+이 논증은 앱의 `없음 → 불변 payload → 영구 purged` 전이와 객체를 지우거나 되살리지 않는 writer 계약에 의존한다. 실제 Worker content의 module SHA, version 전체 목록, binding/vars, bucket 생성 시각과 전후 lifecycle 설정을 조회하여 사전에 검토한 성공 배포 receipt·source SHA·`payloads.ts` hash 이력과 맞춘다. 활성 multipart-upload 만료 외 객체 삭제·storage transition 규칙은 지원하지 않는다. 다른 Worker의 해당 bucket binding도 조사한다. coordinator는 실제 writer inventory를 근거로 최대 한 시간의 구간 동안 별도 관리자/S3 쓰기·배포·lifecycle 변경을 하지 않는다는 운영 전제를 기록한다. API 조회가 모든 전역 credential의 부재를 증명한다는 뜻이 아니다. 검토하지 않은 과거 writer나 누락된 배포 증거가 있으면 이 방식으로 성공 처리하지 않는다. [Worker version 목록](https://developers.cloudflare.com/api/resources/workers/subresources/scripts/subresources/versions/methods/list/), [bucket lifecycle](https://developers.cloudflare.com/api/resources/r2/subresources/buckets/subresources/lifecycle/)
+
+새 방식은 `capture:{mode:"immutable-historical-cut-v1",writesStopped:false,providersDrained:null,inventoryComplete:true,consistentAtCut:<epoch ms>,evidenceRef:"capture-evidence.json",evidenceSha256:<실제 SHA>}`를 쓴다. format 2 증거에는 위 관찰·페이지 종료·download/export 해시와 `reconciliation.json`의 해시/길이가 들어간다. 공개 prepare/verify는 두 sidecar도 manifest 파일 목록에 포함해 검증한다. 로컬 검증은 제공된 관찰의 결합·일관성 검사이며, provider 사실의 독립 인증은 아니다. 공개 CLI는 캡처 API를 호출하지 않는다. 실제 collector는 이 계약을 만족하는 별도 운영 도구다.
+
+새 방식에서도 중앙의 현재/history/trash/stage locator, 전체 intent·retirement·purge, erasure, ordered lifecycle event/head/receipt/proof와 두 temporal trigger의 정확한 DDL/hash, 영구 provider/email/domain revocation 자료를 모두 보존한다. 격리 복원에서는 credential·membership 무효화 후 **모든 미발행 intent**를 durable purge-pending으로 전환한다. 늦게 끝난 준비 작업이 새 credential로 발행되면 안 된다. source는 확정된 과거 cut 이후 계속 동작할 수 있지만, 승격 전에 그 이후의 회수·삭제와 최신 identity 증거를 다시 반영해야 한다. 과거 cut 자체를 현재 권한으로 취급하지 않는다.
 
 도구는 현재 checkout의 source SHA, 서비스 버전, migration 디렉터리의 중앙/HOT 최신 schema, 명시한 배포 설정의 fingerprint와 inventory context가 정확히 일치해야 실행된다. 깨끗한 해당 release checkout에서 실행한다. 현재 schema보다 오래되거나 inline/pre-sharding인 자료는 이 경로로 사용할 수 없다. 별도 offline upgrade·재조정·새 capture를 거쳐야 하며 production에 직접 복원하지 않는다.
 

@@ -53,7 +53,7 @@
   "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["memory@allenlabs.org"] }],
   // Physical payload cleanup and bounded provider jobs run every five minutes.
   // Legacy body backfill is enabled separately after a verified production backup.
-  "triggers": { "crons": ["*/5 * * * *"] },
+  "triggers": { "crons": ["* * * * *"] },
   // Auth callback URLs contain codes: invocation/request logs stay disabled.
   "observability": { "enabled": false },
   "limits": { "cpu_ms": 1000 }

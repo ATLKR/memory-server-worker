@@ -39,7 +39,7 @@
   "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "allenlabs_memory_staging" }],
   "ratelimits": [{ "name": "REQUEST_LIMITER", "namespace_id": "2086091001", "simple": { "limit": 120, "period": 60 } }],
   "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["memory@allenlabs.org"] }],
-  "triggers": { "crons": ["*/5 * * * *"] },
+  "triggers": { "crons": ["* * * * *"] },
   "observability": { "enabled": false },
   "limits": { "cpu_ms": 1000 }
 }

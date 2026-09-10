@@ -60,6 +60,17 @@ test('healthy complete actual captures produce exit0 without inventing alert del
   assert.equal(report.exitCode, 0); assert.equal(report.status, 'healthy'); assert.equal(report.budget.totalUsd, 0.07); assert.equal(report.budget.hardCapGuaranteed, false); assert.equal(report.alertDelivered, false);
   assert.doesNotMatch(JSON.stringify(report), /https:|ops\.example|token|PRIVATE-PAYLOAD/);
 });
+for (const [metric, field] of [['heartbeat', 'lastSuccessAt'], ['payload-backfill', 'updatedAt'], ['payload-backfill', 'lastErrorAt']]) test(`historical ${field} cannot follow its database observation even when assessment is later`, async t => {
+  const f = await setup(t); f.selected.config.vars.STORAGE_BACKFILL_ENABLED = 'true'; const s = f.snapshot();
+  s.collectedAt = at + 1000; s.database.results['inline-current'][0].count = 1;
+  const group = metric === 'heartbeat' ? 'heartbeat' : f.plan.d1.find(q => q.category === 'backfill').id;
+  s.database.results[group][0][field] = at + 1;
+  assert.throws(() => assessOperations(f.selected, s, { now: at + 1000 }), /future.*database observation/i);
+});
+for (const key of ['toString', 'constructor', '__proto__']) test(`threshold policy rejects inherited Object key ${key}`, async t => {
+  const f = await setup(t), policy = JSON.parse('{"' + key + '":1}');
+  assert.throws(() => assessOperations(f.selected, f.snapshot(), { now: at, policy }), /Unknown threshold policy/);
+});
 for (const [name, mutate, code] of [
   ['heartbeat stale', s => { s.database.results.heartbeat[0].lastSuccessAt = at - 901000; }, 'heartbeat_stale'],
   ['heartbeat missing', s => { s.database.results.heartbeat = []; }, 'heartbeat_missing'],
@@ -68,7 +79,7 @@ for (const [name, mutate, code] of [
   ['unknown traffic', s => { s.traffic = null; }, 'traffic_unknown'],
   ['unknown primary requests', s => { s.traffic.primaryRequests = null; }, 'primary_request_usage_unknown'],
   ['silent telemetry loss', s => { s.traffic.requests = 0; s.traffic.p95Ms = null; }, 'telemetry_coverage_gap'],
-  ['stale observations', s => { s.database.observedAt = at - 901000; }, 'database_stale'],
+  ['stale observations', s => { s.database.observedAt = at - 901000; s.database.results.heartbeat[0].lastSuccessAt = s.database.observedAt; }, 'database_stale'],
   ['old query month despite fresh arrival', s => { s.database.month = '2026-08'; }, 'ai_reservation_period_unknown'],
   ['capacity near limit', s => { s.capacity.databases[0].bytes = 8600000000; }, 'database_capacity_critical'],
   ['billing across environments', s => { s.budget.costs[0].usd = 46; }, 'monthly_budget_critical'],

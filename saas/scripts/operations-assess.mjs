@@ -12,7 +12,7 @@ function exact(v, keys) { if (!obj(v) || Object.keys(v).sort().join(',') !== [..
 function observed(v, now) { if (!integer(v) || !v || v > now) fail('Invalid or future observation timestamp.'); }
 function list(v, max) { if (!Array.isArray(v) || v.length > max) fail('Invalid or excessive snapshot items.'); return v; }
 function policyFor(custom) {
-  if (!obj(custom) || Object.keys(custom).some(k => !(k in DEFAULT_POLICY))) fail('Unknown threshold policy.');
+  if (!obj(custom) || Object.keys(custom).some(k => !Object.hasOwn(DEFAULT_POLICY, k))) fail('Unknown threshold policy.');
   const p = { ...DEFAULT_POLICY, ...custom };
   if (Object.values(p).some(v => !number(v) || v <= 0) || p.monthlyWarnUsd >= p.monthlyCriticalUsd || p.monthlyCriticalUsd > 50 || p.capacityWarnFraction >= p.capacityCriticalFraction || p.capacityCriticalFraction > 1 || p.errorWarnFraction >= p.errorCriticalFraction || p.errorCriticalFraction > 1 || p.jobWarnAgeSeconds >= p.jobCriticalAgeSeconds || p.cleanupWarnAgeSeconds >= p.cleanupCriticalAgeSeconds || p.latencyWarnMs >= p.latencyCriticalMs) fail('Invalid conservative threshold policy. Monthly budget cannot exceed USD50.');
   return p;
@@ -46,12 +46,13 @@ export function assessOperations(target, snapshot, { now = Date.now(), policy = 
           if (key === 'kind') { if (!(q.category === 'ai' ? ['embedding', 'extraction'] : ['current', 'history']).includes(row[key])) fail('Unknown aggregate kind.'); }
           else if (['lastErrorAt', 'queuedAt'].includes(key) && row[key] === null) continue;
           else if (!integer(row[key]) || (key === 'hasError' && row[key] > 1)) fail('Database metric must be a finite sanitized count, timestamp or flag.');
+          if (['lastSuccessAt', 'updatedAt', 'lastErrorAt', 'createdAt', 'queuedAt'].includes(key) && row[key] > snapshot.database.observedAt)
+            fail((q.category === 'queue' ? 'Queue start' : 'Historical metric') + ' is in the future relative to its database observation.');
         }
       }
-      if (q.category === 'heartbeat') { if (!rows.length) add('heartbeat_missing', 'critical'); else if (rows[0].lastSuccessAt > now) fail('Heartbeat is in the future.'); else if ((now - rows[0].lastSuccessAt) / 1000 > p.heartbeatMaxAgeSeconds) add('heartbeat_stale', 'critical'); }
+      if (q.category === 'heartbeat') { if (!rows.length) add('heartbeat_missing', 'critical'); else if ((now - rows[0].lastSuccessAt) / 1000 > p.heartbeatMaxAgeSeconds) add('heartbeat_stale', 'critical'); }
       if (q.category === 'queue') {
         const ageField = q.id.startsWith('jobs-') ? 'queuedAt' : 'createdAt', unknownEpisode = rows.some(r => r[ageField] === null);
-        if (rows.some(r => r[ageField] !== null && r[ageField] > snapshot.database.observedAt)) fail('Queue start is in the future relative to its database observation.');
         const age = unknownEpisode ? null : rows.length ? Math.max(...rows.map(r => (now - r[ageField]) / 1000)) : 0;
         if (unknownEpisode) add('queue_episode_unknown', 'critical', q.id);
         // Provider jobs increment attempt when acquiring a lease. A pending job

@@ -6,11 +6,11 @@
 | --- | --- |
 | Current source | 0.5.0-rc.1; central migrations 1–25; HOT schema 1 |
 | Production | Unchanged 0.4.0-rc.3; central migrations 1–7 |
-| Staging | Earlier revision `1a93820`; central migrations 1–23; HOT 1 |
-| Not deployed | Public lifecycle 24, queue episode 25 and current post-staging fixes; central private lifecycle publisher |
+| Staging | Revision `141f65f`; central migrations 1–25; two HOT databases on schema 1 |
+| Not deployed | Current post-staging fixes and one-minute schedule; central private lifecycle publisher |
 
 Every remaining migration is required before deploying the current Worker:
-production needs 8–25; current staging needs 24–25. Each HOT uses
+production needs 8–25; staging already has all 25. Each HOT uses
 `shard-migrations/0001_payloads.sql`. No current full-suite total is claimed
 until the combined rerun finishes. Historical counts below belong to rc.4.
 
@@ -25,8 +25,26 @@ Earlier staging live evidence covers real SSO, scoped PATs, the official MCP SDK
 AI retrieval/reviewed extraction, ten-level independent organization ACLs,
 CRUD/restore/erasure and metering. One Space wrote across two physical HOT DBs
 and hydrated private R2 payloads. These results apply to that earlier deployment,
-not automatically to the latest candidate. The mail receiver is being deployed;
-actual receipt and proof consumption remain pending.
+not automatically to the latest candidate. On `1a93820`, a native Cloudflare Email
+message was actually received and its proof consumed in the original SSO session.
+The temporary receiver and its resources were removed afterwards.
+
+On `141f65f`, 17 synthetic live checks passed, including REST/PAT/official MCP,
+independent organization ACLs, R2 hydration, quota denial, actual grounded AI
+extraction, approval replay, sharing/export/trash/restore and erasure. Direct
+provider reads confirmed 11 current R2/HOT heads across both databases, 11 indexed
+heads and absence of the erased vector. Vectorize REST visibility lagged its
+binding confirmation; physical success was recorded only after a fresh read
+observed absence. Final additional conservative AI reservations were $0.0328.
+A bounded 48-request authenticated R2 read sample at concurrency four recorded
+p50 660 ms, p95 967 ms and max 1,178 ms with zero errors. This is a finite pilot
+sample, not a maximum-capacity or sustained-uptime result.
+
+The five-minute deployed schedule delayed one queued extraction past its creator
+session's expiry. It correctly refused provider disclosure; cancellation and one
+new submission with a fresh credential passed. The next source configuration uses
+a one-minute schedule with the same bounded work per invocation. Queue age and
+credential expiry still require monitoring; cadence is not a throughput guarantee.
 
 Public/private ordered identity lifecycle and signed JWT lifecycle heads are
 implemented. Native two-Worker/D1 tests recorded 9 immutable events and 11 delivery

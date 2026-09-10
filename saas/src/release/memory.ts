@@ -379,8 +379,16 @@ export class MemoryStore {
                     // and current authority without staging another payload.
                     if (!await lookup()) fail(409, 'revision_conflict');
                 } else {
-                    const [hydrated] = await this.hydrateRows([old]);
-                    value = { body: input.body, source: source === undefined ? hydrated!.source : source, provenance: JSON.parse(hydrated!.provenance) as Provenance };
+                    try {
+                        const [hydrated] = await this.hydrateRows([old]);
+                        value = { body: input.body, source: source === undefined ? hydrated!.source : source, provenance: JSON.parse(hydrated!.provenance) as Provenance };
+                    } catch (error) {
+                        // A concurrent matching update can finish, then erase
+                        // the old payload while this internal read is pending.
+                        // Preparation and commit validate the receipt's digest
+                        // and current authority; no receipt means no recovery.
+                        if (!await lookup()) throw error;
+                    }
                 }
             }
             prepared = await this.preparePayloads(token, spaceId, { action: 'update', cap: 'update', key, input: requestInput,
@@ -417,32 +425,40 @@ export class MemoryStore {
             str(key, 128);
             if (!/^[A-Za-z0-9._:-]{1,128}$/.test(key)) fail(400, 'invalid_operation_id');
             const hash = await tokenHash(token), actor = await requireSpace(this.db, token, spaceId, 'update', this.clock);
-            const existing = await one(this.db, 'SELECT id FROM release_operations WHERE account_id=? AND space_id=? AND client_key=?', [actor.accountId, spaceId, key]);
+            const lookup = () => one(this.db, 'SELECT id FROM release_operations WHERE account_id=? AND space_id=? AND client_key=?', [actor.accountId, spaceId, key]);
+            const existing = await lookup();
             if (!existing) {
                 const at = this.clock();
                 const retained = await one<MemoryRow>(this.db, `SELECT ${columns} FROM memories r JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
                     WHERE r.id=? AND s.id=? AND r.revision=? AND r.deleted_at IS NOT NULL AND r.erased_at IS NULL AND r.payload_id IS NOT NULL AND ${authority('update')}`,
                     [memoryId, spaceId, expectedRevision, ...params(hash, at, 'update')]);
                 if (retained) {
-                    const [value] = await this.hydrateRows([retained]);
-                    const checkedAt = this.clock();
-                    const current = await one<{ expiresAt: number; restoreUntil: number; checkedAt: number }>(this.db, `/* restore-projection */
-                        SELECT min(c.expires_at,c.membership_expires_at,${accessExpiry('update')}) AS expiresAt,${SQL_NOW_MS} AS checkedAt,
-                            r.deleted_at+coalesce((SELECT retention_days FROM release_space_policies WHERE space_id=s.id),30)*86400000 AS restoreUntil
-                        FROM memories r JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
-                        WHERE r.id=? AND s.id=? AND r.revision=? AND r.payload_id=? AND r.deleted_at IS NOT NULL AND r.erased_at IS NULL AND ${authority('update')}`,
-                        [memoryId, spaceId, expectedRevision, retained.payloadId!, ...params(hash, checkedAt, 'update')]);
-                    const returnedAt = Math.max(this.clock(), current?.checkedAt ?? 0);
-                    if (current && current.expiresAt <= returnedAt) fail(403, 'access_denied');
-                    if (current && current.restoreUntil > returnedAt) {
-                        // Recovery retains trash in canonical R2 and rebuilds
-                        // only live HOT heads. Recreate the immutable projection
-                        // before publication, using create-only storage and its
-                        // permanent purge/retirement fences. The restore command
-                        // below still admits authority/revision/retention atomically.
-                        await this.payloads.stage({ spaceId, memoryId }, { id: retained.payloadId!, shardId: retained.payloadShardId!,
-                            objectKey: retained.payloadObjectKey!, sha256: retained.payloadSha256!, bytes: retained.payloadBytes! },
-                        { body: value!.body, source: value!.source, provenance: JSON.parse(value!.provenance) as Provenance });
+                    try {
+                        const [value] = await this.hydrateRows([retained]);
+                        const checkedAt = this.clock();
+                        const current = await one<{ expiresAt: number; restoreUntil: number; checkedAt: number }>(this.db, `/* restore-projection */
+                            SELECT min(c.expires_at,c.membership_expires_at,${accessExpiry('update')}) AS expiresAt,${SQL_NOW_MS} AS checkedAt,
+                                r.deleted_at+coalesce((SELECT retention_days FROM release_space_policies WHERE space_id=s.id),30)*86400000 AS restoreUntil
+                            FROM memories r JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
+                            WHERE r.id=? AND s.id=? AND r.revision=? AND r.payload_id=? AND r.deleted_at IS NOT NULL AND r.erased_at IS NULL AND ${authority('update')}`,
+                            [memoryId, spaceId, expectedRevision, retained.payloadId!, ...params(hash, checkedAt, 'update')]);
+                        const returnedAt = Math.max(this.clock(), current?.checkedAt ?? 0);
+                        if (current && current.expiresAt <= returnedAt) fail(403, 'access_denied');
+                        if (current && current.restoreUntil > returnedAt) {
+                            // Recovery retains trash in canonical R2 and rebuilds
+                            // only live HOT heads. Recreate the immutable projection
+                            // before publication, using create-only storage and its
+                            // permanent purge/retirement fences. The restore command
+                            // below still admits authority/revision/retention atomically.
+                            await this.payloads.stage({ spaceId, memoryId }, { id: retained.payloadId!, shardId: retained.payloadShardId!,
+                                objectKey: retained.payloadObjectKey!, sha256: retained.payloadSha256!, bytes: retained.payloadBytes! },
+                            { body: value!.body, source: value!.source, provenance: JSON.parse(value!.provenance) as Provenance });
+                        }
+                    } catch (error) {
+                        // A restore completed by a concurrent identical request
+                        // may already have been updated or erased. Resolve its
+                        // receipt below without recreating its former payload.
+                        if (!await lookup()) throw error;
                     }
                 }
             }

@@ -5,6 +5,7 @@ import { parseTree, getNodeValue } from 'jsonc-parser';
 import { SERVICE_VERSION } from '../src/config.ts';
 import { deploymentFingerprint, loadDeploymentConfiguration, PROJECT_DIRECTORY } from './deployment-config.mjs';
 import { inspectGitSource } from './deployment-command.mjs';
+import { HISTORICAL_MODE, validateHistoricalEvidence } from './recovery-consistency.mjs';
 
 export class RecoveryError extends Error {}
 const fail = message => { throw new RecoveryError(message); };
@@ -105,8 +106,11 @@ async function validateInventory(inventory, expected, target, root, now) {
   exact(inventory, ['format', 'context', 'capturedAt', 'capture', 'exports', 'objects', 'currentHeads', 'hotTombstones', 'pendingPurges']);
   if (inventory.format !== 1 || canonical(inventory.context) !== canonical(expected)) fail('Recovery source, schema or configuration does not match the current pinned target.');
   if (!stamp(inventory.capturedAt) || inventory.capturedAt > now) fail('Invalid capture time.');
-  exact(inventory.capture, ['writesStopped', 'inventoryComplete', 'evidenceRef']);
-  if (inventory.capture.writesStopped !== true || inventory.capture.inventoryComplete !== true || !refText(inventory.capture.evidenceRef)) fail('A fenced, complete capture and its operator evidence are required.');
+  const historical = inventory.capture?.mode === HISTORICAL_MODE;
+  if (!historical) {
+    exact(inventory.capture, ['writesStopped', 'inventoryComplete', 'evidenceRef']);
+    if (inventory.capture.writesStopped !== true || inventory.capture.inventoryComplete !== true || !refText(inventory.capture.evidenceRef)) fail('A fenced, complete capture and its operator evidence are required.');
+  }
   const paths = new Set(), files = [], shardIds = new Set(JSON.parse(target.config.vars.STORAGE_SHARDS_JSON).map(v => v.id)); let total = 0;
   const addFile = async (path, limit = FILE_LIMIT) => {
     safePath(path); const key = path.toLowerCase(); if (paths.has(key)) fail('Duplicate artifact path.'); paths.add(key);
@@ -152,6 +156,17 @@ async function validateInventory(inventory, expected, target, root, now) {
     if (!Number.isSafeInteger(item.revision) || item.revision < 1 || memories.has(memoryKey) || payloadIds.has(item.payload.id)) fail('Invalid or duplicate current memory head.');
     if (!cold || !sameObject(cold, item.payload, item) || cold.metadata.state !== 'payload' || cold.bytes !== item.payload.bytes || retired.has(item.payload.id) || purges.has(item.payload.id)) fail('Current head is missing, inconsistent, retired or erased; reconcile capture before recovery.');
     memories.add(memoryKey); payloadIds.add(item.payload.id);
+  }
+  if (historical) {
+    const artifacts = files.slice(), record = await addFile(inventory.capture.evidenceRef, RECORD_LIMIT);
+    if (record.sha256 !== inventory.capture.evidenceSha256) fail('Historical evidence SHA-256 mismatch.');
+    const bytes = await readBounded(await safeArtifact(root, record.path));
+    if (hash(bytes) !== record.sha256) fail('Historical evidence changed while reading.');
+    const evidence = json(bytes), sidecar = await addFile(evidence.reconciliation?.file, RECORD_LIMIT);
+    if (sidecar.sha256 !== evidence.reconciliation.sha256 || sidecar.bytes !== evidence.reconciliation.bytes) fail('Reconciliation artifact hash/size mismatch.');
+    const reconciliation = await readBounded(await safeArtifact(root, sidecar.path));
+    if (hash(reconciliation) !== sidecar.sha256) fail('Reconciliation changed while reading.');
+    validateHistoricalEvidence(evidence, inventory, target.config, artifacts, json(reconciliation));
   }
   return files.sort((a, b) => a.path.localeCompare(b.path));
 }
@@ -239,6 +254,7 @@ export async function runRecoveryCommand(argv, { cwd = process.cwd(), inspectSou
       rebuild: { currentHeads: inventory.currentHeads.length, authority: 'reconciled central current heads plus authoritative R2 inventory; never blindly import HOT exports' },
       steps: ['Keep destination routes, sign-in, jobs and all outbound providers isolated; prove isolation independently of pilot mode.',
         'Restore central export only into isolated DB; invalidate restored credentials, sessions, proofs and memberships before any user access.',
+        'Quarantine every unpublished payload intent as durable purge-pending work; a pre-capture preparation must never publish on restored authority.',
         'Reconcile current central identity revocations, ACLs, retention and erasure state against independent post-capture evidence.',
         'Restore R2 payloads only into the isolated empty bucket; merge all later purge markers and pending erasures first. Never overwrite a live bucket.',
         'Preserve HOT tombstones, reconstruct current eligible payloads from verified R2/current heads, then rebuild FTS and Vectorize under reconciled authority.',

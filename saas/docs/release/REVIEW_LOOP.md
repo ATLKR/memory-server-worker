@@ -1,8 +1,8 @@
 # Current review checkpoint: 0.5.0-rc.1
 
 As of 2026-09-10, source requires central schema 25 and HOT schema 1. Production
-remains rc.3/central 1–7. Staging is the earlier `1a93820` revision with central
-1–23/HOT 1; lifecycle 24 and queue episode 25 are not deployed. Physical sharding,
+remains rc.3/central 1–7. Staging is revision `141f65f` with central
+1–25/HOT 1. Physical sharding,
 private canonical R2 payloads, invite admission and metered AI are implemented.
 Paid billing is excluded from the selected GA.
 
@@ -20,13 +20,40 @@ The correction retains the same queue episode and chunk progress, waits one minu
 without consuming the provider failure budget, and resumes after an explicit
 account resume. Three timing regressions pass, including suspension before the
 embedding call and before Vectorize upsert. The native D1 suspension suite passes
-seven tests. Authentication39 and Storage41 are fresh reviews in progress.
+seven tests. Authentication39 found a same-second lifecycle issuance fence;
+the private issuer now waits for an issuance second strictly after its carried
+heads. Authentication43 found a UTF-8 claim decoder defect and two rollout
+validation gaps. International profile claims now pass strict UTF-8 decoding;
+the rollout rebuilds the exact Git archive and requires the actual configured cron.
+The private publisher at `063588f` passes 85 tests, typechecking, build and native
+two-Worker lifecycle verification. It is still not deployed.
+
+Storage41 found an overlapping command retry could fail after the identical
+request committed and its former payload was retired or erased. Preparation and
+old-payload hydration now recover only through an immutable matching receipt;
+current authority, digest and recent-proof requirements still apply. Ten focused
+cases and the native D1/R2 suite pass, including overlapping create/update/restore
+after erasure. Fresh Storage44 and Authentication45 were interrupted without a
+result when the user requested an online handoff. Neither is counted as a pass.
+
+Tooling42 found six issues. Corrections preserve subsequent ordered lifecycle and
+permanent revocation history during isolated recovery, avoid empty native batches,
+validate the full private output ancestry before provider work, and permit bounded
+bridge cleanup after the operational deadline. Future-dated metrics and inherited
+object-property policy names are rejected. Historical-cut capture integration and
+its next independent review remain in progress.
 
 The complete schema25 native suite passed after Storage36, including populated
 upgrades and actual workerd authority/storage behavior. The complete check passed
 after Tooling38 and again after Storage40: 1,830 tests (208 foundation, 210
 configuration/tooling, 1,406 release, and six clients). These are
 verification checkpoints, not a current all-domain zero-finding assertion.
+The subsequent combined check passed 1,859 tests (208 foundation, 229 tooling,
+1,416 release, six clients); the affected native storage suite passed eight tests.
+GitHub CI, CodeQL and the complete SaaS/native workflow passed on `141f65f`.
+The final upload checkpoint's `npm run check` passed 1,860 tests (208 foundation,
+230 tooling, 1,416 release and six clients), typechecking and migration comparison.
+The [handoff](../HANDOFF.ko.md) records unfinished reviews and native recovery checks.
 
 Earlier staging evidence for SSO/PAT/official SDK, AI, ten-level ACL isolation,
 CRUD/restore/erasure, metering and two physical HOT DBs applies to revision 1a93820.
@@ -35,6 +62,13 @@ exact-address temporary private receiver, and its proof was consumed successfull
 in the original SSO browser session. The receiver, routing rule, ciphertext object
 and temporary bucket were then removed, preserving existing mail routing.
 No permanent inbox or final-candidate mail acceptance is claimed.
+
+On `141f65f`, 17 synthetic functional live checks and direct R2/HOT/Vectorize
+verification passed, including actual grounded extraction and uncharged approval
+replay. Eleven current payloads span both HOT databases; all current vectors were
+observed and the erased vector was absent. A 48-request, concurrency-four read
+sample recorded p95 967 ms with no errors. These bounded checkpoint results do
+not certify an untested later source, sustained capacity or complete GA acceptance.
 
 The production database and the central identity database were separately exported,
 protected with the operator's Windows DPAPI profile, and restored locally/native

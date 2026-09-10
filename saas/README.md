@@ -29,7 +29,7 @@ Email Service. Actual staging AI extraction/hybrid search, scoped PATs and the
 official MCP client have passed bounded live probes. Native identity lifecycle
 delivery is implemented; its central publisher still needs live rollout.
 The selected GA is invite-only and metered, with paid billing disabled. A
-five-minute cron performs bounded maintenance and enabled provider jobs in
+one-minute cron performs bounded maintenance and enabled provider jobs in
 staging. `AUTO_ERASURE_ENABLED=false` preserves retained memories.
 Unavailable ingestion, index rebuild and billing controls are disabled in the UI.
 The candidate also preserves one-time dialog results while issuance is pending,
