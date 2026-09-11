@@ -21,6 +21,8 @@ import { readSettings, SERVICE_VERSION } from '../config.ts';
 import { HttpError, pathIdentifier, requireMethod } from '../api.ts';
 import { canonicalEmail, IdentityInvalid } from '../identity.ts';
 import { sqlNow } from '../sql-clock.ts';
+import { createRoutingApi } from '../routing/server-api.ts';
+import { routingDiscovery } from '../routing/general-api.ts';
 export interface IdentityAdapter {
     getAccount(token: string): Promise<unknown>;
     beginEmailLink(token: string, email: string, deliver: (mail: {
@@ -48,6 +50,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
     const clock = options.clock ?? Date.now, db = env.DB, payloads = new PayloadStore(env, clock), store = new MemoryStore(db, clock, payloads), search = new Search(env, clock), ingest = new Ingest(env, clock), transfers = new Transfers(db, clock, payloads), admin = new Admin(env, clock), billing = new Billing(env, clock), jobs = new Jobs(env, clock);
     jobs.ingest = j => ingest.process(j);
     const settings = readSettings(env), origin = settings.origin;
+    const routingApi = createRoutingApi(env, { clock });
     const guarded = async (run: () => Promise<Response | null>, scim = false): Promise<Response | null> => { try {
         return await run();
     }
@@ -84,6 +87,10 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
             return guarded(async () => {
                 originCheck(request);
                 const url = new URL(request.url);
+                if (url.pathname === '/.well-known/memory-routing' && requireMethod(request,'GET')) {
+                    if (url.search) fail(400,'routing_request_invalid');
+                    return json(routingDiscovery(env,clock));
+                }
                 if (url.pathname === '/manage' && requireMethod(request, 'GET'))
                     return new Response(renderManagement(settings.brand, settings.origin), { headers: { 'content-type': 'text/html; charset=utf-8' } });
                 if (url.pathname === '/assets/release.js' && requireMethod(request, 'GET'))
@@ -113,6 +120,8 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
             return guarded(async () => {
                 originCheck(request);
                 const url = new URL(request.url), path = url.pathname, method = request.method;
+                const routingResponse = await routingApi(request, token);
+                if (routingResponse) return routingResponse;
                 if (path === '/mcp')
                     return mcp(request, token, store, search, ingest, settings.brand.name);
                 if (path === '/v1/spaces') requireMethod(request, 'GET', 'POST');

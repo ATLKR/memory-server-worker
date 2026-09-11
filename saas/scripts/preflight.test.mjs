@@ -17,6 +17,10 @@ function stagingConfig() {
   config.main = join(project, 'src/worker.ts');
   config.name = 'memory-target-test-staging';
   config.vars.DEPLOYMENT_ENVIRONMENT = 'staging';
+  // Keep this suite's D1 compatibility cases explicit after the serving target
+  // transitions to the separately tested durable backend.
+  config.vars.MEMORY_SQL_BACKEND = 'd1';
+  for (const key of ['MEMORY_SQL_DEPLOYMENT_ID', 'MEMORY_SQL_EPOCH', 'MEMORY_SQL_DATABASES_JSON']) delete config.vars[key];
   config.vars.STORAGE_MODE = 'inline';
   delete config.vars.STORAGE_SHARDS_JSON;
   config.vectorize = [{ binding: 'MEMORY_INDEX', index_name: 'memory-target-test-staging-index' }];

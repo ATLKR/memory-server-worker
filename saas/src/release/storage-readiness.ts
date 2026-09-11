@@ -11,6 +11,13 @@ export async function inspectStorage(env: ReleaseEnv): Promise<StorageReadiness>
     try {
         const storage = new PayloadStore(env);
         if (!storage.enabled || storage.shardIds().length < 2 || !env.MEMORY_PAYLOADS) return result;
+        if (env.MEMORY_SQL_BACKEND === 'durable') {
+            // The adapter checks the object's immutable identity, epoch and
+            // sealed ready state in this same SQL transaction. A configured
+            // namespace or schema declaration alone cannot satisfy readiness.
+            const control = await deadline(env.DB.withSession('first-primary').prepare('SELECT 1 AS ready').first<{ ready: number }>(), 3000);
+            if (control?.ready !== 1) return result;
+        }
         const shards = JSON.parse(env.STORAGE_SHARDS_JSON!) as { binding: string }[], bindings = env as unknown as Record<string, Database>;
         for (let offset = 0; offset < shards.length; offset += 4) {
             const probes = await Promise.all(shards.slice(offset, offset + 4).map(async shard =>
