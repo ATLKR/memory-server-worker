@@ -251,6 +251,16 @@ test('maintenance rejects every HTTP route before SQL binding resolution or requ
   assert.equal(f.d1Reads(), 0); assert.equal(namespaceReads, 0); assert.deepEqual(f.executions, []);
 });
 
+test('maintenance health exposes only compiled build metadata without touching storage',async()=>{
+ let reads=0;
+ const bindings={MEMORY_SQL_MAINTENANCE:'true',BUILD_REVISION:'untrusted runtime override',BUILD_FINGERPRINT:'untrusted runtime override'};
+ for(const name of ['DB','MEMORY_SQL','REQUEST_LIMITER'])Object.defineProperty(bindings,name,{get(){reads++;throw Error('must not access');}});
+ const response=await worker.fetch(new Request('https://memory.allenlabs.org/health'),bindings);
+ assert.equal(response.status,503);assert.equal(response.headers.get('retry-after'),'60');assert.equal(response.headers.get('cache-control'),'no-store');
+ assert.deepEqual(await response.json(),{error:'service_unavailable',build:{sourceRevision:'unreleased',resourceFingerprint:'',payloadFormat:2}});
+ assert.equal(reads,0);
+});
+
 for (const value of ['', 'TRUE', 'yes', '0', true, null])
   test('invalid maintenance setting fails closed before SQL selection: ' + String(value), async () => {
     const f = configured({ MEMORY_SQL_MAINTENANCE: value });

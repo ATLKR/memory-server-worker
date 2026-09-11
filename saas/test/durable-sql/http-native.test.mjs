@@ -247,6 +247,9 @@ test('native actual Hono and sealed SQL objects retain SSO, PAT, Space, payload 
     const observe = () => f.sql(control, "SELECT (SELECT count(*) FROM auth_flows) AS flows,(SELECT count(*) FROM memories) AS memories,(SELECT last_success_at FROM release_heartbeats WHERE name='maintenance') AS heartbeat");
     const before = await observe(), outbound = f.providerCalls.length;
     await f.setMaintenance('true');
+    const health = await f.request('/health');
+    assert.equal(health.status, 503);
+    assert.deepEqual((await health.json()).build, { sourceRevision: 'a'.repeat(40), resourceFingerprint: 'b'.repeat(64), payloadFormat: 2 });
     for (const path of ['/health', '/ready', '/auth/login', '/auth/callback', '/mcp', `/v1/spaces/${sessionSpace}/memories`]) {
       const response = await f.request(path, { token: scopedKey, method: 'POST', body: { body: 'This must never be stored', operationId: 'maintenance-rejected' } });
       assert.equal(response.status, 503); assert.equal(response.headers.get('cache-control'), 'no-store'); assert.equal(response.headers.get('retry-after'), '60');

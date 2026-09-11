@@ -8,10 +8,11 @@ import { resolveReleaseEnv } from '../durable-sql/runtime.ts';
 import { createRelease } from './extension.ts';
 import { json } from './util.ts';
 import { recordMetric } from './telemetry.ts';
+import { BUILD_REVISION, BUILD_FINGERPRINT } from './build-info.ts';
 // Only the original issuer's public JWKS are shared between requests.
 const publicKeyCache: PublicKeyCache = {};
-function unavailable(): Response {
-    return json({ error: 'service_unavailable' }, 503, { 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; frame-ancestors 'none'", 'referrer-policy': 'no-referrer', 'x-request-id': crypto.randomUUID() });
+function unavailable(includeBuild = false): Response {
+    return json({ error: 'service_unavailable', ...(includeBuild ? { build: { sourceRevision: BUILD_REVISION, resourceFingerprint: BUILD_FINGERPRINT, payloadFormat: 2 } } : {}) }, 503, { 'x-content-type-options': 'nosniff', 'content-security-policy': "default-src 'none'; frame-ancestors 'none'", 'referrer-policy': 'no-referrer', 'x-request-id': crypto.randomUUID() });
 }
 function maintenance(bindings: WorkerEnv): boolean {
     const value = bindings.MEMORY_SQL_MAINTENANCE;
@@ -38,7 +39,9 @@ http.use('*', async (context, next) => {
     // Stop before binding resolution, authentication and body consumption.
     // Operators must additionally fence SQL writes and drain in-flight work.
     if (maintenance(context.env)) {
-        const response = unavailable(); response.headers.set('retry-after', '60');
+        // Keep the normal public build attestation available during cutover,
+        // without resolving a database or treating maintenance as readiness.
+        const response = unavailable(context.req.method === 'GET' && context.req.path === '/health'); response.headers.set('retry-after', '60');
         return response;
     }
     context.set('releaseEnv', resolveReleaseEnv(context.env));
