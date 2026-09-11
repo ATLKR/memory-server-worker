@@ -6,3 +6,7 @@ saas/migrations/*.sql text eol=lf
 saas/shard-migrations/*.sql text eol=lf
 # Exact upstream Git blob fixtures must retain their reviewed bytes on Windows.
 saas/release-validation/tests/upstream/* text eol=lf
+# Portable plugin manifests and its reproducible bundle retain the same bytes.
+saas/plugins/allenlabs-memory/** text eol=lf
+# Bundled upstream template literals contain intentional indentation-only lines.
+saas/plugins/allenlabs-memory/scripts/mcp-stdio.mjs -whitespace linguist-generated=true

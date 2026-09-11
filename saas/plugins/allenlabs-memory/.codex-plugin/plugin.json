@@ -1,0 +1,19 @@
+{
+  "name": "allenlabs-memory",
+  "version": "0.1.0-rc.1",
+  "description": "Route agent memory to Cloudflare Agent Memory or an operator-configured Seoul PostgreSQL service.",
+  "author": {
+    "name": "Allen Labs"
+  },
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Allen Labs Memory",
+    "shortDescription": "Choose a memory destination before sending content.",
+    "longDescription": "Explicit memory routing with separate credentials for Cloudflare Agent Memory and a Seoul PostgreSQL service. Uncertain or region-locked content stays in Seoul. Medical Cloudflare transfers require server-verified consent.",
+    "developerName": "Allen Labs",
+    "category": "Productivity",
+    "capabilities": ["Read", "Write"],
+    "defaultPrompt": ["Classify this memory and choose its storage destination.", "Find relevant memories using the required storage location."]
+  },
+  "mcpServers": "./.mcp.json"
+}

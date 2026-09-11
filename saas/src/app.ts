@@ -102,7 +102,7 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     // Cookie credentials are browser sessions only. Agent OAuth grants expose memory data, not account administration.
     const external = Boolean(bearer?.includes('.'));
     if (external) {
-      if (url.pathname !== '/mcp' && !url.pathname.startsWith('/v1/spaces')) throw new HttpError(403, 'scope_denied');
+      if (url.pathname !== '/mcp' && !url.pathname.startsWith('/v1/spaces') && url.pathname !== '/v1/routing/consent/check') throw new HttpError(403, 'scope_denied');
       try { token = await auth.resolveBearer(token); } catch { throw new HttpError(401, 'invalid_token'); }
     }
     if (!bearer && !['GET', 'HEAD'].includes(request.method) && request.headers.get('origin') !== settings.origin) throw new HttpError(403, 'origin_required');

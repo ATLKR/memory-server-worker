@@ -14,6 +14,74 @@ const fail = message => { throw new DeploymentConfigurationError(message); };
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const configured = value => typeof value === 'string' && value.length > 0 && !/[<>\s]/.test(value) && !/placeholder|replace[_-]?me|your[_-]/i.test(value);
 const uuid = value => typeof value === 'string' && /^[a-f\d]{8}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{4}-[a-f\d]{12}$/i.test(value) && !/^0{8}-/.test(value);
+const sqlIdentifier = value => typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$/.test(value);
+const sqlIdentityVariables = ['MEMORY_SQL_DEPLOYMENT_ID', 'MEMORY_SQL_EPOCH', 'MEMORY_SQL_DATABASES_JSON'];
+
+function sqlBackend(config) {
+  const maintenance = config.vars?.MEMORY_SQL_MAINTENANCE;
+  if (maintenance !== undefined && !['false', 'true'].includes(maintenance))
+    fail('MEMORY_SQL_MAINTENANCE must be absent or the exact string false or true.');
+  const backend = config.vars?.MEMORY_SQL_BACKEND === undefined ? 'd1' : config.vars.MEMORY_SQL_BACKEND;
+  if (!['d1', 'durable'].includes(backend)) fail('MEMORY_SQL_BACKEND must explicitly select d1 or durable; no fallback is permitted.');
+  if (backend === 'd1' && sqlIdentityVariables.some(key => Object.hasOwn(config.vars ?? {}, key)))
+    fail('Durable SQL identity variables require MEMORY_SQL_BACKEND=durable.');
+  return backend;
+}
+
+/** The SQL object is local to this Worker. Cross-script or explicit namespace
+ * aliases would defeat the separate Worker/deployment identity isolation. A D1
+ * prepare deployment may bind the unserved destination before importing it. */
+function validateSqlNamespace(config, backend) {
+  const candidates = list(config.durable_objects ?? {}, 'bindings')
+    .filter(item => item.name === 'MEMORY_SQL' || item.class_name === 'MemorySqlDatabase');
+  if (!candidates.length && backend === 'd1') return;
+  if (config.unsafe !== undefined) fail('Unsafe binding or metadata overrides are unsupported for Durable SQL deployments.');
+  if (candidates.length !== 1 || candidates[0].name !== 'MEMORY_SQL' || candidates[0].class_name !== 'MemorySqlDatabase'
+      || Object.keys(candidates[0]).sort().join(',') !== 'class_name,name')
+    fail('Configure one local MEMORY_SQL binding to MemorySqlDatabase without namespace, script or environment overrides.');
+  let created = 0;
+  const tags = new Set();
+  for (const migration of list(config, 'migrations')) {
+    if (!configured(migration.tag) || tags.has(migration.tag)) fail('Durable SQL migration tags must be explicit and unique.');
+    tags.add(migration.tag);
+    for (const key of ['new_sqlite_classes', 'new_classes', 'deleted_classes']) {
+      if (migration[key] === undefined) continue;
+      if (!Array.isArray(migration[key]) || migration[key].some(value => typeof value !== 'string' || !/^[A-Za-z_$][A-Za-z0-9_$]*$/.test(value)))
+        fail('Invalid Durable SQL class migration.');
+      const occurrences = migration[key].filter(value => value === 'MemorySqlDatabase').length;
+      if (key === 'new_sqlite_classes') created += occurrences;
+      else if (occurrences) fail('MemorySqlDatabase must retain its original SQLite class migration.');
+    }
+    for (const key of ['renamed_classes', 'transferred_classes']) {
+      if (list(migration, key).some(value => value.from === 'MemorySqlDatabase' || value.to === 'MemorySqlDatabase'))
+        fail('Durable SQL class renames and transfers require a separate reviewed migration.');
+    }
+  }
+  if (created !== 1) fail('Configure exactly one new_sqlite_classes migration for MemorySqlDatabase.');
+}
+
+function validateSqlDatabases(config, bindings, hotBindings) {
+  const vars = config.vars;
+  if (!sqlIdentifier(vars.MEMORY_SQL_DEPLOYMENT_ID)) fail('Configure a valid Durable SQL deployment ID.');
+  if (typeof vars.MEMORY_SQL_EPOCH !== 'string' || !/^[1-9][0-9]*$/.test(vars.MEMORY_SQL_EPOCH)
+      || !Number.isSafeInteger(Number(vars.MEMORY_SQL_EPOCH))) fail('Configure a canonical positive safe-integer Durable SQL epoch.');
+  const errors = [], tree = typeof vars.MEMORY_SQL_DATABASES_JSON === 'string'
+    ? parseTree(vars.MEMORY_SQL_DATABASES_JSON, errors, { disallowComments: true }) : undefined;
+  if (!tree || errors.length || tree.type !== 'object') fail('Invalid Durable SQL database registry JSON.');
+  rejectDuplicateKeys(tree);
+  const databases = getNodeValue(tree), expected = ['DB', ...hotBindings].sort();
+  if (Object.keys(databases).sort().join(',') !== expected.join(',')) fail('Durable SQL database registry must exactly match DB and every configured hot shard.');
+  const ids = new Set();
+  for (const binding of expected) {
+    const database = databases[binding];
+    if (bindings.has(binding) || Object.hasOwn(vars, binding)) fail('Durable SQL logical binding collides with a resource binding or variable.');
+    if (binding !== 'DB' && !/^HOT_[A-Z0-9_]{1,60}$/.test(binding)) fail('Durable SQL hot shard bindings must use the HOT_ prefix.');
+    if (!object(database) || Object.keys(database).sort().join(',') !== 'databaseId,kind' || !sqlIdentifier(database.databaseId)
+        || database.kind !== (binding === 'DB' ? 'control' : 'hot') || ids.has(database.databaseId))
+      fail('Invalid or duplicate Durable SQL database identity or kind.');
+    ids.add(database.databaseId);
+  }
+}
 
 /** Deliberately do not forward unknown flags, credentials or named environments to Wrangler. */
 export function parseDeploymentArguments(args) {
@@ -73,6 +141,7 @@ function resourceSets(config) {
 
 function validate(config, production, isProductionFile) {
   if (!object(config.vars)) fail('Deployment configuration must define vars.');
+  const backend = sqlBackend(config);
   const environment = config.vars.DEPLOYMENT_ENVIRONMENT ?? (isProductionFile ? 'production' : undefined);
   if (!['production', 'staging'].includes(environment))
     fail('DEPLOYMENT_ENVIRONMENT must explicitly be production or staging for a custom configuration.');
@@ -110,8 +179,10 @@ function validate(config, production, isProductionFile) {
   }
   for (const item of list(config.durable_objects ?? {}, 'bindings')) addBinding(item.name);
   for (const item of list(config.queues ?? {}, 'producers')) addBinding(item.binding);
+  validateSqlNamespace(config, backend);
   const databases = list(config, 'd1_databases');
-  if (!databases.some(db => db.binding === 'DB') || databases.some(db => !uuid(db.database_id) || !configured(db.database_name) || (db.preview_database_id !== undefined && !uuid(db.preview_database_id))))
+  if (backend === 'durable' && databases.length) fail('Durable SQL deployment must not configure any D1 database bindings.');
+  if (backend === 'd1' && (!databases.some(db => db.binding === 'DB') || databases.some(db => !uuid(db.database_id) || !configured(db.database_name) || (db.preview_database_id !== undefined && !uuid(db.preview_database_id)))))
     fail('Provision each dedicated D1 database and configure its real database_id and database_name, including DB.');
   const buckets = list(config, 'r2_buckets');
   if (buckets.some(bucket => !configured(bucket.bucket_name) || (bucket.preview_bucket_name !== undefined && !configured(bucket.preview_bucket_name))))
@@ -125,7 +196,7 @@ function validate(config, production, isProductionFile) {
     if (!tree || errors.length || tree.type !== 'array') fail('Invalid shard registry JSON.');
     rejectDuplicateKeys(tree);
     const shards = getNodeValue(tree);
-    if (shards.length < (config.vars.STORAGE_MODE === 'sharded' ? 2 : 1) || shards.length > 16) fail('Sharded mode requires two to sixteen configured hot D1 shards.');
+    if (shards.length < (config.vars.STORAGE_MODE === 'sharded' ? 2 : 1) || shards.length > 16) fail('Sharded mode requires two to sixteen configured hot SQL shards.');
     const ids = new Set(), registered = new Set();
     for (const shard of shards) {
       if (!object(shard) || Object.keys(shard).sort().join(',') !== 'binding,id,mode' ||
@@ -135,14 +206,17 @@ function validate(config, production, isProductionFile) {
       ids.add(shard.id); registered.add(shard.binding);
     }
     if (config.vars.STORAGE_MODE === 'sharded' && !shards.some(shard => shard.mode === 'active')) fail('Sharded writes require an active hot shard.');
-    if (databases.length !== shards.length + 1 || databases.some(db => db.binding !== 'DB' && !registered.has(db.binding))) fail('Shard registry must exactly match the configured hot D1 bindings.');
-    if (new Set(databases.map(db => db.database_id.toLowerCase())).size !== databases.length || new Set(databases.map(db => db.database_name)).size !== databases.length)
-      fail('Every central and hot D1 binding must use a distinct physical database ID and name.');
-    if (databases.some(db => db.migrations_dir !== (db.binding === 'DB' ? 'migrations' : 'shard-migrations')))
-      fail('Use migrations for DB and shard-migrations for every hot D1 binding.');
+    if (backend === 'd1') {
+      if (databases.length !== shards.length + 1 || databases.some(db => db.binding !== 'DB' && !registered.has(db.binding))) fail('Shard registry must exactly match the configured hot D1 bindings.');
+      if (new Set(databases.map(db => db.database_id.toLowerCase())).size !== databases.length || new Set(databases.map(db => db.database_name)).size !== databases.length)
+        fail('Every central and hot D1 binding must use a distinct physical database ID and name.');
+      if (databases.some(db => db.migrations_dir !== (db.binding === 'DB' ? 'migrations' : 'shard-migrations')))
+        fail('Use migrations for DB and shard-migrations for every hot D1 binding.');
+    }
     if (buckets.filter(bucket => bucket.binding === 'MEMORY_PAYLOADS').length !== 1) fail('Configure the private MEMORY_PAYLOADS R2 binding; verify public access is disabled separately.');
     hotBindings = shards.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).map(shard => shard.binding);
   }
+  if (backend === 'durable') validateSqlDatabases(config, bindings, hotBindings);
   const emails = list(config, 'send_email');
   const email = emails.find(item => item.name === 'EMAIL');
   let mailValid = false;
@@ -153,6 +227,11 @@ function validate(config, production, isProductionFile) {
   if (environment === 'staging') {
     if (isProductionFile) fail('Staging must use a separate configuration file from production.');
     if (config.name === production.name) fail('Staging must not reuse the production Worker name.');
+    // The named database identity remains reserved across epochs and map changes.
+    // Separate Worker names alone are not sufficient evidence of intended isolation.
+    if (backend === 'durable' && sqlBackend(production) === 'durable'
+        && config.vars.MEMORY_SQL_DEPLOYMENT_ID === production.vars.MEMORY_SQL_DEPLOYMENT_ID)
+      fail('Staging must not reuse the production Durable SQL deployment identity.');
     let productionOrigin;
     try { productionOrigin = readSettings(production.vars ?? {}).origin; } catch { fail('Invalid production reference configuration.'); }
     if (new URL(settings.origin).hostname === new URL(productionOrigin).hostname)
@@ -164,7 +243,7 @@ function validate(config, production, isProductionFile) {
     if ([...selected.vectorize].some(value => reserved.vectorize.has(value))) fail('Staging must not reuse any production Vectorize index name.');
     if ([...selected.analytics].some(value => reserved.analytics.has(value))) fail('Staging must not reuse any production Analytics dataset name.');
   }
-  return { environment, settings, hotBindings };
+  return { environment, settings, hotBindings, sqlBackend: backend };
 }
 
 export async function loadDeploymentConfiguration({ configPath, cwd = process.cwd(), productionConfigPath = PRODUCTION_CONFIG_PATH, processEnvironment = process.env } = {}) {
