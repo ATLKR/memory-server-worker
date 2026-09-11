@@ -107,6 +107,34 @@ test('historical cut preserves explicit unstopped semantics and hashes both evid
   assert.equal(manifest.inventory.capture.writesStopped, false); assert.equal(manifest.inventory.capture.providersDrained, null);
   await writeFile(join(f.dir, 'reconciliation.json'), '{}'); await assert.rejects(f.verify(result.manifestSha256), /hash|SHA|changed|reconciliation/i);
 });
+const defaultMultipartRule = () => ({ id: 'Default Multipart Abort Rule', enabled: true, conditions: {}, abortMultipartUploadsTransition: { condition: { type: 'Age', maxAge: 604800 } } });
+test('historical lifecycle evidence preserves the actual prefixless multipart-abort default', async t => {
+  const f = await historicalFixture(t), rule = defaultMultipartRule();
+  for (const observation of [f.evidence.sourceBefore, f.evidence.sourceAfter]) observation.bucket.lifecycleRules = [structuredClone(rule)];
+  await f.saveHistorical(); const result = await f.prepare();
+  assert.equal((await f.verify(result.manifestSha256)).status, 'verified');
+  const retained = JSON.parse(await readFile(join(f.dir, 'capture-evidence.json')));
+  assert.deepEqual(retained.sourceBefore.bucket.lifecycleRules, [rule]);
+  assert.deepEqual(retained.sourceAfter.bucket.lifecycleRules, [rule]);
+  assert.equal(Object.hasOwn(retained.sourceBefore.bucket.lifecycleRules[0].conditions, 'prefix'), false);
+});
+for (const [name, mutate] of [
+  ['object deletion', r => { r.deleteObjectsTransition = { condition: { type: 'Age', maxAge: 86400 } }; }],
+  ['storage transition', r => { r.storageClassTransitions = [{ storageClass: 'InfrequentAccess', condition: { type: 'Age', maxAge: 86400 } }]; }],
+  ['unknown transition', r => { r.futureTransition = {}; }],
+  ['missing abort', r => { delete r.abortMultipartUploadsTransition; }],
+  ['missing condition', r => { r.abortMultipartUploadsTransition = {}; }],
+  ['unknown abort field', r => { r.abortMultipartUploadsTransition.unknown = true; }],
+  ['unknown age field', r => { r.abortMultipartUploadsTransition.condition.unknown = true; }],
+  ['different condition', r => { r.abortMultipartUploadsTransition.condition = { type: 'Date', date: '2030-01-01' }; }],
+  ['invalid age', r => { r.abortMultipartUploadsTransition.condition.maxAge = -1; }],
+  ['unknown filter', r => { r.conditions.tag = 'unreviewed'; }],
+  ['null prefix', r => { r.conditions.prefix = null; }],
+]) test('historical lifecycle prefix omission refuses ' + name, async t => {
+  const f = await historicalFixture(t), rule = defaultMultipartRule(); mutate(rule);
+  for (const observation of [f.evidence.sourceBefore, f.evidence.sourceAfter]) observation.bucket.lifecycleRules = [structuredClone(rule)];
+  await f.saveHistorical(); await assert.rejects(f.prepare(), /lifecycle/i);
+});
 for (const [name, mutate] of [
   ['changed primary bookmark', f => { f.evidence.after.DB = 'new'; }],
   ['incomplete terminal scan', f => { f.evidence.scanB.pages[0].terminal = null; }],

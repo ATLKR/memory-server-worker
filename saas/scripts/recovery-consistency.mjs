@@ -21,6 +21,14 @@ const stamp=v=>Number.isSafeInteger(v)&&v>0;
 const name=v=>typeof v==='string'&&/^[A-Za-z0-9_.:-]{1,128}$/.test(v);
 const bounded=(v,max=1000)=>{insist(Array.isArray(v)&&v.length<=max,'Evidence item bound exceeded');return v;};
 function exact(v,keys){insist(object(v)&&Object.keys(v).sort().join(',')===[...keys].sort().join(','),'Unexpected or missing historical capture evidence');}
+function prefixlessMultipartAbort(rule){
+ // The provider's default incomplete-upload rule can return conditions:{}.
+ // Preserve those observed bytes; accept omission only for this known shape.
+ if(Object.keys(rule).sort().join(',')!=='abortMultipartUploadsTransition,conditions,enabled,id'||Object.keys(rule.conditions).length!==0)return false;
+ const abort=rule.abortMultipartUploadsTransition,condition=abort?.condition;
+ return object(abort)&&Object.keys(abort).join(',')==='condition'&&object(condition)&&Object.keys(condition).sort().join(',')==='maxAge,type'
+  &&condition.type==='Age'&&Number.isSafeInteger(condition.maxAge)&&condition.maxAge>0;
+}
 function moduleList(values){
  const seen=new Set();return bounded(values,100).map(v=>{exact(v,['name','bytes','sha256']);insist(typeof v.name==='string'&&/^[A-Za-z0-9_./-]{1,256}$/.test(v.name)&&!v.name.split('/').includes('..')&&!seen.has(v.name)&&Number.isSafeInteger(v.bytes)&&v.bytes>0&&v.bytes<=8*1024*1024&&digest(v.sha256),'Invalid module identity');seen.add(v.name);return {...v};}).sort((a,b)=>a.name.localeCompare(b.name));
 }
@@ -55,7 +63,8 @@ export function validateWriterObservation(observation,policy,config,context,now=
  for(const [key,value] of Object.entries(config.vars))insist(actual.get(key)?.type==='plain_text'&&actual.get(key).text===value,'Actual configuration variable differs from source config');
  exact(observation.bucket,['name','createdAt','lifecycleRules']);insist(observation.bucket.name===policy.bucketName&&observation.bucket.createdAt===policy.bucketCreatedAt,'Actual bucket identity/creation differs');
  for(const rule of bounded(observation.bucket.lifecycleRules,1000)){
-  insist(object(rule)&&typeof rule.id==='string'&&typeof rule.enabled==='boolean'&&object(rule.conditions)&&typeof rule.conditions.prefix==='string','Unknown bucket lifecycle rule');
+  insist(object(rule)&&typeof rule.id==='string'&&typeof rule.enabled==='boolean'&&object(rule.conditions)
+   &&(typeof rule.conditions.prefix==='string'||prefixlessMultipartAbort(rule)),'Unknown bucket lifecycle rule');
   // Default incomplete-multipart expiry cannot delete a complete payload. All
   // other enabled transitions are unsupported, even on another prefix.
   const allowed=['id','enabled','conditions','abortMultipartUploadsTransition'];
