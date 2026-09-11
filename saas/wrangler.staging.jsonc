@@ -16,7 +16,7 @@
     "MEMORY_ROUTING_ENABLED": "false",
     "MEMORY_GENERAL_ROUTING_ENABLED": "false",
     "MEMORY_SQL_IMPORT_PUBLIC_KEY": "MCowBQYDK2VwAyEAxEGx4nxwhNXsm-kgvivbAdaDcrI_hwty9zq63nvBGoo",
-    "MEMORY_SQL_MAINTENANCE": "true",
+    "MEMORY_SQL_MAINTENANCE": "false",
     "MEMORY_SQL_BACKEND": "durable",
     "MEMORY_SQL_DEPLOYMENT_ID": "memory-staging",
     "MEMORY_SQL_EPOCH": "1",
