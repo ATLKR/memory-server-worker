@@ -81,6 +81,15 @@ export interface AI {
 }
 export interface ReleaseEnv extends StorageEnv {
     DB: Database;
+    /** Transitional consent runtime: identity authority still uses DB. */
+    MEMORY_CONSENT_LEDGER?: import('../routing/ledger-types.ts').RoutingLedger;
+    MEMORY_ROUTING_ENABLED?: 'true' | 'false';
+    MEMORY_AGENT_MEMORY_ACCOUNT_ID?: string;
+    MEMORY_AGENT_MEMORY_NAMESPACE?: string;
+    MEMORY_AGENT_MEMORY_TOKEN?: string;
+    /** Explicit operator admission while the complete regional runtime is pending. */
+    MEMORY_ROUTING_MEDICAL_SPACES_JSON?: string;
+    MEMORY_ROUTING_SEOUL_SPACES_JSON?: string;
     PUBLIC_ORIGIN?: string;
     SSO_CLIENT_ID?: string;
     PRODUCT_NAME?: string;

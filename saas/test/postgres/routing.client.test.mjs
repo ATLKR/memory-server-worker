@@ -22,6 +22,30 @@ function fixture(options = {}) {
   return { calls, credentials, client: createRoutingClient({ targets, credential, fetch, ...options }) };
 }
 
+test('provider-invalid raw values fail locally before discovery or credential access', async () => {
+  for (const args of [
+    ...['.', '..', 'a\nb', 'a\u007fb', '\ud800'].map(sessionId => ({ ...input, sessionId })),
+    { ...input, messages: [{ role: 'user', content: '\udc00' }] },
+    ...['0000-01-01T00:00:00Z', '2026-09-11T00:00Z', '2026-09-11T00:00:00.1234567890Z'].map(timestamp =>
+      ({ ...input, messages: [{ role: 'user', content: 'valid', timestamp }] })),
+  ]) {
+    const f = fixture();
+    await assert.rejects(f.client.call('memory_ingest', args), { code: 'routing_request_invalid' });
+    assert.equal(f.calls.length, 0); assert.equal(f.credentials.length, 0);
+  }
+  const f = fixture();
+  await assert.rejects(f.client.call('memory_search', { routing: input.routing, query: '\ud800' }), { code: 'routing_request_invalid' });
+  assert.equal(f.calls.length, 0); assert.equal(f.credentials.length, 0);
+});
+
+test('well-formed Unicode and nanosecond timestamps retain their original wire values', async () => {
+  const f = fixture(), args = { ...input, sessionId: '서울😀',
+    messages: [{ role: 'user', content: '유니코드 😀', timestamp: '2026-09-11T00:00:00.123456789+09:00' }] };
+  await f.client.call('memory_ingest', args);
+  const sent = JSON.parse(f.calls[1].init.body).params.arguments;
+  assert.equal(sent.sessionId, args.sessionId); assert.deepEqual(sent.messages, args.messages);
+});
+
 test('medical transcript selects Seoul locally, preflights without token/body and then preserves full raw input', async () => {
   const f = fixture();
   const result = await f.client.call('memory_ingest', input);

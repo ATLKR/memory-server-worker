@@ -16,18 +16,24 @@ export interface RoutingCallOptions { signal?: AbortSignal }
 export interface RoutingToolResult { content: { type: 'text'; text: string }[]; isError?: boolean }
 const utf8 = new TextEncoder();
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
+const wellFormed = (value: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value);
+// Match the provider's accepted wire values before credentials, receipts or
+// durable operation IDs are used. Zod's ISO parser also permits year zero,
+// arbitrary fractional precision and timestamps without seconds.
+const timestampSchema = z.iso.datetime({ offset: true }).max(40).refine(value =>
+  Number(value.slice(0, 4)) > 0 && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?(?:Z|[+-]\d{2}:\d{2})$/.test(value));
 const messageSchema = z.strictObject({
   role: z.enum(['system', 'user', 'assistant']),
-  content: z.string().refine(s => utf8.encode(s).length <= 32768),
-  timestamp: z.iso.datetime({ offset: true }).optional(),
+  content: z.string().refine(s => wellFormed(s) && utf8.encode(s).length <= 32768),
+  timestamp: timestampSchema.optional(),
 });
 export const ingestRoutingInputSchema = z.strictObject({
   routing: routingDecisionSchema, operationId: identifier,
   messages: z.array(messageSchema).min(1).max(500).refine(messages => messages.reduce((n, m) => n + utf8.encode(m.content).length, 0) <= 1024 * 1024),
-  sessionId: z.string().min(1).max(64).optional(),
+  sessionId: z.string().min(1).max(64).refine(s => wellFormed(s) && !/[\u0000-\u001f\u007f]/u.test(s) && s !== '.' && s !== '..').optional(),
 });
 export const searchRoutingInputSchema = z.strictObject({
-  routing: routingDecisionSchema, query: z.string().min(1).refine(s => utf8.encode(s).length <= 1024),
+  routing: routingDecisionSchema, query: z.string().min(1).refine(s => wellFormed(s) && utf8.encode(s).length <= 1024),
   limit: z.number().int().min(1).max(50).optional(),
 });
 const metadataSchema = z.strictObject({ version: z.literal(1), protocol: z.literal('memory-routing-v1'), target: routingTargetSchema });

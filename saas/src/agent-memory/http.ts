@@ -146,7 +146,9 @@ export function createAgentMemoryHttp(config: AgentMemoryHttpConfig): AgentMemor
       const headers: Record<string, string> = { authorization, accept: 'application/json' };
       if (body !== undefined) headers['content-type'] = 'application/json';
       dispatched = true;
-      const response = await fetcher(url, { method: spec.method, headers, body, signal: controller.signal, redirect: 'error', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer' });
+      // Workerd supports manual redirects; redirect:'error' is rejected before
+      // dispatch. Inspect the 3xx below without ever following its Location.
+      const response = await fetcher(url, { method: spec.method, headers, body, signal: controller.signal, redirect: 'manual', credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer' });
       received = response;
       if (!active || abortCode) { cancelBody(response); checkpoint(); }
       checkpoint();

@@ -24,7 +24,7 @@ test('ingest preserves full raw messages, pins HTTPS and disables redirects/ambi
     calls++;
     assert.equal(url, `https://api.cloudflare.com/client/v4/accounts/${base.accountId}/agent-memory/namespaces/memory-test/profiles/space-1/ingest`);
     assert.equal(init.method, 'POST');
-    assert.equal(init.redirect, 'error');
+    assert.equal(init.redirect, 'manual');
     assert.equal(init.credentials, 'omit');
     assert.equal(init.cache, 'no-store');
     assert.equal(new Headers(init.headers).get('authorization'), `Bearer ${base.token}`);
@@ -216,7 +216,7 @@ test('calendar-invalid timestamps and malformed call options are sanitized befor
   ]) await assert.rejects(invoke(), e => safeError(e, 'agent_memory_input_invalid', 'not_dispatched'));
 });
 
-test('off-origin response metadata is rejected even when an injected fetch ignores redirect:error', async () => {
+test('off-origin response metadata is rejected even when an injected fetch ignores redirect:manual', async () => {
   const api = create(async () => {
     const r = response(null);
     Object.defineProperty(r, 'url', { value: 'https://evil.example/' });
