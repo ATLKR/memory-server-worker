@@ -17,6 +17,10 @@
     "MEMORY_GENERAL_ROUTING_ENABLED": "false",
     "MEMORY_SQL_IMPORT_PUBLIC_KEY": "MCowBQYDK2VwAyEAxEGx4nxwhNXsm-kgvivbAdaDcrI_hwty9zq63nvBGoo",
     "MEMORY_SQL_MAINTENANCE": "true",
+    "MEMORY_SQL_BACKEND": "durable",
+    "MEMORY_SQL_DEPLOYMENT_ID": "memory-staging",
+    "MEMORY_SQL_EPOCH": "1",
+    "MEMORY_SQL_DATABASES_JSON": "{\"DB\":{\"databaseId\":\"control\",\"kind\":\"control\"},\"HOT_01\":{\"databaseId\":\"hot-01\",\"kind\":\"hot\"},\"HOT_02\":{\"databaseId\":\"hot-02\",\"kind\":\"hot\"}}",
     "ENROLLMENT_MODE": "invite",
     "AI_MONTHLY_BUDGET_MICROUSD": "200000",
     "AUTO_ERASURE_ENABLED": "false",
@@ -32,11 +36,6 @@
     "PRODUCT_SUPPORT_EMAIL": "allenlim@allenlabs.org",
     "PRODUCT_ACCENT_COLOR": "#276747"
   },
-  "d1_databases": [
-    { "binding": "DB", "database_name": "allenlabs-memory-staging", "database_id": "92c788b0-9242-46f5-97e2-3c1471e68bb7", "migrations_dir": "migrations" },
-    { "binding": "HOT_01", "database_name": "allenlabs-memory-staging-hot-01", "database_id": "0e264d77-4357-4030-943d-1845df4495ed", "migrations_dir": "shard-migrations" },
-    { "binding": "HOT_02", "database_name": "allenlabs-memory-staging-hot-02", "database_id": "e3944abb-3341-45b3-ad96-9629d4de8bf9", "migrations_dir": "shard-migrations" }
-  ],
   "r2_buckets": [{ "binding": "MEMORY_PAYLOADS", "bucket_name": "allenlabs-memory-staging-payloads" }],
   "durable_objects": { "bindings": [
     { "name": "MEMORY_CONSENT_LEDGER", "class_name": "OrganizationConsentLedger" },
