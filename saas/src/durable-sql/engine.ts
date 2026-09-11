@@ -2,6 +2,7 @@ import type { Result } from '../release/types.ts';
 import { copyDurableSqlRow, durableSqlBytes, durableSqlObjectName, durableSqlReject, DURABLE_SQL_LIMITS,
   parseDurableSqlExecution } from './types.ts';
 import type { DurableSqlExecution, DurableSqlIdentity, DurableSqlStorage } from './types.ts';
+import { assertRecoveryUnlocked, initializeRecoveryMetadata } from './recovery-state.ts';
 
 /** This metadata never activates itself. The separately reviewed snapshot
  * importer owns binding, verification and the transition to ready. */
@@ -64,7 +65,10 @@ export class SqlDatabaseEngine {
   constructor(storage: DurableSqlStorage, options: { objectName: string }) {
     this.storage = storage; this.objectName = options.objectName;
   }
-  initialize(): void { this.storage.transactionSync(() => { this.storage.sql.exec(DURABLE_SQL_STATE_SCHEMA).toArray(); }); }
+  initialize(): void {
+    this.storage.transactionSync(() => { this.storage.sql.exec(DURABLE_SQL_STATE_SCHEMA).toArray(); });
+    initializeRecoveryMetadata(this.storage);
+  }
   private ready(identity: DurableSqlIdentity): void {
     if (this.objectName !== durableSqlObjectName(identity)) durableSqlReject('durable_sql_identity_mismatch');
     const row = this.storage.sql.exec('SELECT deployment_id,database_id,kind,epoch,status,schema_hash,snapshot_hash FROM durable_sql_state WHERE singleton=1').toArray()[0];
@@ -78,6 +82,7 @@ export class SqlDatabaseEngine {
     const value = parseDurableSqlExecution(input);
     for (const statement of value.statements) validateDurableSql(statement.sql);
     return this.storage.transactionSync(() => {
+      assertRecoveryUnlocked(this.storage);
       this.ready(value.identity);
       let consumedRows = 0, consumedBytes = 0;
       const results: Result[] = [];

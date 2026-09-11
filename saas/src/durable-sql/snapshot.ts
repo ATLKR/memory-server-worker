@@ -1,5 +1,6 @@
 /** Operator-only, signed snapshot restoration. Never exposed as an application
  * HTTP route. Historical command rows are copied before live triggers exist. */
+import { assertRecoveryUnlocked, initializeRecoveryMetadata, RECOVERY_TABLE_NAMES, validateRecoveryCatalog } from './recovery-state.ts';
 export type SnapshotValue = string | number | null;
 export interface SnapshotIdentity { deploymentId: string; databaseId: string; kind: 'control' | 'hot'; epoch: number }
 export interface SnapshotSchema { type: 'table' | 'index' | 'view' | 'trigger'; name: string; tableName: string; sql: string }
@@ -100,6 +101,7 @@ export class SnapshotImporter {
   private readonly options: { objectName: string; publicKey: string; clock?: () => number };
   constructor(storage: SnapshotStorage, options: { objectName: string; publicKey: string; clock?: () => number }) { this.storage = storage; this.options = options; }
   initialize(): void {
+    initializeRecoveryMetadata(this.storage);
     this.storage.transactionSync(() => {
       this.storage.sql.exec('CREATE TABLE IF NOT EXISTS durable_sql_import(singleton INTEGER PRIMARY KEY CHECK(singleton=1),plan_hash TEXT NOT NULL,plan_json TEXT NOT NULL,next_chunk INTEGER NOT NULL,total_bytes INTEGER NOT NULL,sealed_at_ms INTEGER)').toArray();
       this.storage.sql.exec('CREATE TABLE IF NOT EXISTS durable_sql_import_rows(chunk_index INTEGER PRIMARY KEY,table_name TEXT NOT NULL,start_row INTEGER NOT NULL,payload TEXT NOT NULL,hash TEXT NOT NULL)').toArray();
@@ -137,10 +139,12 @@ export class SnapshotImporter {
     if (plan.schemaHash !== await snapshotHash(plan.schema) || plan.snapshotHash !== await snapshotHash({ tables: plan.tables, chunks: plan.chunks })) fail('snapshot_manifest');
     return this.storage.transactionSync(() => {
       this.time(grant);
+      assertRecoveryUnlocked(this.storage);
       const prior = this.storage.sql.exec('SELECT plan_hash FROM durable_sql_import WHERE singleton=1').toArray()[0];
       if (prior) { if (prior.plan_hash !== planHash) fail('snapshot_conflict'); return { planHash, replayed: true }; }
-      const existing = this.storage.sql.exec("SELECT name FROM sqlite_master WHERE lower(name) NOT IN ('durable_sql_state','durable_sql_import','durable_sql_import_rows','__cf_kv') AND NOT (lower(name) GLOB 'sqlite_autoindex_durable_sql_*' AND lower(tbl_name) IN ('durable_sql_state','durable_sql_import','durable_sql_import_rows'))").toArray();
-      if (existing.length || this.storage.sql.exec('SELECT singleton FROM durable_sql_state').toArray().length) fail('snapshot_target_not_empty');
+      const existing = this.storage.sql.exec("SELECT name FROM sqlite_master WHERE lower(name) NOT IN ('durable_sql_state','durable_sql_import','durable_sql_import_rows','durable_sql_recovery_runs','durable_sql_recovery_active','__cf_kv') AND NOT (lower(name) GLOB 'sqlite_autoindex_durable_sql_*' AND lower(tbl_name) IN ('durable_sql_state','durable_sql_import','durable_sql_import_rows','durable_sql_recovery_runs','durable_sql_recovery_active'))").toArray();
+      if (existing.length || this.storage.sql.exec('SELECT singleton FROM durable_sql_state').toArray().length
+        || this.storage.sql.exec('SELECT run_id FROM durable_sql_recovery_runs LIMIT 1').toArray().length) fail('snapshot_target_not_empty');
       const x = plan.identity;
       this.storage.sql.exec("INSERT INTO durable_sql_state VALUES(1,?,?,?,?, 'importing',?,?)", x.deploymentId, x.databaseId, x.kind, x.epoch, plan.schemaHash, plan.snapshotHash).toArray();
       this.storage.sql.exec('INSERT INTO durable_sql_import VALUES(1,?,?,0,0,NULL)', planHash, snapshotCanonical(plan)).toArray();
@@ -155,6 +159,7 @@ export class SnapshotImporter {
     await this.authorize(grant, planHash);
     return this.storage.transactionSync(() => {
       this.time(grant);
+      assertRecoveryUnlocked(this.storage);
       const current = this.stored(planHash), chunk = current.plan.chunks[index];
       if (current.sealed) fail('snapshot_closed');
       if (!chunk || chunk.hash !== chunkHash || chunk.rowCount !== rows.length) fail('snapshot_chunk_hash');
@@ -178,6 +183,7 @@ export class SnapshotImporter {
     await this.authorize(grant, planHash);
     return this.storage.transactionSync(() => {
       this.time(grant);
+      assertRecoveryUnlocked(this.storage);
       const current = this.stored(planHash), plan = current.plan, rows = plan.tables.reduce((sum, table) => sum + table.rowCount, 0);
       if (current.sealed) return { ready: true, rows, snapshotHash: plan.snapshotHash };
       if (current.next !== plan.chunks.length) fail('snapshot_incomplete');
@@ -218,6 +224,8 @@ export class SnapshotImporter {
       for (const item of plan.schema.filter(item => item.type === 'table' && /^CREATE\s+VIRTUAL\s+TABLE\b/i.test(item.sql))) {
         for (const suffix of ['data', 'idx', 'content', 'docsize', 'config']) expectedNames.add(item.name + '_' + suffix);
       }
+      validateRecoveryCatalog(this.storage);
+      for (const name of RECOVERY_TABLE_NAMES) expectedNames.add(name);
       for (const item of this.storage.sql.exec('SELECT name,tbl_name,sql FROM sqlite_master').toArray()) {
         const name = item.name as string;
         if (['durable_sql_state', 'durable_sql_import', 'durable_sql_import_rows', '__cf_kv'].includes(name)
@@ -238,6 +246,7 @@ export class SnapshotImporter {
     await this.authorize(grant, planHash);
     return this.storage.transactionSync(() => {
       this.time(grant);
+      assertRecoveryUnlocked(this.storage);
       const imported = this.storage.sql.exec('SELECT plan_hash,sealed_at_ms FROM durable_sql_import WHERE singleton=1').toArray()[0];
       if (!imported || imported.plan_hash !== planHash) fail('snapshot_conflict');
       const state = this.storage.sql.exec('SELECT status FROM durable_sql_state WHERE singleton=1').toArray()[0];
