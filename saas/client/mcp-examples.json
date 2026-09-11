@@ -1,0 +1,7 @@
+{
+  "listSpaces": {"name": "memory_spaces", "arguments": {"limit": 50}},
+  "search": {"name": "memory_search", "arguments": {"spaceId": "REPLACE_WITH_SPACE_ID", "query": "project decisions", "limit": 10}},
+  "add": {"name": "memory_add", "arguments": {"spaceId": "REPLACE_WITH_SPACE_ID", "body": "The user approved this project decision.", "kind": "fact", "provenance": {"originKind": "user"}, "operationId": "REPLACE_WITH_UNIQUE_OPERATION_ID"}},
+  "get": {"name": "memory_get", "arguments": {"spaceId": "REPLACE_WITH_SPACE_ID", "memoryId": "REPLACE_WITH_MEMORY_ID"}},
+  "update": {"name": "memory_update", "arguments": {"spaceId": "REPLACE_WITH_SPACE_ID", "memoryId": "REPLACE_WITH_MEMORY_ID", "body": "The user approved this revised decision.", "expectedRevision": 1, "operationId": "REPLACE_WITH_UNIQUE_UPDATE_OPERATION_ID"}}
+}

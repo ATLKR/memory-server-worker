@@ -1,0 +1,5 @@
+# Merge this table into your Codex config; do not overwrite unrelated settings.
+# Inject MEMORY_SAAS_PAT into the Codex process environment from your secret store.
+[mcp_servers.allenlabs-memory]
+url = "https://memory.allenlabs.org/mcp"
+bearer_token_env_var = "MEMORY_SAAS_PAT"

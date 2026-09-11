@@ -3,6 +3,28 @@
 All notable changes to this project are documented here. This project follows
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+
+- Patched development-only sharp to 0.35.4 and Vitest to 4.1.11. The root
+  dependency audit reports no vulnerabilities; runtime dependencies and the
+  legacy service version remain unchanged.
+- In the SaaS 0.4.0-rc.2 source, bound expired transient-state cleanup and add
+  forward migration 7 with supporting indexes. A five-minute cleanup schedule
+  leaves provider jobs and automatic memory erasure explicitly disabled.
+- Disable unconfigured ingestion, index rebuild, billing and proof-mail controls,
+  and reject ingestion/rebuild requests when processing is unavailable.
+- Request explicit identity and memory scopes in MCP SSO templates. Add fixed
+  callback failure-phase codes and upstream HTTP status without exposing secrets.
+- Fix Worker token/JWKS and provider requests failing before transmission because
+  workerd does not support `redirect: 'error'`. Use manual redirect handling with
+  explicit 3xx rejection, covered by actual workerd/D1 authentication tests.
+
+See [SaaS integration notes](saas/docs/release/INTEGRATION.md) for activation
+defaults and verification limits. This entry does not record a deployment or
+hosted CI result.
+
 ## [3.2.1] - 2026-09-05
 
 ### Fixed

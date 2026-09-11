@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "allenlabs-memory": {
+      "type": "http",
+      "url": "https://memory.allenlabs.org/mcp",
+      "oauth": {
+        "scopes": "openid profile email memory:read memory:write memory:delete"
+      }
+    }
+  }
+}

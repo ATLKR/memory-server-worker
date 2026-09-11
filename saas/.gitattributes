@@ -1,0 +1,2 @@
+# Keep the reproducible generated Unicode table byte-identical on Windows.
+src/release/unicode61.ts text eol=lf

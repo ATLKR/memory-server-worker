@@ -1,3 +1,8 @@
 allenlim-memory-server-chatgpt.zip binary
 *.sha256 text eol=lf
 .nvmrc text eol=lf
+saas/*.sql text eol=lf
+saas/migrations/*.sql text eol=lf
+saas/shard-migrations/*.sql text eol=lf
+# Exact upstream Git blob fixtures must retain their reviewed bytes on Windows.
+saas/release-validation/tests/upstream/* text eol=lf
