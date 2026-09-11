@@ -51,11 +51,21 @@ export class Jobs {
         // Scalar IDs in one JSON array avoid workerd's compound-SELECT limit.
         // Fairness follows pending availability or an abandoned lease's expiry;
         // only these at-most-eight candidates participate in the final sort.
-        const canIngest = Boolean(this.env.AI && this.env.PAYLOAD_KEY && this.ingest);
+        let ingestKeyId: string | null = null;
+        if (this.env.AI && this.env.PAYLOAD_KEY && this.ingest) {
+            try { ingestKeyId = await payloadKeyId(this.env.PAYLOAD_KEY); }
+            catch (error) {
+                // An invalid extraction key must not stall deletion or indexing.
+                // Leave ingests unclaimed until configuration is repaired.
+                const code = (error as { code?: string })?.code;
+                if (code !== 'payload_key_invalid' && code !== 'invalid_encoding')
+                    throw error;
+            }
+        }
         // The durable rotation guard must reject an old worker's claim before
         // its undecryptable attempt consumes the new submission's retry budget.
         // Other job kinds keep treating the entire token as an opaque lease.
-        const token = (canIngest ? `v2.${await payloadKeyId(this.env.PAYLOAD_KEY!)}.` : '') + crypto.randomUUID();
+        const token = (ingestKeyId ? `v2.${ingestKeyId}.` : '') + crypto.randomUUID();
         const branches: string[] = [], values: Value[] = [token, at];
         const include = (kind: 'upsert' | 'delete' | 'ingest', cleanupOnly: number) => {
             branches.push(`(SELECT id FROM release_jobs INDEXED BY release_jobs_pending_claim
@@ -72,7 +82,7 @@ export class Jobs {
             include('upsert', 1);
             include('delete', 0);
         }
-        if (canIngest)
+        if (ingestKeyId)
             include('ingest', 0);
         if (!branches.length)
             return null;

@@ -13,6 +13,26 @@ function worker(db,clock) {
  return jobs;
 }
 
+for (const invalidKey of [Buffer.alloc(31,7).toString('base64url'), 'invalid key!'])
+test('invalid extraction key does not block independent work: '+JSON.stringify(invalidKey),async()=>{
+ const {db}=await fixture();
+ try {
+  enqueue(db,'a-ingest','ingest');
+  enqueue(db,'b-delete','delete');
+  enqueue(db,'c-upsert','upsert');
+  const jobs=worker(db,()=>at);jobs.env.PAYLOAD_KEY=invalidKey;
+  assert.equal((await jobs.claim()).id,'b-delete');
+  assert.equal((await jobs.claim()).id,'c-upsert');
+  assert.equal(await jobs.claim(),null);
+  assert.deepEqual({...db.raw.prepare("SELECT state,attempt,lease_token FROM release_jobs WHERE id='a-ingest'").get()},
+    {state:'pending',attempt:0,lease_token:null},'Misconfigured ingestion must retain its retry budget');
+  jobs.env.PAYLOAD_KEY=Buffer.alloc(32,7).toString('base64url');
+  const ingest=await jobs.claim();
+  assert.equal(ingest.id,'a-ingest');assert.equal(ingest.attempt,1);
+  assert.match(ingest.leaseToken,/^v2\.[a-f0-9]{64}\./);
+ }finally{db.close();}
+});
+
 for(const kind of ['upsert','delete','ingest'])test(kind+' lease recovery stops after five abandoned attempts',async()=>{
  const {db}=await fixture();let now=at;
  try {
