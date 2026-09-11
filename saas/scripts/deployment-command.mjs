@@ -47,6 +47,8 @@ export async function runDeploymentCommand(argv, { runner = runProcess, cwd = pr
     throw new DeploymentConfigurationError('Choose build, db:local, db:remote or deploy.');
   const selection = { ...parseDeploymentArguments(args), cwd, productionConfigPath, processEnvironment };
   const target = await loadDeploymentConfiguration(selection);
+  if (target.sqlBackend === 'durable' && (operation === 'db:local' || operation === 'db:remote'))
+    throw new DeploymentConfigurationError('Durable SQL migrations/import require the sealed operator protocol; D1 migration commands are disabled for durable targets.');
   const options = { cwd: PROJECT_DIRECTORY, shell: false };
   const inputs = operation === 'build' || operation === 'deploy' ? await validateDeploymentSource(target) : null;
   const source = operation === 'build' || operation === 'deploy' ? await inspectSource() : null;

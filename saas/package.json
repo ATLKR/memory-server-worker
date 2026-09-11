@@ -10,14 +10,15 @@
   "scripts": {
     "test": "node --experimental-strip-types --experimental-sqlite --test test/identity.test.mjs test/memory.test.mjs test/api.test.mjs test/product-memory.test.mjs test/workspace.test.mjs test/auth.test.mjs test/ui.test.mjs test/app.test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "check": "npm run typecheck && npm test && npm run test:postgres && npm run test:routing-runtime && npm run test:routing-plugin && npm run migrations:check && npm run test:config && npm run test:release && npm run test:client",
+    "check": "npm run typecheck && npm test && npm run test:postgres && npm run test:routing-runtime && npm run test:durable-sql && npm run test:routing-plugin && npm run migrations:check && npm run test:config && npm run test:release && npm run test:client",
+    "test:durable-sql": "node --experimental-strip-types --experimental-sqlite --test --test-concurrency=1 test/durable-sql/*.test.mjs",
     "test:routing-runtime": "node --experimental-strip-types --experimental-sqlite --test --test-concurrency=1 test/routing-ledger/*.test.mjs test/routing-api/*.test.mjs test/routing-runtime/*.test.mjs test/routing-general/*.test.mjs",
     "build:routing-plugin": "node scripts/build-routing-plugin.mjs",
     "test:routing-plugin": "node scripts/build-routing-plugin.mjs --check && node --experimental-strip-types --test plugins/allenlabs-memory/test/*.test.mjs && node plugins/allenlabs-memory/scripts/validate-package.mjs",
     "test:postgres": "node --experimental-strip-types --test test/postgres/*.test.mjs",
     "dev": "node --experimental-strip-types --experimental-sqlite dev/server.mjs",
     "dev:console": "node --experimental-strip-types --experimental-sqlite dev/console.mjs",
-    "types": "wrangler types worker-configuration.d.ts --strict-vars=false",
+    "types": "wrangler types worker-configuration.d.ts --config wrangler.staging.jsonc --strict-vars=false",
     "migrations:sync": "node scripts/migrations.mjs",
     "migrations:check": "node scripts/migrations.mjs --check",
     "db:local": "node --experimental-strip-types scripts/deployment-command.mjs db:local",
@@ -44,6 +45,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/server": "2.0.0",
+    "hono": "4.13.7",
     "jose": "6.2.12",
     "pg": "8.23.0",
     "zod": "4.3.6"

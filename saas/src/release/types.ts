@@ -81,6 +81,14 @@ export interface AI {
 }
 export interface ReleaseEnv extends StorageEnv {
     DB: Database;
+    MEMORY_SQL_BACKEND?: 'd1' | 'durable';
+    /** HTTP/cron quiescence gate; SQL fences and in-flight draining are still
+     * required before a migration snapshot can be considered frozen. */
+    MEMORY_SQL_MAINTENANCE?: 'true' | 'false';
+    MEMORY_SQL_DEPLOYMENT_ID?: string;
+    MEMORY_SQL_EPOCH?: string;
+    MEMORY_SQL_DATABASES_JSON?: string;
+    MEMORY_SQL?: { getByName(name: string): import('../durable-sql/types.ts').DurableSqlStub };
     /** Transitional consent runtime: identity authority still uses DB. */
     MEMORY_CONSENT_LEDGER?: import('../routing/ledger-types.ts').RoutingLedger;
     MEMORY_ROUTING_ENABLED?: 'true' | 'false';
@@ -142,6 +150,9 @@ export interface ReleaseEnv extends StorageEnv {
     LIVE_ACCEPTANCE_ID?: string; // Operator change record, not an automated certification.
     fetch?: typeof fetch;
 }
+/** Raw deployment bindings. resolveReleaseEnv supplies the mandatory internal
+ * Database in durable mode even when the Worker has no D1 binding. */
+export type WorkerEnv = Omit<ReleaseEnv, 'DB'> & { DB?: Database };
 export interface Extension {
     identityLifecycle?: 2;
     beforeSignIn?(principal: unknown): Promise<void>;

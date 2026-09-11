@@ -15,6 +15,7 @@
     "PAID_BILLING_ENABLED": "false",
     "MEMORY_ROUTING_ENABLED": "false",
     "MEMORY_GENERAL_ROUTING_ENABLED": "false",
+    "MEMORY_SQL_IMPORT_PUBLIC_KEY": "MCowBQYDK2VwAyEAxEGx4nxwhNXsm-kgvivbAdaDcrI_hwty9zq63nvBGoo",
     "ENROLLMENT_MODE": "invite",
     "AI_MONTHLY_BUDGET_MICROUSD": "200000",
     "AUTO_ERASURE_ENABLED": "false",
@@ -39,11 +40,13 @@
   "durable_objects": { "bindings": [
     { "name": "MEMORY_CONSENT_LEDGER", "class_name": "OrganizationConsentLedger" },
     { "name": "MEMORY_AGENT_MEMORY_SPACES", "class_name": "AgentMemorySpaceLedger" },
-    { "name": "MEMORY_AGENT_MEMORY_BUDGET", "class_name": "AgentMemoryBudgetLedger" }
+    { "name": "MEMORY_AGENT_MEMORY_BUDGET", "class_name": "AgentMemoryBudgetLedger" },
+    { "name": "MEMORY_SQL", "class_name": "MemorySqlDatabase" }
   ] },
   "migrations": [
     { "tag": "memory-consent-v1", "new_sqlite_classes": ["OrganizationConsentLedger"] },
-    { "tag": "memory-general-v1", "new_sqlite_classes": ["AgentMemorySpaceLedger", "AgentMemoryBudgetLedger"] }
+    { "tag": "memory-general-v1", "new_sqlite_classes": ["AgentMemorySpaceLedger", "AgentMemoryBudgetLedger"] },
+    { "tag": "memory-sql-v1", "new_sqlite_classes": ["MemorySqlDatabase"] }
   ],
   "ai": { "binding": "AI" },
   "vectorize": [{ "binding": "MEMORY_INDEX", "index_name": "allenlabs-memory-staging-index" }],
