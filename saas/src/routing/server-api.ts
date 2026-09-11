@@ -7,6 +7,7 @@ import { resolveOrganizationAdmin, resolveRoutingAuthority, routingIdentifier, r
 import type { RoutingLedger, RoutingLedgerStub } from './ledger-types.ts';
 import { routedMcp } from './server-mcp.ts';
 import { routingLedgerRequestId, routingRequestIdSchema } from './rpc-id.ts';
+import { createGeneralApi, requireRoutingProvider } from './general-api.ts';
 
 type RoutingApiEnv = ReleaseEnv & { MEMORY_CONSENT_LEDGER?: RoutingLedger };
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
@@ -68,9 +69,16 @@ function consentRecord(value: unknown, organizationId: string) {
  * Receipts always require fresh authority and ledger validation at actual use. */
 export function createRoutingApi(env: RoutingApiEnv, options: { clock?: () => number } = {}) {
   const clock = options.clock ?? Date.now;
+  const generalApi = createGeneralApi(env,{clock});
   return async function route(request: Request, token: string): Promise<Response | null> {
     const url = new URL(request.url);
+    if (url.pathname === '/mcp' && (request.headers.has('x-memory-routing') || request.headers.has('x-memory-consent-receipt'))) {
+      if (url.search) fail(400,'routing_request_invalid');
+      if (request.headers.has('x-memory-routing') && request.headers.get('x-memory-routing') !== '1') fail(400,'routing_protocol_invalid');
+    }
     if (url.pathname === '/mcp' && request.headers.has('x-memory-consent-receipt')) return routedMcp(request,token,env,clock);
+    const generalResponse = await generalApi(request,token);
+    if (generalResponse) return generalResponse;
     const admin = /^\/v1\/organizations\/([^/]+)\/medical-cloudflare-consent$/.exec(url.pathname);
     const check = url.pathname === '/v1/routing/consent/check';
     if (!admin && !check) return null;
@@ -78,6 +86,10 @@ export function createRoutingApi(env: RoutingApiEnv, options: { clock?: () => nu
     if (check) {
       requireMethod(request,'POST');
       const value = await input(request,checkSchema,8192);
+      if (request.headers.has('x-memory-routing')) {
+        if (request.headers.get('x-memory-routing') !== '1') fail(400,'routing_protocol_invalid');
+        requireRoutingProvider(env,'medical',value.spaceId,clock);
+      }
       const ledgerRequestId = await routingLedgerRequestId(value.requestId);
       const actor = await resolveRoutingAuthority(env.DB,token,value.spaceId,value.operation,clock);
       const ledger = stub(env,actor.organizationId);

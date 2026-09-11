@@ -22,6 +22,7 @@ import { HttpError, pathIdentifier, requireMethod } from '../api.ts';
 import { canonicalEmail, IdentityInvalid } from '../identity.ts';
 import { sqlNow } from '../sql-clock.ts';
 import { createRoutingApi } from '../routing/server-api.ts';
+import { routingDiscovery } from '../routing/general-api.ts';
 export interface IdentityAdapter {
     getAccount(token: string): Promise<unknown>;
     beginEmailLink(token: string, email: string, deliver: (mail: {
@@ -86,6 +87,10 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
             return guarded(async () => {
                 originCheck(request);
                 const url = new URL(request.url);
+                if (url.pathname === '/.well-known/memory-routing' && requireMethod(request,'GET')) {
+                    if (url.search) fail(400,'routing_request_invalid');
+                    return json(routingDiscovery(env,clock));
+                }
                 if (url.pathname === '/manage' && requireMethod(request, 'GET'))
                     return new Response(renderManagement(settings.brand, settings.origin), { headers: { 'content-type': 'text/html; charset=utf-8' } });
                 if (url.pathname === '/assets/release.js' && requireMethod(request, 'GET'))

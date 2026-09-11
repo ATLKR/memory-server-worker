@@ -202,6 +202,33 @@ test('ledger diagnostics are sanitized and unavailable routed MCP never falls in
   assert.equal(mcp.status,503);assert.deepEqual(await mcp.json(),{error:'routing_runtime_unavailable'});
 });
 
+test('routing version validation precedes both medical and general MCP dispatch',async t=>{
+  const f=await setup(t);
+  const payload={jsonrpc:'2.0',id:'protocol-check',method:'tools/call',params:{name:'memory_ingest',arguments:{}}};
+  for(const receipt of [false,true])for(const version of ['', '2', '01', '1, 1']){
+    const headers={'x-memory-routing':version,...(receipt?{'x-memory-consent-receipt':'synthetic-receipt'}:{})};
+    const response=await f.request('/mcp','POST',payload,f.token,headers);
+    assert.equal(response.status,400);
+    assert.deepEqual(await response.json(),{error:'routing_protocol_invalid'});
+  }
+  // Historical receipt-only clients still select the medical handler, whose
+  // disabled runtime must not fall through to the legacy MCP implementation.
+  const legacy=await f.request('/mcp','POST',payload,f.token,{'x-memory-consent-receipt':'synthetic-receipt'});
+  assert.equal(legacy.status,503);assert.deepEqual(await legacy.json(),{error:'routing_runtime_unavailable'});
+  assert.equal(f.calls.length,0);
+});
+
+test('medical and general routed MCP reject URL query data before any backend selection',async t=>{
+  const f=await setup(t);
+  const payload={jsonrpc:'2.0',id:'query-check',method:'tools/call',params:{name:'memory_search',arguments:{}}};
+  for(const headers of [{'x-memory-routing':'1'},{'x-memory-consent-receipt':'synthetic-receipt'},
+    {'x-memory-routing':'1','x-memory-consent-receipt':'synthetic-receipt'}]){
+    const response=await f.request('/mcp?query=synthetic-query-marker','POST',payload,f.token,headers);
+    assert.equal(response.status,400);assert.deepEqual(await response.json(),{error:'routing_request_invalid'});
+  }
+  assert.equal(f.calls.length,0);
+});
+
 test('consent and MCP share collision-safe request IDs while fresh search receipts get fresh results',async t=>{
   const f=await setup(t),db=new DatabaseSync(':memory:');t.after(()=>db.close());
   const storage={sql:{exec(sql,...values){if(!values.length&&sql.includes(';')){db.exec(sql);return{toArray:()=>[]};}return{toArray:()=>db.prepare(sql).all(...values)};}},
@@ -211,6 +238,11 @@ test('consent and MCP share collision-safe request IDs while fresh search receip
   assert.equal((await f.request(adminPath,'PUT',{expectedVersion:0,grant})).status,200);
   let recalls=0;
   const handler=createRoutedMcpHandler({clock:f.clock,allowedMedicalSpaceIds:['so'],seoulSpaceIds:[],ledger:()=>ledger,
+    budgetId:'api-test',budgetPolicy:{version:1,revision:'api-v1',validUntilMs:f.clock()+600000,maxMonthlyRequests:100,
+      maxMonthlyInputBytes:1000000,maxMonthlyReservedMicroUsd:1000000,ingestBaseMicroUsd:10,ingestMicroUsdPerKiB:1,
+      searchBaseMicroUsd:10,searchMicroUsdPerKiB:1,pricingBasis:'operator-upper-bound'},
+    budget:{async reserve(input){return {reservationId:input.reservationId,month:'2026-09',reservedMicroUsd:11,
+      expiresAtMs:Math.min(input.authorityExpiresAtMs,f.clock()+60000),replayed:false};},async finalize(){},async usage(){return {}; }},
     authority:(token,spaceId,operation)=>resolveRoutingAuthority(f.db,token,spaceId,operation,f.clock),
     provider:{async ingest(){},async recall(){return{answer:'Result '+(++recalls),count:0,candidates:[]};}}});
   const issue=async requestId=>{

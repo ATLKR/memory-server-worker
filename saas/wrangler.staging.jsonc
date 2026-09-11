@@ -14,6 +14,7 @@
     "GA_PROFILE": "managed-ai-metered",
     "PAID_BILLING_ENABLED": "false",
     "MEMORY_ROUTING_ENABLED": "false",
+    "MEMORY_GENERAL_ROUTING_ENABLED": "false",
     "ENROLLMENT_MODE": "invite",
     "AI_MONTHLY_BUDGET_MICROUSD": "200000",
     "AUTO_ERASURE_ENABLED": "false",
@@ -35,8 +36,15 @@
     { "binding": "HOT_02", "database_name": "allenlabs-memory-staging-hot-02", "database_id": "e3944abb-3341-45b3-ad96-9629d4de8bf9", "migrations_dir": "shard-migrations" }
   ],
   "r2_buckets": [{ "binding": "MEMORY_PAYLOADS", "bucket_name": "allenlabs-memory-staging-payloads" }],
-  "durable_objects": { "bindings": [{ "name": "MEMORY_CONSENT_LEDGER", "class_name": "OrganizationConsentLedger" }] },
-  "migrations": [{ "tag": "memory-consent-v1", "new_sqlite_classes": ["OrganizationConsentLedger"] }],
+  "durable_objects": { "bindings": [
+    { "name": "MEMORY_CONSENT_LEDGER", "class_name": "OrganizationConsentLedger" },
+    { "name": "MEMORY_AGENT_MEMORY_SPACES", "class_name": "AgentMemorySpaceLedger" },
+    { "name": "MEMORY_AGENT_MEMORY_BUDGET", "class_name": "AgentMemoryBudgetLedger" }
+  ] },
+  "migrations": [
+    { "tag": "memory-consent-v1", "new_sqlite_classes": ["OrganizationConsentLedger"] },
+    { "tag": "memory-general-v1", "new_sqlite_classes": ["AgentMemorySpaceLedger", "AgentMemoryBudgetLedger"] }
+  ],
   "ai": { "binding": "AI" },
   "vectorize": [{ "binding": "MEMORY_INDEX", "index_name": "allenlabs-memory-staging-index" }],
   "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "allenlabs_memory_staging" }],

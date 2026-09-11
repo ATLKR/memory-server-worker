@@ -14,6 +14,8 @@
 
 ## 저장 및 실패 처리
 
+일반 경로와 함께 배포 단위 `AgentMemoryBudgetLedger`를 필수로 검사하도록 확장했다. 의료 경로도 최초 동의 작업 승인 후 예산을 예약하고, 전송·공개 직전 만료와 권한을 검사한다. `x-memory-routing: 1`을 사용하는 새 클라이언트의 동의 사전 확인은 의료 provider 활성화·Space 허용·예산 설정까지 검증한다. 관리자 동의 관리와 기존 receipt-only 점검 API는 provider 활성화와 독립적이다. [일반 경로 문서](general-runtime.ko.md)에 예산과 출시 제한이 정리돼 있다.
+
 `OrganizationConsentLedger`는 조직마다 별도의 SQLite Durable Object를 사용한다. 동의의 현재 버전, 수정 불가능한 감사 이력, receipt 해시, 작업 ID·본문 해시·결과 상태를 저장한다. 원문, 검색어, 토큰, 증빙 문서는 이 원장에 넣지 않는다.
 
 한 동의 수정은 버전 CAS, receipt 소비와 작업 예약은 동기 SQL 트랜잭션으로 처리한다. receipt는 최대 60초이며 원장과 권한의 더 짧은 만료 시각을 따른다. 동일 작업 ID로 다른 본문을 보내면 충돌 처리한다. 제공자 결과가 불명확한 쓰기는 다시 보내지 않으며, 실패한 검색은 `read_failed`로 기록한다. 프로세스가 중단되어 `admitted`로 남은 작업도 전송 허가로 재사용하지 않는다.
@@ -33,11 +35,12 @@
 - `MEMORY_AGENT_MEMORY_NAMESPACE`: 검증한 전용 네임스페이스
 - `MEMORY_AGENT_MEMORY_TOKEN`: 해당 계정의 제한된 서비스 토큰을 secret으로 설정
 - `MEMORY_ROUTING_MEDICAL_SPACES_JSON`: 검증할 조직 Space ID 목록
+- `MEMORY_AGENT_MEMORY_BUDGET` 바인딩, `MEMORY_ROUTING_BUDGET_ID`, `MEMORY_ROUTING_BUDGET_POLICY_JSON`: 배포 공통 예산 원장과 검증한 예약 정책
 - `MEMORY_ROUTING_SEOUL_SPACES_JSON`: 서버에서 강제로 서울 경로를 유지할 Space ID 목록
 
 설정은 에이전트 도구 인수에서 변경할 수 없다. 서울 강제 목록, `requiredRegion:kr-seoul`, `region-locked`, `uncertain`은 의료 동의보다 우선한다. 베타 접근이나 제공자 동작을 확인하지 않은 상태에서 기본 비활성을 해제하지 않는다.
 
-현재 배포 설정은 기존 운영 D1/R2/Vectorize 서비스와 호환하는 스테이징 후보다. 일반 Agent Memory 경로, 서울 PostgreSQL 실행 환경, 전체 권한 저장소의 D1 제거, 제공자 삭제·복구, 실제 비용 검증, 최종 readiness는 후속 출시 조건이다.
+현재 배포 설정은 기존 운영 D1/R2/Vectorize 서비스와 호환하는 스테이징 후보다. 일반 Agent Memory 경로는 연결됐으며 기본 비활성이다. 서울 PostgreSQL 실행 환경, 전체 권한 저장소의 D1 제거, 제공자 삭제·복구, 실제 비용 검증, 최종 readiness는 후속 출시 조건이다.
 
 ## 검증
 

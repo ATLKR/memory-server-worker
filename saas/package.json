@@ -11,7 +11,7 @@
     "test": "node --experimental-strip-types --experimental-sqlite --test test/identity.test.mjs test/memory.test.mjs test/api.test.mjs test/product-memory.test.mjs test/workspace.test.mjs test/auth.test.mjs test/ui.test.mjs test/app.test.mjs",
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "check": "npm run typecheck && npm test && npm run test:postgres && npm run test:routing-runtime && npm run test:routing-plugin && npm run migrations:check && npm run test:config && npm run test:release && npm run test:client",
-    "test:routing-runtime": "node --experimental-strip-types --experimental-sqlite --test --test-concurrency=1 test/routing-ledger/*.test.mjs test/routing-api/*.test.mjs test/routing-runtime/*.test.mjs",
+    "test:routing-runtime": "node --experimental-strip-types --experimental-sqlite --test --test-concurrency=1 test/routing-ledger/*.test.mjs test/routing-api/*.test.mjs test/routing-runtime/*.test.mjs test/routing-general/*.test.mjs",
     "build:routing-plugin": "node scripts/build-routing-plugin.mjs",
     "test:routing-plugin": "node scripts/build-routing-plugin.mjs --check && node --experimental-strip-types --test plugins/allenlabs-memory/test/*.test.mjs && node plugins/allenlabs-memory/scripts/validate-package.mjs",
     "test:postgres": "node --experimental-strip-types --test test/postgres/*.test.mjs",

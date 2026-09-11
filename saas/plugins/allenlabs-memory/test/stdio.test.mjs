@@ -26,11 +26,14 @@ async function run(messages, environment = {}, preload = false) {
   return { messages: stdout.trim().split('\n').filter(Boolean).map(s => JSON.parse(s)), stderr, stdout };
 }
 
-test('stdio initializes and lists exactly three explicit tools without credentials', async () => {
+test('stdio initializes and lists exactly five explicit tools without credentials', async () => {
   const result = await run([initialize, initialized, { jsonrpc: '2.0', id: 2, method: 'tools/list' }]);
   assert.equal(result.messages.length, 2);
   assert.equal(result.messages[0].result.protocolVersion, '2025-11-25');
-  assert.deepEqual(result.messages[1].result.tools.map(t => t.name), ['memory_route', 'memory_ingest', 'memory_search']);
+  assert.deepEqual(result.messages[1].result.tools.map(t => t.name), ['memory_route', 'memory_ingest', 'memory_search','memory_clear_space','memory_usage']);
+  const clear=result.messages[1].result.tools.find(t=>t.name==='memory_clear_space');
+  assert.equal(clear.annotations.destructiveHint,true);assert.equal(clear.annotations.readOnlyHint,false);
+  assert.match(clear.description,/ALL general/);
 });
 
 test('local routing chooses Cloudflare for general and Seoul for uncertain/medical/locked', async () => {
@@ -85,6 +88,16 @@ for (const consent of ['allow', 'deny']) test(`organization policy ${consent} us
     assert.equal(response.isError, true);
   }
   assert.equal(result.stdout.includes('private medical fixture'), false);
+});
+
+test('a server denied general Space check stops raw content in the packaged stdio flow',async()=>{
+  const marker='server-locked-private-content';
+  const result=await run([initialize,initialized,rpc(2,'memory_ingest',{
+    routing:{version:1,classification:'general'},operationId:'locked-operation',messages:[{role:'user',content:marker}],
+  })],{MEMORY_TEST_GENERAL_CHECK:'deny',MEMORY_CF_ORIGIN:'https://cf.fixture.test',MEMORY_CF_SPACE_ID:'general',MEMORY_CF_PAT:'cf-token'},true);
+  const response=result.messages.find(message=>message.id===2).result;
+  assert.equal(response.structuredContent.error,'routing_preflight_unavailable');assert.equal(response.isError,true);
+  assert.equal(result.stdout.includes(marker),false);assert.equal(result.stderr.includes(marker),false);
 });
 
 test('invalid routing and unconfigured remote calls never echo private arguments', async () => {
@@ -179,6 +192,7 @@ test('cancellation during held metadata prevents the subsequent upload', async t
   assert.equal(client.responses.find(response => response.id === 2).result.structuredContent.error, 'routing_request_aborted');
   await client.finish();
   assert.equal(client.events.filter(event => event.phase === 'post').length, 0);
+  assert.equal(client.events.filter(event => event.phase === 'general-check').length, 0);
 });
 
 test('queue-full cancellation immediately removes queued uploads and aborts an active request', async t => {
@@ -193,6 +207,7 @@ test('queue-full cancellation immediately removes queued uploads and aborts an a
   for (const id of [2, ...queuedIds]) assert.equal(client.responses.find(response => response.id === id).result.structuredContent.error, 'routing_request_aborted');
   assert.equal(client.events.filter(event => event.phase === 'metadata').length, 4);
   await client.finish();
+  assert.equal(client.events.filter(event => event.phase === 'general-check').length, 3);
   assert.deepEqual(client.events.filter(event => event.phase === 'post').map(event => event.operationId).sort(), ['op-3', 'op-4', 'op-5']);
 });
 
@@ -204,5 +219,6 @@ test('cancelling an already-dispatched upload preserves the unknown write outcom
   await client.wait(() => client.responses.some(response => response.id === 2));
   assert.equal(client.responses.find(response => response.id === 2).result.structuredContent.error, 'routing_write_outcome_unknown');
   await client.finish();
+  assert.equal(client.events.filter(event => event.phase === 'general-check').length, 1);
   assert.equal(client.events.filter(event => event.phase === 'post').length, 1);
 });

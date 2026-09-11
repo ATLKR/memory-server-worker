@@ -84,6 +84,12 @@ export interface ReleaseEnv extends StorageEnv {
     /** Transitional consent runtime: identity authority still uses DB. */
     MEMORY_CONSENT_LEDGER?: import('../routing/ledger-types.ts').RoutingLedger;
     MEMORY_ROUTING_ENABLED?: 'true' | 'false';
+    MEMORY_GENERAL_ROUTING_ENABLED?: 'true' | 'false';
+    MEMORY_AGENT_MEMORY_SPACES?: import('../routing/general-types.ts').GeneralSpaceNamespace;
+    MEMORY_AGENT_MEMORY_BUDGET?: import('../routing/general-types.ts').RoutingBudgetNamespace;
+    MEMORY_ROUTING_GENERAL_SPACES_JSON?: string;
+    MEMORY_ROUTING_BUDGET_ID?: string;
+    MEMORY_ROUTING_BUDGET_POLICY_JSON?: string;
     MEMORY_AGENT_MEMORY_ACCOUNT_ID?: string;
     MEMORY_AGENT_MEMORY_NAMESPACE?: string;
     MEMORY_AGENT_MEMORY_TOKEN?: string;

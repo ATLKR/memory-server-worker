@@ -3,6 +3,12 @@ import assert from 'node:assert/strict';
 const pending = [];
 const cancelPhase = process.env.MEMORY_TEST_CANCEL_PHASE;
 const organizationConsent = process.env.MEMORY_TEST_ORGANIZATION_CONSENT;
+const generalCheckDenied = process.env.MEMORY_TEST_GENERAL_CHECK === 'deny';
+const checkedGeneralRequests = new Set();
+let generalChecks = 0, generalUploads = 0;
+if (generalCheckDenied) process.on('exit', () => {
+  assert.equal(generalChecks, 1); assert.equal(generalUploads, 0);
+});
 let consentChecks = 0, consentUploads = 0;
 if (organizationConsent) process.on('exit', () => {
   assert.equal(consentChecks, 1);
@@ -33,6 +39,17 @@ globalThis.fetch = async (url, init) => {
   assert.equal(init.method, 'POST');
   assert.equal(init.headers.authorization, cf ? 'Bearer cf-token' : 'Bearer seoul-token');
   const request = JSON.parse(init.body);
+  if (target.pathname === '/v1/spaces/general/agent-memory/check') {
+    generalChecks++;
+    assert.equal(cf,true);
+    assert.deepEqual(Object.keys(request).sort(),['operation','requestId','version']);
+    assert.ok(['memory_ingest','memory_search'].includes(request.operation));
+    process.send?.({phase:'general-check',operation:request.operation});
+    if(generalCheckDenied)return new Response(null,{status:403});
+    checkedGeneralRequests.add(request.requestId);
+    return Response.json({version:1,allowed:true,requestId:request.requestId,spaceId:'general',operation:request.operation,
+      route:'agent-memory',issuedAtMs:Date.now(),expiresAtMs:Date.now()+30000});
+  }
   if (organizationConsent && target.pathname === '/v1/routing/consent/check') {
     consentChecks++;
     assert.equal(cf, true);
@@ -46,6 +63,10 @@ globalThis.fetch = async (url, init) => {
       expiresAtMs: Date.now() + 60000, receipt: 'scoped-fixture-receipt' });
   }
   assert.equal(target.pathname, '/mcp');
+  if(cf && request.params.arguments.routing.classification === 'general') {
+    generalUploads++;
+    assert.equal(checkedGeneralRequests.delete(request.id),true,'each general upload needs its own metadata check');
+  }
   if (organizationConsent) {
     consentUploads++;
     assert.equal(organizationConsent, 'allow');

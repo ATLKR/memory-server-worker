@@ -7,19 +7,26 @@ import { DB } from '../../release-validation/tests/db.mjs';
 import { digest } from '../../src/release/util.ts';
 
 const origin='https://memory.example.test',account='a'.repeat(32),token='synthetic-session-'+'s'.repeat(40);
+const budgetPolicy={version:1,revision:'native-v1',validUntilMs:Date.now()+600000,maxMonthlyRequests:2,
+  maxMonthlyInputBytes:1000000,maxMonthlyReservedMicroUsd:1000000,ingestBaseMicroUsd:10,ingestMicroUsdPerKiB:1,
+  searchBaseMicroUsd:20,searchMicroUsdPerKiB:1,pricingBasis:'operator-upper-bound'};
 const {outputFiles}=await build({stdin:{contents:`
 import {createApplication} from './src/app.ts';
 import {createRelease} from './src/release/extension.ts';
 import {readSettings} from './src/config.ts';
 import {OrganizationConsentLedger} from './src/routing/ledger-object.ts';
+import {AgentMemoryBudgetLedger} from './src/routing/budget-ledger-object.ts';
+export {AgentMemoryBudgetLedger};
 export class TestLedger extends OrganizationConsentLedger {
   inspect(){return this.ctx.storage.sql.exec('SELECT state,operation,operation_id FROM ledger_operations').toArray();}
 }
 export default {async fetch(request,env){
   if(new URL(request.url).pathname==='/fixture-ledger')return Response.json(await env.MEMORY_CONSENT_LEDGER.getByName('organization:org').inspect());
+  if(new URL(request.url).pathname==='/fixture-budget')return Response.json(await env.MEMORY_AGENT_MEMORY_BUDGET.getByName('budget:native-budget').usage({budgetId:'native-budget'}));
   const runtime={...env,PUBLIC_ORIGIN:'${origin}',SSO_CLIENT_ID:'synthetic-client',REQUEST_LIMITER:{limit:async()=>({success:true})},
     MEMORY_ROUTING_ENABLED:'true',MEMORY_ROUTING_MEDICAL_SPACES_JSON:'["space"]',MEMORY_AGENT_MEMORY_ACCOUNT_ID:'${account}',
-    MEMORY_AGENT_MEMORY_NAMESPACE:'synthetic-stack',MEMORY_AGENT_MEMORY_TOKEN:'synthetic-provider-token'};
+    MEMORY_AGENT_MEMORY_NAMESPACE:'synthetic-stack',MEMORY_AGENT_MEMORY_TOKEN:'synthetic-provider-token',
+    MEMORY_ROUTING_BUDGET_ID:'native-budget',MEMORY_ROUTING_BUDGET_POLICY_JSON:${JSON.stringify(JSON.stringify(budgetPolicy))}};
   return createApplication(env.DB,readSettings(runtime),{release:createRelease(runtime)})(request);
 }};`,resolveDir:fileURLToPath(new URL('../../',import.meta.url)),sourcefile:'routing-stack.mjs'},
   bundle:true,write:false,format:'esm',platform:'browser',target:'es2022',external:['cloudflare:workers']});
@@ -27,7 +34,8 @@ export default {async fetch(request,env){
 test('native authenticated API, SQLite DO receipt, routed MCP and HTTP provider compose end to end', {timeout:30000},async t=>{
   const calls=[];let failIngest=false;
   const mf=new Miniflare(convertV4MiniflareOptions({modules:true,compatibilityDate:'2026-09-08',compatibilityFlags:['nodejs_compat'],
-    script:outputFiles[0].text,d1Databases:['DB'],durableObjects:{MEMORY_CONSENT_LEDGER:{className:'TestLedger',useSQLite:true}},
+    script:outputFiles[0].text,d1Databases:['DB'],durableObjects:{MEMORY_CONSENT_LEDGER:{className:'TestLedger',useSQLite:true},
+      MEMORY_AGENT_MEMORY_BUDGET:{className:'AgentMemoryBudgetLedger',useSQLite:true}},
     outboundService:async request=>{
       assert.ok(request.url.startsWith(`https://api.cloudflare.com/client/v4/accounts/${account}/agent-memory/namespaces/synthetic-stack/profiles/medical-`));
       calls.push({path:new URL(request.url).pathname,body:await request.json()});
@@ -81,6 +89,12 @@ test('native authenticated API, SQLite DO receipt, routed MCP and HTTP provider 
   const again=await ingest('request-4','operation-2');
   assert.equal(JSON.parse(again.result.content[0].text).state,'unknown');assert.equal(calls.length,2);
   assert.deepEqual((await (await call('/fixture-ledger')).json()).map(row=>row.state),['accepted','unknown']);
+  const usage=await (await call('/fixture-budget')).json();
+  assert.equal(usage.requests,2);assert.equal(usage.accepted,1);assert.equal(usage.unknown,1);
+  assert.equal(usage.reservedMicroUsd,22);assert.equal(usage.billingVerified,false);
+  const exhausted=await ingest('request-budget','operation-budget');
+  assert.equal(exhausted.result.isError,true);assert.match(exhausted.result.content[0].text,/routing_budget_exhausted/);
+  assert.equal(calls.length,2);assert.equal((await (await call('/fixture-budget')).json()).requests,2);
   const stale=await receipt('request-stale');
   assert.equal((await call(admin,'DELETE',{expectedVersion:consent.version})).status,200);
   const denied=await call('/mcp','POST',{jsonrpc:'2.0',id:'request-stale',method:'tools/call',params:{name:'memory_ingest',arguments:{

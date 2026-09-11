@@ -16,6 +16,8 @@ function fixture(options = {}) {
     calls.push({ url: String(url), init });
     if (init.method === 'GET') return json({ version: 1, protocol: 'memory-routing-v1', target: String(url).startsWith(origins.seoul) ? seoul : cf });
     const rpc = JSON.parse(init.body);
+    if(String(url).endsWith('/agent-memory/check')) return json({version:1,allowed:true,requestId:rpc.requestId,
+      spaceId:'agent-memory-space',operation:rpc.operation,route:'agent-memory',issuedAtMs:Date.now(),expiresAtMs:Date.now()+30000});
     return json({ jsonrpc: '2.0', id: rpc.id, result: ack });
   };
   const credential = async target => { credentials.push(target); return { kind: 'pat', token: target.route+'-synthetic-token' }; };
@@ -67,8 +69,112 @@ test('general raw ingest works with its own SSO bearer and no BAA flag', async (
   const f = fixture({ credential: async target => ({ kind: 'sso', token: target.route+'-sso-value' }) });
   const result = await f.client.call('memory_ingest', { ...input, routing: { version: 1, classification: 'general' } });
   assert.equal(result.routing.route, 'agent-memory');
+  assert.equal(f.calls.length,3);
   assert.ok(f.calls.every(c => c.url.startsWith(origins['agent-memory'])));
   assert.equal(new Headers(f.calls[1].init.headers).get('authorization'), 'Bearer agent-memory-sso-value');
+  assert.equal(new Headers(f.calls[1].init.headers).get('x-memory-routing'), '1');
+  assert.equal(f.calls[1].url,origins['agent-memory']+'/v1/spaces/agent-memory-space/agent-memory/check');
+  const check=JSON.parse(f.calls[1].init.body),posted=JSON.parse(f.calls[2].init.body);
+  assert.deepEqual(check,{version:1,requestId:posted.id,operation:'memory_ingest'});
+  assert.equal(f.calls[2].url,origins['agent-memory']+'/mcp');
+  assert.equal(new Headers(f.calls[2].init.headers).get('authorization'),'Bearer agent-memory-sso-value');
+  assert.deepEqual(posted.params.arguments.messages,input.messages);
+});
+
+function generalFixture(change={},options={}) {
+  const seen=[];const f=fixture({...options,fetch:async(url,init)=>{
+    seen.push({url:String(url),init});
+    if(init.method==='GET')return json({version:1,protocol:'memory-routing-v1',target:cf});
+    const request=JSON.parse(init.body);
+    if(String(url).endsWith('/agent-memory/check'))return json({version:1,allowed:true,requestId:request.requestId,
+      spaceId:'agent-memory-space',operation:request.operation,route:'agent-memory',issuedAtMs:Date.now(),expiresAtMs:Date.now()+30000,...change});
+    return json({jsonrpc:'2.0',id:request.id,result:ack});
+  }});return {...f,seen};
+}
+test('general search checks only operation metadata before uploading its query',async()=>{
+  const f=generalFixture(),query='private-search-marker';
+  await f.client.call('memory_search',{routing:{version:1,classification:'general'},query});
+  assert.equal(f.seen.length,3);const check=JSON.parse(f.seen[1].init.body),raw=JSON.parse(f.seen[2].init.body);
+  assert.deepEqual(check,{version:1,requestId:raw.id,operation:'memory_search'});
+  assert.equal(f.seen[1].init.body.includes(query),false);assert.equal(raw.params.arguments.query,query);
+});
+test('general preflight denies malformed, mismatched, expired and extended permissions before any raw dispatch',async()=>{
+  for(const change of [{allowed:false},{version:2},{requestId:'different'},{spaceId:'other'},{operation:'memory_search'},
+    {route:'seoul'},{expiresAtMs:0},{issuedAtMs:-1},{issuedAtMs:1,expiresAtMs:1},{issuedAtMs:1,expiresAtMs:60002},
+    {issuedAtMs:undefined},{expiresAtMs:Date.now()+120000},{unexpected:'value'}]) {
+    const f=generalFixture(change);
+    await assert.rejects(()=>f.client.call('memory_ingest',{...input,routing:{version:1,classification:'general'}}),{code:'routing_preflight_unavailable'});
+    assert.equal(f.seen.length,2);assert.equal(f.seen.some(c=>c.url.endsWith('/mcp')),false);
+  }
+});
+test('general preflight is repeated per call so revocation cannot reuse a prior permission',async()=>{
+  let checks=0,uploads=0;const f=fixture({fetch:async(url,init)=>{
+    if(init.method==='GET')return json({version:1,protocol:'memory-routing-v1',target:cf});
+    const request=JSON.parse(init.body);
+    if(String(url).endsWith('/agent-memory/check')) {checks++;return json({version:1,allowed:checks===1,requestId:request.requestId,
+      spaceId:'agent-memory-space',operation:request.operation,route:'agent-memory',issuedAtMs:Date.now(),expiresAtMs:Date.now()+30000});}
+    uploads++;return json({jsonrpc:'2.0',id:request.id,result:ack});
+  }}),args={...input,routing:{version:1,classification:'general'}};
+  await f.client.call('memory_ingest',args);await assert.rejects(()=>f.client.call('memory_ingest',args),{code:'routing_preflight_unavailable'});
+  assert.equal(checks,2);assert.equal(uploads,1);
+});
+test('general permission expiry is checked again immediately at raw dispatch',async t=>{
+  let monotonic=100;const parse=JSON.parse;
+  const f=generalFixture({issuedAtMs:1000,expiresAtMs:2000});
+  t.mock.method(performance,'now',()=>monotonic);
+  t.mock.method(JSON,'parse',(...args)=>{const result=parse(...args);if(result.allowed===true)monotonic=1100;return result;});
+  await assert.rejects(()=>f.client.call('memory_ingest',{...input,routing:{version:1,classification:'general'}}),{code:'routing_preflight_unavailable'});
+  assert.equal(f.seen.length,2);
+});
+test('general preflight tolerates positive and negative wall-clock skew without extending its TTL',async()=>{
+  for(const skew of [-86400000,-2100,700,2100,86400000]) {
+    const serverNow=Date.now()+skew,f=generalFixture({issuedAtMs:serverNow,expiresAtMs:serverNow+60000});
+    await f.client.call('memory_ingest',{...input,routing:{version:1,classification:'general'}});
+    assert.equal(f.seen.length,3);
+  }
+});
+for(const phase of ['transit','body'])test('general preflight TTL includes '+phase+' time before any plaintext',async t=>{
+  let monotonic=100,calls=0;t.mock.method(performance,'now',()=>monotonic);
+  const f=fixture({fetch:async(_url,init)=>{
+    calls++;if(init.method==='GET')return json({version:1,protocol:'memory-routing-v1',target:cf});
+    const request=JSON.parse(init.body),permission={version:1,allowed:true,requestId:request.requestId,
+      spaceId:'agent-memory-space',operation:request.operation,route:'agent-memory',issuedAtMs:1000,expiresAtMs:2000};
+    if(phase==='transit'){monotonic=1100;return json(permission);}
+    return new Response(new ReadableStream({start(controller){controller.enqueue(new TextEncoder().encode(JSON.stringify(permission)));},
+      pull(controller){monotonic=1100;controller.close();}}),{headers:{'content-type':'application/json'}});
+  }});
+  await assert.rejects(()=>f.client.call('memory_ingest',{...input,routing:{version:1,classification:'general'}}),{code:'routing_preflight_unavailable'});
+  assert.equal(calls,2);
+});
+test('general check HTTP failures, reflected errors and invalid media types cannot upload content',async()=>{
+  for(const [status,type,body] of [[403,'application/json','private-error'],[500,'text/plain','private-error'],
+    [200,'text/plain; marker=application/json','private-error'],[200,'application/json','x'.repeat(8193)]]) {
+    let calls=0;const f=fixture({fetch:async(_url,init)=>{
+      calls++;if(init.method==='GET')return json({version:1,protocol:'memory-routing-v1',target:cf});
+      return new Response(body,{status,headers:{'content-type':type}});
+    }});
+    await assert.rejects(()=>f.client.call('memory_ingest',{...input,routing:{version:1,classification:'general'}}),
+      error=>error.code==='routing_preflight_unavailable'&&!String(error).includes('private-error'));
+    assert.equal(calls,2);
+  }
+});
+test('general preflight cancellation or a failed check never becomes an unknown write outcome',async()=>{
+  let calls=0;const f=fixture({timeoutMs:20,fetch:async(_url,init)=>{
+    calls++;if(init.method==='GET')return json({version:1,protocol:'memory-routing-v1',target:cf});
+    return new Promise(()=>{});
+  }});
+  await assert.rejects(()=>f.client.call('memory_ingest',{...input,routing:{version:1,classification:'general'}}),{code:'routing_request_timeout'});
+  assert.equal(calls,2);
+});
+test('explicit general clear stays available through compatible inactive discovery without sending content',async()=>{
+  const seen=[];const f=fixture({fetch:async(url,init)=>{
+    seen.push({url,init});if(init.method==='GET')return json({version:1,protocol:'memory-routing-v1',target:{...cf,ready:false}});
+    const rpc=JSON.parse(init.body);return json({jsonrpc:'2.0',id:rpc.id,result:ack});
+  }});
+  await f.client.call('memory_clear_space',{routing:{version:1,classification:'general'},operationId:'clear-1',scope:'all-general-memory-in-space'});
+  assert.equal(seen.length,2);const args=JSON.parse(seen[1].init.body).params.arguments;
+  assert.equal(args.scope,'all-general-memory-in-space');assert.equal(args.messages,undefined);assert.equal(args.query,undefined);
+  await assert.rejects(f.client.call('memory_clear_space',{routing:{version:1,classification:'medical'},operationId:'clear-2',scope:'all-general-memory-in-space'}),{code:'routing_request_invalid'});
 });
 
 test('search query also routes before egress; no automatic fan-out to Cloudflare', async () => {

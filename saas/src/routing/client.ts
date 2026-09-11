@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { assertRoutingTarget, resolveMemoryRoute, routingDecisionSchema, routingTargetSchema } from './policy.ts';
 import type { RoutingPlan, RoutingRestriction } from './policy.ts';
+import type { GeneralOperation } from './general-types.ts';
 
 type Route = RoutingPlan['route'];
 export interface RoutingClientConfig {
@@ -36,7 +37,19 @@ export const searchRoutingInputSchema = z.strictObject({
   routing: routingDecisionSchema, query: z.string().min(1).refine(s => wellFormed(s) && utf8.encode(s).length <= 1024),
   limit: z.number().int().min(1).max(50).optional(),
 });
+export const clearRoutingInputSchema = z.strictObject({
+  routing: routingDecisionSchema, operationId: identifier, scope: z.literal('all-general-memory-in-space'),
+});
+export const usageRoutingInputSchema = z.strictObject({ routing: routingDecisionSchema });
+export const routingToolSchemas = { memory_ingest: ingestRoutingInputSchema, memory_search: searchRoutingInputSchema,
+  memory_clear_space: clearRoutingInputSchema, memory_usage: usageRoutingInputSchema } as const;
 const metadataSchema = z.strictObject({ version: z.literal(1), protocol: z.literal('memory-routing-v1'), target: routingTargetSchema });
+const generalPreflightSchema = z.strictObject({
+  version: z.literal(1), allowed: z.literal(true), requestId: z.string(), spaceId: identifier,
+  operation: z.enum(['memory_ingest', 'memory_search']), route: z.literal('agent-memory'),
+  issuedAtMs: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  expiresAtMs: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+});
 const consentReceiptSchema = z.strictObject({
   version: z.literal(1), allowed: z.literal(true), requestId: z.string(), spaceId: identifier,
   consentId: identifier, consentVersion: z.number().int().positive().max(Number.MAX_SAFE_INTEGER),
@@ -91,11 +104,15 @@ export function createRoutingClient(config: RoutingClientConfig) {
   const credential = config.credential;
   if (typeof request !== 'function') fail('routing_configuration_invalid');
 
-  async function call(name: 'memory_ingest' | 'memory_search', args: unknown, options: RoutingCallOptions = {}): Promise<{ routing: RoutingPlan; result: RoutingToolResult }> {
-    if (!['memory_ingest', 'memory_search'].includes(name)) fail('routing_request_invalid');
-    const parsedArgs = (name === 'memory_ingest' ? ingestRoutingInputSchema : searchRoutingInputSchema).safeParse(args);
+  async function call(name: GeneralOperation, args: unknown, options: RoutingCallOptions = {}): Promise<{ routing: RoutingPlan; result: RoutingToolResult }> {
+    if (!Object.hasOwn(routingToolSchemas,name)) fail('routing_request_invalid');
+    const parsedArgs = routingToolSchemas[name].safeParse(args);
     if (!parsedArgs.success) fail('routing_request_invalid');
     const input = parsedArgs.data, plan = planDecision(input.routing), target = targets[plan.route];
+    if (['memory_clear_space','memory_usage'].includes(name) && (input.routing.classification !== 'general'
+      || input.routing.medicalCloudflareConsent)) fail('routing_request_invalid');
+    const maintenance=name==='memory_clear_space'||name==='memory_usage';
+    if (maintenance&&plan.route!=='agent-memory') fail('routing_target_unavailable');
     if (!target) fail('routing_target_unavailable');
     const id = crypto.randomUUID();
     // Serialize the validated copy before any await. The caller cannot swap the
@@ -212,14 +229,46 @@ export function createRoutingClient(config: RoutingClientConfig) {
       try { advertised = metadataSchema.safeParse(JSON.parse(await text(discovery, 8192))); }
       catch (error) { if (error instanceof RoutingClientError && ['routing_request_timeout', 'routing_request_aborted'].includes(error.code)) throw error; fail('routing_target_unavailable'); }
       if (!advertised.success) fail('routing_target_unavailable');
-      assertRoutingTarget(plan, advertised.data.target);
+      // Explicit, content-free maintenance remains usable while spend admission
+      // is paused. Still require the exact protocol/storage/region declaration;
+      // the server independently checks ACL and available cleanup bindings.
+      assertRoutingTarget(plan, maintenance?{...advertised.data.target,ready:true}:advertised.data.target);
       check();
       const auth = await bounded(() => credential({ route: plan.route, origin: target.origin }));
       if (!auth || !['pat', 'sso'].includes(auth.kind) || typeof auth.token !== 'string'
         || auth.token.length < 1 || auth.token.length > 16384 || /[\s\x00-\x1f\x7f]/.test(auth.token)) fail('routing_auth_unavailable');
       let consentReceipt: string | undefined;
       let consentExpiresAt = Number.MAX_SAFE_INTEGER;
+      let generalPreflightDeadline: number | undefined;
       const consent = input.routing.medicalCloudflareConsent;
+      if (plan.route === 'agent-memory' && input.routing.classification === 'general' && !maintenance) {
+        // Public discovery says only that some Space is available. Ask current
+        // server policy/ACL for this exact Space with metadata only, so a local
+        // classification cannot upload plaintext to a hard-locked Space first.
+        check();
+        try {
+          const requestedAt = performance.now();
+          const response = await bounded(() => request(target.origin + '/v1/spaces/' + encodeURIComponent(target.spaceId) + '/agent-memory/check', {
+            ...init, method: 'POST', headers: { authorization: 'Bearer ' + auth.token, 'content-type': 'application/json', accept: 'application/json', 'x-memory-routing': '1' },
+            body: JSON.stringify({ version: 1, requestId: id, operation: name }),
+          }));
+          if (!response.ok || mediaType(response) !== 'application/json') {
+            void response.body?.cancel().catch(() => undefined); fail('routing_preflight_unavailable');
+          }
+          const permission = generalPreflightSchema.safeParse(JSON.parse(await text(response, 8192)));
+          if (!permission.success || permission.data.requestId !== id
+            || permission.data.spaceId !== target.spaceId || permission.data.operation !== name
+            || permission.data.expiresAtMs <= permission.data.issuedAtMs
+            || permission.data.expiresAtMs - permission.data.issuedAtMs > 60000) fail('routing_preflight_unavailable');
+          // A server timestamp is not comparable to the client's wall clock.
+          // Spend the returned TTL from before the request, conservatively
+          // including all transit, server work, streaming and local processing.
+          generalPreflightDeadline = requestedAt + (permission.data.expiresAtMs - permission.data.issuedAtMs);
+        } catch (error) {
+          if (error instanceof RoutingClientError && ['routing_request_timeout', 'routing_request_aborted'].includes(error.code)) throw error;
+          fail('routing_preflight_unavailable');
+        }
+      }
       if (plan.route === 'agent-memory' && consent) {
         // Ask with references only. A request-supplied boolean/reference alone
         // cannot authorize the raw body. The server checks its actual ledger
@@ -227,7 +276,7 @@ export function createRoutingClient(config: RoutingClientConfig) {
         check();
         try {
           const response = await bounded(() => request(target.origin + '/v1/routing/consent/check', {
-            ...init, method: 'POST', headers: { authorization: 'Bearer ' + auth.token, 'content-type': 'application/json', accept: 'application/json' },
+            ...init, method: 'POST', headers: { authorization: 'Bearer ' + auth.token, 'content-type': 'application/json', accept: 'application/json', 'x-memory-routing': '1' },
             body: JSON.stringify({ version: 1, requestId: id, spaceId: target.spaceId, consent, operation: name }),
           }));
           if (!response.ok || mediaType(response) !== 'application/json') {
@@ -253,10 +302,11 @@ export function createRoutingClient(config: RoutingClientConfig) {
       check();
       const response = await bounded(() => {
         check();
+        if (generalPreflightDeadline !== undefined && performance.now() >= generalPreflightDeadline) fail('routing_preflight_unavailable');
         if (Date.now() >= consentExpiresAt) fail('routing_consent_unavailable');
         dispatched = true;
         return request(target.origin + '/mcp', { ...init, method: 'POST', body, headers: {
-          authorization: 'Bearer ' + auth.token, 'content-type': 'application/json',
+          authorization: 'Bearer ' + auth.token, 'content-type': 'application/json', 'x-memory-routing': '1',
           accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25',
           ...(consentReceipt ? { 'x-memory-consent-receipt': consentReceipt } : {}),
         } });
@@ -278,7 +328,7 @@ export function createRoutingClient(config: RoutingClientConfig) {
       check();
       return { routing: plan, result: tool.data };
     } catch (error) {
-      if (name === 'memory_ingest' && dispatched) fail('routing_write_outcome_unknown');
+      if ((name === 'memory_ingest' || name === 'memory_clear_space') && dispatched) fail('routing_write_outcome_unknown');
       if (error instanceof RoutingClientError) throw error;
       if (error && typeof error === 'object' && 'code' in error && error.code === 'routing_target_unavailable') fail('routing_target_unavailable');
       return fail('routing_upstream_unavailable');
