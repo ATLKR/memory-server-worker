@@ -23,6 +23,9 @@ const planSchema = z.union([
     vector: z.literal('pgvector'), requiredRegion: z.literal('kr-seoul') }),
 ]);
 export type RoutingPlan = Readonly<z.infer<typeof planSchema>>;
+export const seoulPlacementSchema = z.strictObject({ version: z.literal(2), route: z.literal('seoul'),
+  storage: z.literal('postgres'), requiredRegion: z.literal('kr-seoul') });
+export type SeoulPlacement = Readonly<z.infer<typeof seoulPlacementSchema>>;
 export const routingTargetSchema = z.union([
   z.strictObject({ route: z.literal('agent-memory'), storage: z.literal('cloudflare-agent-memory'),
     vector: z.literal('managed-agent-memory'), region: z.literal('cloudflare'), ready: z.boolean() }),
@@ -50,6 +53,14 @@ export function resolveMemoryRoute(decision: unknown, restrictions: readonly unk
     storage: 'postgres', vector: 'pgvector', requiredRegion: 'kr-seoul' });
   return Object.freeze({ version: 1, route: 'agent-memory', storage: 'cloudflare-agent-memory',
     vector: 'managed-agent-memory', requiredRegion: null });
+}
+
+/** Explicit v2 placement uses the same classification and inherited restrictions
+ * as v1. Storage selection does not claim a search backend or serving readiness. */
+export function resolveSeoulPlacement(decision: unknown, restrictions: readonly unknown[] = []): SeoulPlacement {
+  const plan = resolveMemoryRoute(decision, restrictions);
+  if (plan.route !== 'seoul') reject('routing_target_unavailable');
+  return Object.freeze({ version: 2, route: 'seoul', storage: 'postgres', requiredRegion: 'kr-seoul' });
 }
 
 /** Metadata matching is necessary but not proof of a provider's physical location.

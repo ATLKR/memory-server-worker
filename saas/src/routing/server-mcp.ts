@@ -73,6 +73,7 @@ export function createRoutedMcpHandler(ports:RoutedMcpPorts) {
       const parsedInput=(params.name==='memory_ingest'?ingestArgs:searchArgs).safeParse(params.arguments);
       if(!parsedInput.success) fail(400,'routing_request_invalid');
       const input=parsedInput.data;
+      if('query' in input&&input.mode!==undefined)fail(400,'routing_search_mode_unavailable');
       const plan=resolveMemoryRoute(input.routing,seoul.has(input.spaceId)?[{route:'seoul'}]:[]);
       if(plan.route!=='agent-memory'||input.routing.classification!=='medical'||!allowed.has(input.spaceId))
         fail(403,'routing_space_not_enabled');

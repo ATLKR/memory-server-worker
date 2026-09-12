@@ -45,6 +45,15 @@ function durableLedgers(t) {
   const budget=new RoutingBudgetLedger(budgetStorage,{now:()=>now,objectName:'budget:test-budget'});budget.initialize();
   return {space,budget,spaceDb:spaceStorage.db,budgetDb:budgetStorage.db};
 }
+
+test('general managed recall rejects explicit modes before authority, budget or provider dispatch',async()=>{
+  for(const mode of ['keyword','semantic']) {
+    const f=fixture();
+    const result=await f.execute('memory_search',{spaceId:'space-a',routing:{version:1,classification:'general'},query:'private query',mode},'token');
+    assert.equal(result.ok,false);assert.equal(result.body.error,'routing_search_mode_unavailable');
+    assert.deepEqual(f.events,[]);assert.deepEqual(f.calls,[]);
+  }
+});
 test('general writes reserve global budget after durable admission and recheck before dispatch/disclosure',async()=>{
   const f=fixture(),r=await f.execute('memory_ingest',f.input,'token');assert.equal(r.ok,true);
   assert.deepEqual(f.events,['authority','admit','reserve','authority','dispatch','ingest','space:accepted','budget:accepted','authority','disclose']);

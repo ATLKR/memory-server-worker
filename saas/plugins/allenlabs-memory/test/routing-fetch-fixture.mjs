@@ -1,10 +1,24 @@
 // Native child-process test fixture. No real request is made, including on an unexpected URL.
 import assert from 'node:assert/strict';
+const metadataOnly=process.env.MEMORY_TEST_METADATA_ONLY==='1';
+let sensitiveReads=0,fetchCalls=0;
+if(metadataOnly){
+  process.env=new Proxy(process.env,{get(target,key,receiver){
+    if(typeof key==='string'&&/^MEMORY_(?:CF|SEOUL)_(?:PAT|SSO_TOKEN|ORIGIN|SPACE_ID)$/.test(key)){sensitiveReads++;throw Error('PRIVATE_CONFIGURATION_ACCESS');}
+    return Reflect.get(target,key,receiver);
+  }});
+  process.on('exit',()=>{assert.equal(sensitiveReads,0);assert.equal(fetchCalls,0);});
+}
 const pending = [];
 const cancelPhase = process.env.MEMORY_TEST_CANCEL_PHASE;
 const organizationConsent = process.env.MEMORY_TEST_ORGANIZATION_CONSENT;
 const generalCheckDenied = process.env.MEMORY_TEST_GENERAL_CHECK === 'deny';
 const checkedGeneralRequests = new Set();
+const seoulV2=process.env.MEMORY_TEST_SEOUL_V2;
+let seoulDiscoveries=0,seoulPosts=0;
+if(seoulV2)process.on('exit',()=>{
+  assert.equal(seoulDiscoveries,1);assert.equal(seoulPosts,['notready','unsafe-capability'].includes(seoulV2)?0:1);
+});
 let generalChecks = 0, generalUploads = 0;
 if (generalCheckDenied) process.on('exit', () => {
   assert.equal(generalChecks, 1); assert.equal(generalUploads, 0);
@@ -20,10 +34,16 @@ if (cancelPhase) {
   process.channel?.unref();
 }
 globalThis.fetch = async (url, init) => {
+  fetchCalls++;
   const target = new URL(url);
   const cf = target.origin === 'https://cf.fixture.test';
   assert.ok(cf || target.origin === 'https://seoul.fixture.test');
   assert.equal(init.redirect, 'error');
+  if(target.pathname==='/.well-known/memory-routing-v2'){
+    assert.equal(cf,false);assert.equal(init.method,'GET');assert.equal(init.headers.authorization,undefined);assert.equal(init.body,undefined);seoulDiscoveries++;
+    return Response.json({version:2,protocol:'memory-routing-v2',target:{route:'seoul',storage:'postgres',region:'kr-seoul',ready:seoulV2!=='notready',
+      capabilities:{ingest:seoulV2!=='notready',search:{keyword:seoulV2!=='notready',semantic:seoulV2==='unsafe-capability'}}}});
+  }
   if (target.pathname === '/.well-known/memory-routing') {
     assert.equal(init.method, 'GET');
     assert.equal(init.headers.authorization, undefined);
@@ -63,6 +83,12 @@ globalThis.fetch = async (url, init) => {
       expiresAtMs: Date.now() + 60000, receipt: 'scoped-fixture-receipt' });
   }
   assert.equal(target.pathname, '/mcp');
+  if(seoulV2){
+    seoulPosts++;assert.equal(cf,false);assert.equal(init.headers['x-memory-routing'],'2');assert.equal(request.params.name,'memory_search');
+    assert.equal(request.params.arguments.mode,'keyword');assert.equal(request.params.arguments.spaceId,'clinical');assert.equal(request.params.arguments.query,'clinical topic');
+    const payload={spaceId:seoulV2==='wrongspace'?'foreign':'clinical',mode:seoulV2==='wrongmode'?'semantic':'keyword',matches:[{memoryId:'seoul-memory',revision:2,excerpt:seoulV2==='wrongmode'?'PRIVATE_BAD_RESPONSE':'Seoul keyword match'}],count:1};
+    return Response.json({jsonrpc:'2.0',id:request.id,result:{content:[{type:'text',text:JSON.stringify(payload)}]}});
+  }
   if(cf && request.params.arguments.routing.classification === 'general') {
     generalUploads++;
     assert.equal(checkedGeneralRequests.delete(request.id),true,'each general upload needs its own metadata check');

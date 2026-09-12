@@ -42,6 +42,60 @@ test('local routing chooses Cloudflare for general and Seoul for uncertain/medic
   assert.deepEqual(result.messages.slice(1).map(r => r.result.structuredContent.route), ['agent-memory', 'seoul', 'seoul', 'seoul']);
 });
 
+test('explicit Seoul v2 local placement is credential-free and contains no fabricated vector capability',async()=>{
+  const result=await run([initialize,initialized,
+    rpc(2,'memory_route',{routing:{version:1,classification:'uncertain'}}),
+    rpc(3,'memory_route',{routing:{version:1,classification:'general'}})],{MEMORY_SEOUL_ROUTING_PROTOCOL:'memory-routing-v2'});
+  assert.deepEqual(result.messages.find(message=>message.id===2).result.structuredContent,{version:2,route:'seoul',storage:'postgres',requiredRegion:'kr-seoul'});
+  assert.deepEqual(result.messages.find(message=>message.id===3).result.structuredContent,{version:1,route:'agent-memory',storage:'cloudflare-agent-memory',vector:'managed-agent-memory',requiredRegion:null});
+  assert.equal(result.stderr,'');
+});
+
+test('Seoul protocol opt-in validates only the selected local route and cannot remove inherited locks',async()=>{
+  const bad=await run([initialize,initialized,rpc(2,'memory_route',{routing:{version:1,classification:'uncertain'}}),rpc(3,'memory_route',{routing:{version:1,classification:'general'}})],{MEMORY_SEOUL_ROUTING_PROTOCOL:'invalid'});
+  assert.equal(bad.messages.find(message=>message.id===2).result.structuredContent.error,'route_configuration_invalid');
+  assert.equal(bad.messages.find(message=>message.id===3).result.structuredContent.route,'agent-memory');
+  const locked=await run([initialize,initialized,rpc(2,'memory_route',{routing:{version:1,classification:'general'}})],{MEMORY_SEOUL_ROUTING_PROTOCOL:'memory-routing-v2',MEMORY_ROUTING_RESTRICTION:'seoul'});
+  assert.deepEqual(locked.messages.find(message=>message.id===2).result.structuredContent,{version:2,route:'seoul',storage:'postgres',requiredRegion:'kr-seoul'});
+});
+
+test('unsupported search modes fail before selected credentials or network are needed',async()=>{
+  for(const [protocol,classification,mode] of [[undefined,'medical','keyword'],[undefined,'general','semantic'],['memory-routing-v2','medical','semantic']]){
+    const result=await run([initialize,initialized,rpc(2,'memory_search',{routing:{version:1,classification},query:'PRIVATE_QUERY',mode})],protocol?{MEMORY_SEOUL_ROUTING_PROTOCOL:protocol}:{});
+    assert.equal(result.messages.find(message=>message.id===2).result.structuredContent.error,'routing_search_mode_unavailable');
+    assert.equal(result.stdout.includes('PRIVATE_QUERY'),false);assert.equal(result.stderr.includes('PRIVATE_QUERY'),false);
+  }
+});
+
+test('offline placement and unsupported semantic mode never read target or credential getters',async()=>{
+  const result=await run([initialize,initialized,
+    rpc(2,'memory_route',{routing:{version:1,classification:'medical'}}),
+    rpc(3,'memory_search',{routing:{version:1,classification:'medical'},query:'PRIVATE_QUERY',mode:'semantic'})
+  ],{MEMORY_SEOUL_ROUTING_PROTOCOL:'memory-routing-v2',MEMORY_TEST_METADATA_ONLY:'1'},true);
+  assert.equal(result.messages.find(message=>message.id===2).result.structuredContent.version,2);
+  assert.equal(result.messages.find(message=>message.id===3).result.structuredContent.error,'routing_search_mode_unavailable');
+  assert.equal(result.stdout.includes('PRIVATE_'),false);assert.equal(result.stderr,'');
+});
+
+for(const mode of [undefined,'keyword'])test(`Seoul v2 ${mode??'omitted'} mode produces a keyword result with exact placement provenance`,async()=>{
+  const result=await run([initialize,initialized,rpc(2,'memory_search',{routing:{version:1,classification:'medical'},query:'clinical topic',limit:1,...(mode?{mode}:{})})],{
+    MEMORY_SEOUL_ROUTING_PROTOCOL:'memory-routing-v2',MEMORY_SEOUL_ORIGIN:'https://seoul.fixture.test',MEMORY_SEOUL_SPACE_ID:'clinical',MEMORY_SEOUL_SSO_TOKEN:'seoul-token',MEMORY_TEST_SEOUL_V2:'ready',
+  },true);
+  const response=result.messages.find(message=>message.id===2).result;
+  const search={spaceId:'clinical',mode:'keyword',matches:[{memoryId:'seoul-memory',revision:2,excerpt:'Seoul keyword match'}],count:1};
+  assert.deepEqual(response.structuredContent,{routing:{version:2,route:'seoul',storage:'postgres',requiredRegion:'kr-seoul'},search});
+  assert.deepEqual(JSON.parse(response.content[0].text),search);
+  assert.equal(result.stdout.includes('seoul-token'),false);assert.equal(result.stderr,'');
+});
+
+for(const [mode,expected] of [['notready','routing_target_unavailable'],['unsafe-capability','routing_target_unavailable'],['wrongmode','routing_response_invalid'],['wrongspace','routing_response_invalid']])test(`Seoul v2 ${mode} is denied without exposing upstream content`,async()=>{
+  const result=await run([initialize,initialized,rpc(2,'memory_search',{routing:{version:1,classification:'medical'},query:'clinical topic'})],{
+    MEMORY_SEOUL_ROUTING_PROTOCOL:'memory-routing-v2',MEMORY_SEOUL_ORIGIN:'https://seoul.fixture.test',MEMORY_SEOUL_SPACE_ID:'clinical',MEMORY_SEOUL_PAT:'seoul-token',MEMORY_TEST_SEOUL_V2:mode,
+  },true);
+  const response=result.messages.find(message=>message.id===2).result;assert.equal(response.structuredContent.error,expected);assert.equal(response.isError,true);
+  assert.equal(result.stdout.includes('PRIVATE_BAD_RESPONSE'),false);assert.equal(result.stdout.includes('seoul-token'),false);assert.equal(result.stderr,'');
+});
+
 test('operator Seoul lock is applied before local planning or target selection', async () => {
   const result = await run([initialize, initialized,
     rpc(2, 'memory_route', { routing: { version: 1, classification: 'general' } }),

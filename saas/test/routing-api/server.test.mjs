@@ -19,6 +19,24 @@ const adminPath = '/v1/organizations/org/medical-cloudflare-consent';
 const checkPath = '/v1/routing/consent/check';
 const grant = { spaceScope: { kind: 'spaces', spaceIds: ['so'] }, scopes: ['ingest','storage','extraction','embedding','recall'], validFromMs: at, evidenceRef: 'approved-contract' };
 const check = { version: 1, requestId: 'request-1', spaceId: 'so', operation: 'memory_ingest', consent: { mode: 'organization' } };
+
+test('medical managed recall rejects explicit modes before consuming authority or consent',async()=>{
+  for(const mode of ['keyword','semantic']) {
+    let touched=0;
+    const forbidden=()=>{touched++;throw new Error('unexpected port');};
+    const handler=createRoutedMcpHandler({clock:()=>at,allowedMedicalSpaceIds:['so'],seoulSpaceIds:[],
+      authority:forbidden,ledger:forbidden,provider:{ingest:forbidden,recall:forbidden},budgetId:'test-budget',
+      budgetPolicy:{version:1,revision:'test-v1',validUntilMs:at+600000,maxMonthlyRequests:100,
+        maxMonthlyInputBytes:1000000,maxMonthlyReservedMicroUsd:1000000,ingestBaseMicroUsd:10,ingestMicroUsdPerKiB:1,
+        searchBaseMicroUsd:10,searchMicroUsdPerKiB:1,pricingBasis:'operator-upper-bound'},
+      budget:{reserve:forbidden,finalize:forbidden,usage:forbidden}});
+    const response=await handler(new Request('https://memory.test/mcp',{method:'POST',headers:{'content-type':'application/json','x-memory-consent-receipt':'synthetic-receipt'},
+      body:JSON.stringify({jsonrpc:'2.0',id:'search-mode',method:'tools/call',params:{name:'memory_search',arguments:{
+        spaceId:'so',query:'private query',mode,routing:{version:1,classification:'medical',medicalCloudflareConsent:{consentId:'consent',version:1}}}}})}),'synthetic-token');
+    const result=await response.json();assert.equal(result.result.isError,true);
+    assert.equal(JSON.parse(result.result.content[0].text).error,'routing_search_mode_unavailable');assert.equal(touched,0);
+  }
+});
 async function setup(t, options = {}) {
   let now = at;
   const f = await fixture({ clock: () => now }); t.after(() => f.db.close());

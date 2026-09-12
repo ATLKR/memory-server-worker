@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { loadRouteConfiguration, loadRoutingRestrictions, applyOperatorRouting } from '../src/config.mjs';
+import * as config from '../src/config.mjs';
 
 test('selected route receives only its own target and credential', async () => {
   const env = { MEMORY_CF_SPACE_ID: 'general', MEMORY_CF_PAT: 'cf-secret',
@@ -32,6 +33,24 @@ test('rejects selected-route ambiguity and malformed target before network', () 
 
 test('unselected route configuration does not block a configured route', () => {
   assert.doesNotThrow(() => loadRouteConfiguration('agent-memory', { MEMORY_CF_SPACE_ID: 'space', MEMORY_CF_PAT: 'secret', MEMORY_SEOUL_PAT: 'one', MEMORY_SEOUL_SSO_TOKEN: 'two' }));
+});
+
+test('Seoul protocol selection is metadata-only, exact and defaults to v1',()=>{
+  assert.equal(typeof config.loadSeoulRoutingProtocol,'function');
+  const env={};for(const key of ['MEMORY_SEOUL_PAT','MEMORY_SEOUL_SSO_TOKEN','MEMORY_SEOUL_ORIGIN','MEMORY_SEOUL_SPACE_ID'])
+    Object.defineProperty(env,key,{get(){throw Error('sensitive configuration was read');}});
+  assert.equal(config.loadSeoulRoutingProtocol(env),'memory-routing-v1');
+  env.MEMORY_SEOUL_ROUTING_PROTOCOL='memory-routing-v2';assert.equal(config.loadSeoulRoutingProtocol(env),'memory-routing-v2');
+  for(const protocol of [null,1,{},'', 'v2', 'memory-routing-v3', ' memory-routing-v2', 'memory-routing-v2 '])
+    assert.throws(()=>config.loadSeoulRoutingProtocol({MEMORY_SEOUL_ROUTING_PROTOCOL:protocol}),/route_configuration_invalid/);
+});
+
+test('only an explicit Seoul v2 setting is attached to the selected remote endpoint',()=>{
+  const env={MEMORY_CF_SPACE_ID:'general',MEMORY_CF_PAT:'cf-secret',MEMORY_SEOUL_ORIGIN:'https://seoul.example.test',MEMORY_SEOUL_SPACE_ID:'clinical',MEMORY_SEOUL_PAT:'seoul-secret',MEMORY_SEOUL_ROUTING_PROTOCOL:'memory-routing-v2'};
+  assert.deepEqual(loadRouteConfiguration('seoul',env).targets,{seoul:{origin:'https://seoul.example.test',spaceId:'clinical',protocol:'memory-routing-v2'}});
+  assert.deepEqual(loadRouteConfiguration('agent-memory',env).targets,{'agent-memory':{origin:'https://memory.allenlabs.org',spaceId:'general'}});
+  env.MEMORY_SEOUL_ROUTING_PROTOCOL='invalid';assert.throws(()=>loadRouteConfiguration('seoul',env),/route_configuration_invalid/);
+  assert.doesNotThrow(()=>loadRouteConfiguration('agent-memory',env));
 });
 
 test('operator routing restriction only accepts the known Seoul lock', () => {

@@ -4,7 +4,7 @@
 
 ## API와 플러그인
 
-REST 경로는 `/v1/spaces/:spaceId/agent-memory/` 아래에 있다. `POST ingest`는 `{routing,operationId,messages,sessionId?}`, `POST search`는 `{routing,query,limit?}`를 받는다. `GET usage`는 해당 Space의 이번 UTC 월 사용량을 반환한다. `POST clear`에는 `{routing,operationId,scope:"all-general-memory-in-space"}`가 필요하다. POST 본문에서 URL의 Space를 바꿀 수 없다.
+REST 경로는 `/v1/spaces/:spaceId/agent-memory/` 아래에 있다. `POST ingest`는 `{routing,operationId,messages,sessionId?}`, `POST search`는 `{routing,query,limit?}`를 받는다. 검색은 기존 관리형 recall이며 `mode`를 생략한다. 명시적인 keyword·semantic mode는 지원하지 않아 실행 전에 거부한다. `GET usage`는 해당 Space의 이번 UTC 월 사용량을 반환한다. `POST clear`에는 `{routing,operationId,scope:"all-general-memory-in-space"}`가 필요하다. POST 본문에서 URL의 Space를 바꿀 수 없다.
 
 MCP 도구는 `memory_ingest`, `memory_search`, `memory_usage`, `memory_clear_space`이다. 새 프로토콜 요청에는 `x-memory-routing: 1`을 붙인다. 플러그인이 이를 자동으로 처리하며 기존 MCP 호출과 구분한다. clear는 다른 구성원이 저장한 내용을 포함한 해당 Space의 **일반 Agent Memory 전체**를 숨기는 파괴적 작업이다. 의료 동의 프로필이나 기존 Memory API의 기록을 함께 지웠다는 뜻은 아니다.
 
@@ -13,6 +13,8 @@ MCP 도구는 `memory_ingest`, `memory_search`, `memory_usage`, `memory_clear_sp
 사전 확인 응답은 `issuedAtMs`, `expiresAtMs`와 정확한 요청·Space·작업을 묶는다. 플러그인은 서버의 최대 60초 유효기간을 요청 시작 시점의 단조 시계에 적용한다. 네트워크 왕복 시간도 차감되므로 PC와 서버 시계 차이로 유효기간이 늘어나지 않는다. 확인 결과는 영구 권한이 아니며 실제 실행 시 다시 검증한다. MCP 제어 통신은 [공식 수명주기](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle)와 [Streamable HTTP](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports)를 기존 SDK로 처리한다.
 
 `/.well-known/memory-routing`은 `memory-routing-v1` 프로토콜 가용성을 공개한다. `ready`는 초대 GA 통과나 지역 증명이 아니다. 원문 저장·검색은 ready가 false일 때 전송하지 않는다. 명시적인 clear·usage는 원문과 검색어가 없는 관리 요청이므로 같은 프로토콜·저장소·지역을 확인한 후 비활성 discovery에서도 시도할 수 있다. 서버의 현재 권한·설정 검증은 여전히 필요하다.
+
+서울 전용 v2는 별도 opt-in 클라이언트 계약이다. 이 Cloudflare 서버의 v1 discovery 형식과 기본 검색 동작은 바뀌지 않는다. v2 keyword 결과 검증은 서울 서비스의 권한·저장·검색 구현이나 활성화를 대신하지 않는다. [서울 v2 계약](agent-routing.ko.md#서울-저장키워드-검색용-v2-계약)을 참고한다.
 
 ## 저장소와 계량
 
