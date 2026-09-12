@@ -1,9 +1,10 @@
 # Seoul PAT archive service
 
 This package implements a native PostgreSQL archive and keyword-search path for
-an explicitly selected Seoul Space. It is a standalone Hono application, not yet
-wired into the deployed Memory Worker. Source tests do not enable a provider,
-install migrations, provision a runtime login, or establish GA acceptance.
+an explicitly selected Seoul Space. It now has a standalone fetch-only Hono
+Worker composition, but no route or deployed origin selects it. Source tests do
+not enable a provider, install migrations, provision a runtime login, or
+establish GA acceptance.
 
 ## Storage and processing policy
 
@@ -30,6 +31,26 @@ the six private schemas and schema version 4 or 5. Version 5 explicitly enables
 the lifecycle commands below; version 4 keeps the archive/search contract. It passes that repository to
 `createSeoulApp`. Neither constructor discovers ambient credentials or falls
 back to another backend. `title` supplies renameable product branding.
+
+`src/postgres/seoul/worker.ts` is the route-free schema-5 composition. Exact
+activation requires `MEMORY_SEOUL_ENABLED=true`, a separate bounded
+`MEMORY_SEOUL_RUNTIME_PASSWORD` secret and a trusted
+`MEMORY_SEOUL_TARGET_JSON` scalar containing only host, port, database, user,
+expected role, deployment ID and direct or session-pooler mode. Provider,
+`kr-seoul` region, the six schemas and `kr-primary-storage-v1` policy are fixed
+by source. Missing, accessor-backed or malformed configuration stays unready
+without opening a client. An optional bounded `MEMORY_SEOUL_TLS_CA` supplies a
+reviewed CA for local native transport testing; TLS verification is never
+disabled. This composition carries no enrollment, migration, operator,
+scheduled or queue handler.
+
+The current workerd test establishes only module loading and the disabled Hono
+surface. Separate tests exercise the composed repository through a synthetic
+in-process transport. Before this Worker can be ready, its reviewed transport,
+separate origin and runtime bindings must be verified, then a freshly enrolled
+synthetic authority must pass private acceptance. A central SSO projection is
+also still required for product serving. No current test proves remote TCP/TLS,
+Hyperdrive, production routing or public readiness.
 
 The application exposes:
 
