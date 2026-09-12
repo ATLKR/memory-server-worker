@@ -119,7 +119,7 @@ test('v2 snapshots mode, query and target before discovery and credential awaits
   f=fixture({discovery(){args.mode='semantic';args.query='swapped';},credential(){args.routing.destination='agent-memory';}});
   await f.client.call('memory_search',args);
   assert.equal(f.accepted[0].mode,'keyword');assert.equal(f.accepted[0].query,'서울 keyword');
-  assert.equal(f.accepted[0].routing.destination,'seoul');assert.ok(f.calls.every(c=>c.url.startsWith(origin)));
+  assert.equal(f.accepted[0].routing.destination,'seoul');assert.ok(f.calls.every(c=>new URL(c.url).origin===origin));
 });
 
 test('v2 preserves use-time server rejection without raw diagnostic disclosure',async()=>{
