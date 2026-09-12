@@ -12,7 +12,7 @@ import { parseSeoulEraseInput, parseSeoulEraseReceipt, parseSeoulRetireInput, pa
   parseSeoulLifecycleStatusResult } from './lifecycle-codecs.ts';
 
 export type SeoulRepositoryOptions = Readonly<{
-  /** Native transport injection only. All deployment/catalog and command SQL still execute. */
+  /** Test-only transport-plan injection. All deployment/catalog and command SQL still execute. */
   clientFactory?: ConnectionOptions['clientFactory'];
   /** Elapsed time, never a wall-clock comparison with the database's epoch. */
   monotonicNow?: () => number;

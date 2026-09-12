@@ -26,31 +26,55 @@ metadata does not change the native Space policy.
 ## Composition and protocol
 
 Trusted deployment code constructs `createSeoulRepository` with an explicit
-Supabase Seoul target, verified TLS, expected database/login/deployment identity,
+Supabase Seoul transport, expected origin database/login/deployment identity,
 the six private schemas and schema version 4 or 5. Version 5 explicitly enables
 the lifecycle commands below; version 4 keeps the archive/search contract. It passes that repository to
 `createSeoulApp`. Neither constructor discovers ambient credentials or falls
 back to another backend. `title` supplies renameable product branding.
 
-`src/postgres/seoul/worker.ts` is the route-free schema-5 composition. Exact
-activation requires `MEMORY_SEOUL_ENABLED=true`, a separate bounded
+`src/postgres/seoul/worker.ts` is the route-free schema-5 composition.
+Activation requires `MEMORY_SEOUL_ENABLED=true`. Native compatibility mode
+(`MEMORY_SEOUL_TRANSPORT=native`, also the legacy default) uses a separate bounded
 `MEMORY_SEOUL_RUNTIME_PASSWORD` secret and a trusted
 `MEMORY_SEOUL_TARGET_JSON` scalar containing only host, port, database, user,
 expected role, deployment ID and direct or session-pooler mode. Provider,
 `kr-seoul` region, the six schemas and `kr-primary-storage-v1` policy are fixed
 by source. Missing, accessor-backed or malformed configuration stays unready
 without opening a client. An optional bounded `MEMORY_SEOUL_TLS_CA` supplies a
-reviewed CA for local native transport testing; TLS verification is never
-disabled. This composition carries no enrollment, migration, operator,
+reviewed CA for local native transport testing; the native client requires
+certificate verification. This composition carries no enrollment, migration, operator,
 scheduled or queue handler.
 
-The current workerd test establishes only module loading and the disabled Hono
-surface. Separate tests exercise the composed repository through a synthetic
-in-process transport. Before this Worker can be ready, its reviewed transport,
-separate origin and runtime bindings must be verified, then a freshly enrolled
-synthetic authority must pass private acceptance. A central SSO projection is
-also still required for product serving. No current test proves remote TCP/TLS,
-Hyperdrive, production routing or public readiness.
+`MEMORY_SEOUL_TRANSPORT=hyperdrive` selects a first-class Hyperdrive transport.
+Its `MEMORY_SEOUL_TARGET_JSON` contains exactly `database`, `expectedRole`, and
+`deploymentId`, and `SEOUL_HYPERDRIVE` is a generated Workers `Hyperdrive` binding.
+The composition snapshots six own primitive binding fields and rejects native
+password/CA bindings in this mode. Proxy startup identity is checked against
+that snapshot. The same transaction then independently checks the origin
+database and role, deployment, schema and privileges before every operation.
+Both transports use one client and one bounded transaction per operation, with
+unchanged exact numeric parsing, uncertain-COMMIT handling and no retries.
+
+The binding connection string must contain the runtime's exact
+`?sslmode=disable` proxy parameter, with no other parameters or fragment.
+This describes the in-runtime Worker-to-Hyperdrive connection. The Hyperdrive
+origin must separately use `verify-full` and the approved CA certificate.
+See [the runtime binding implementation](https://github.com/cloudflare/workerd/blob/main/src/workerd/api/hyperdrive.c%2B%2B)
+and [origin TLS configuration](https://developers.cloudflare.com/hyperdrive/configuration/tls-ssl-certificates/).
+
+Deployment requires provider read-back proving `caching.disabled === true`, the
+exact Supabase Seoul direct origin, runtime role, database, approved CA and
+`verify-full` mode. Zero cache durations, mock bindings or a local development
+connection do not prove this configuration. Keep provider credentials outside
+Worker bindings and public configuration. After deployment, exercise current
+PAT revocation and data freshness through the real bound endpoint.
+
+Workerd tests verify module loading, disabled behavior and real binding shape
+without making a database connection. PGlite tests execute the Hono/repository
+contract under distinct proxy and origin identities. These tests do not prove
+provider networking, origin TLS, remote Hyperdrive caching, production routing
+or public readiness. Fresh synthetic authority acceptance and central SSO
+projection remain required for product serving.
 
 The application exposes:
 
