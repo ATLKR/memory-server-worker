@@ -7,11 +7,14 @@ import * as mod from '../../src/postgres/connection.ts';
 
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 const deferred = () => { let resolve; const promise = new Promise(value => { resolve=value; }); return {promise,resolve}; };
-const bareConnectionString='postgresql://worker_proxy:proxy-secret@proxy.seoul.hyperdrive.local:5432/memory';
+const proxyDatabase='0bef9fbd1baf4e75ade7bd6a83513bb5';
+const bareConnectionString=`postgresql://worker_proxy:proxy-secret@proxy.seoul.hyperdrive.local:5432/${proxyDatabase}`;
 const binding = () => ({
   connectionString:bareConnectionString+'?sslmode=disable',
-  host:'proxy.seoul.hyperdrive.local',port:5432,user:'worker_proxy',password:'proxy-secret',database:'memory',
+  host:'proxy.seoul.hyperdrive.local',port:5432,user:'worker_proxy',password:'proxy-secret',database:proxyDatabase,
 });
+const bindingForDatabase = database => ({...binding(),database,
+  connectionString:`postgresql://worker_proxy:proxy-secret@proxy.seoul.hyperdrive.local:5432/${database}?sslmode=disable`});
 const target = overrides => ({transport:'hyperdrive',region:'kr-seoul',provider:'supabase',database:'memory',
   expectedRole:'memory_seoul_runtime',deploymentId:'memory-seoul-hd',applicationSchemas:['memory_control','memory_content'],
   hyperdrive:binding(),connectTimeoutMs:100,queryTimeoutMs:100,statementTimeoutMs:80,operationTimeoutMs:500,cleanupTimeoutMs:100,...overrides});
@@ -34,12 +37,22 @@ test('Hyperdrive snapshots one strict binding and exposes a truthful driver plan
   supplied.user='mutated';supplied.password='mutated';supplied.database='changed';
   await connection.withConnection(db=>db.query('SELECT value FROM memory_content.items'));
   assert.equal(h.made,1);assert.equal(h.closed,1);
-  assert.deepEqual(h.received.startup,{host:'proxy.seoul.hyperdrive.local',port:5432,user:'worker_proxy',database:'memory',applicationName:'memory-postgres-runtime'});
+  assert.deepEqual(h.received.startup,{host:'proxy.seoul.hyperdrive.local',port:5432,user:'worker_proxy',database:proxyDatabase,applicationName:'memory-postgres-runtime'});
   assert.equal(h.received.transport,'hyperdrive');
   assert.equal(h.received.config.connectionString,bareConnectionString+'?sslmode=disable');
   assert.equal(h.received.config.ssl,undefined);assert.equal(h.received.config.host,undefined);assert.equal(h.received.config.user,undefined);
   assert.deepEqual(h.calls.filter(value=>['BEGIN','COMMIT','ROLLBACK','SELECT value FROM memory_content.items'].includes(value)),
     ['BEGIN','SELECT value FROM memory_content.items','COMMIT']);
+});
+
+test('Hyperdrive accepts a proxy database identity distinct from the attested origin database',async()=>{
+  const h=harness();
+  await h.connection().withConnection(()=>1);
+  assert.equal(h.received.startup.database,proxyDatabase);
+  assert.equal(h.closed,1);
+  const denied=harness({roleOverrides:{database:proxyDatabase}});
+  await assert.rejects(denied.connection().withConnection(()=>1),error=>error.code==='postgres_role_denied');
+  assert.equal(denied.closed,1);
 });
 
 test('Hyperdrive rejects malformed, contradictory, mixed and URL-option bindings before a client exists',()=>{
@@ -57,6 +70,7 @@ test('Hyperdrive rejects malformed, contradictory, mixed and URL-option bindings
     {hyperdrive:{...binding(),connectionString:binding().connectionString+'#fragment'}},
     {hyperdrive:{...binding(),connectionString:'postgresql://worker_proxy:proxy-secret@proxy.seoul.hyperdrive.local/memory'}},
     {hyperdrive:{...binding(),unexpected:'value'}},
+    ...['','-proxy','proxy/name','x'.repeat(129)].map(database=>({hyperdrive:bindingForDatabase(database)})),
     {host:'db.abcdefghijklmnopqrst.supabase.co'},
     {provider:'neon'}, {region:'sg'},
   ];
@@ -88,11 +102,11 @@ test('actual pg Hyperdrive startup honors the frozen proxy URL and strips ambien
     const h=harness();await h.connection().withConnection(()=>1);
     assert.equal(typeof mod.createPgClient,'function');const client=mod.createPgClient(h.received);assert.ok(client instanceof Client);
     assert.equal(client.connectionParameters.host,'proxy.seoul.hyperdrive.local');assert.equal(client.connectionParameters.port,5432);
-    assert.equal(client.connectionParameters.user,'worker_proxy');assert.equal(client.connectionParameters.database,'memory');
-    assert.deepEqual(Client.prototype.getStartupConf.call(client),{user:'worker_proxy',database:'memory',application_name:'memory-postgres-runtime'});
+    assert.equal(client.connectionParameters.user,'worker_proxy');assert.equal(client.connectionParameters.database,proxyDatabase);
+    assert.deepEqual(Client.prototype.getStartupConf.call(client),{user:'worker_proxy',database:proxyDatabase,application_name:'memory-postgres-runtime'});
     const fields=serialize.startup(Client.prototype.getStartupConf.call(client)).subarray(8).toString('utf8').split('\0'),packet={};
     for(let index=0;index+1<fields.length&&fields[index];index+=2)packet[fields[index]]=fields[index+1];
-    assert.deepEqual(packet,{user:'worker_proxy',database:'memory',application_name:'memory-postgres-runtime',client_encoding:'UTF8'});
+    assert.deepEqual(packet,{user:'worker_proxy',database:proxyDatabase,application_name:'memory-postgres-runtime',client_encoding:'UTF8'});
     assert.equal(client.connectionParameters.options,'');assert.equal(client.connectionParameters.statement_timeout,0);
     assert.equal(client.connectionParameters.lock_timeout,0);assert.equal(client.connectionParameters.idle_in_transaction_session_timeout,0);
     assert.equal(client.connectionParameters.replication,0);assert.equal(client.connectionParameters.ssl,false);

@@ -7,11 +7,12 @@ import {createSeoulWorkerApp} from '../../src/postgres/seoul/worker-config.ts';
 import {createLifecycleFixture} from './seoul-lifecycle-fixture.mjs';
 
 const origin='https://seoul-hyperdrive.example.test';
+const proxyDatabase='0bef9fbd1baf4e75ade7bd6a83513bb5';
 const binding=(database='template1')=>({connectionString:`postgres://proxy_user:synthetic_proxy@proxy.example.test:5432/${database}?sslmode=disable`,
  host:'proxy.example.test',port:5432,user:'proxy_user',password:'synthetic_proxy',database});
-const environment=(database='template1')=>({MEMORY_SEOUL_ENABLED:'true',MEMORY_SEOUL_TRANSPORT:'hyperdrive',
+const environment=(database='template1',bindingDatabase=database)=>({MEMORY_SEOUL_ENABLED:'true',MEMORY_SEOUL_TRANSPORT:'hyperdrive',
  MEMORY_SEOUL_TARGET_JSON:JSON.stringify({database,expectedRole:'memory_seoul_runtime',deploymentId:'memory-seoul'}),
- SEOUL_HYPERDRIVE:binding(database)});
+ SEOUL_HYPERDRIVE:binding(bindingDatabase)});
 const discovery=app=>app.fetch(new Request(origin+'/.well-known/memory-routing-v2'));
 
 test('Hyperdrive configuration rejects mixed, missing, malformed and accessor bindings before client construction',async()=>{
@@ -38,7 +39,7 @@ test('Hyperdrive configuration rejects mixed, missing, malformed and accessor bi
 test('Hyperdrive Hono composition snapshots proxy credentials and attests the distinct origin role before PAT body access',async t=>{
  const fixture=await createLifecycleFixture(t);
  const initial=(await fixture.db.query('SELECT current_database() AS database, session_user AS role')).rows[0];
- const env=environment(initial.database),plans=[];
+ const env=environment(initial.database,proxyDatabase),plans=[];
  // Native bindings have a runtime prototype and additional fields. Only six
  // own primitive fields form the validated plain-data transport snapshot.
  Object.setPrototypeOf(env.SEOUL_HYPERDRIVE,{connect(){throw Error('must not call binding.connect');}});
@@ -54,8 +55,8 @@ test('Hyperdrive Hono composition snapshots proxy credentials and attests the di
  env.MEMORY_SEOUL_TARGET_JSON='changed';
  assert.equal((await(await discovery(app)).json()).target.ready,true);
  assert.equal(plans.length,1);assert.equal(plans[0].transport,'hyperdrive');
- assert.equal(plans[0].config.connectionString,binding(initial.database).connectionString);
- assert.equal(plans[0].startup.user,'proxy_user');assert.equal(plans[0].config.ssl,undefined);
+ assert.equal(plans[0].config.connectionString,binding(proxyDatabase).connectionString);
+ assert.equal(plans[0].startup.user,'proxy_user');assert.equal(plans[0].startup.database,proxyDatabase);assert.equal(plans[0].config.ssl,undefined);
  assert.ok(Object.isFrozen(plans[0]));assert.ok(Object.isFrozen(plans[0].config));
  let bodyReads=0;
  const request=new Request(origin+'/mcp',{method:'POST',headers:{authorization:'Bearer '+'z'.repeat(40),
@@ -70,7 +71,7 @@ test('actual workerd Hyperdrive binding reaches the discriminated driver factory
  const app=createSeoulWorkerApp({...env,MEMORY_SEOUL_ENABLED:'true',MEMORY_SEOUL_TRANSPORT:'hyperdrive',
  MEMORY_SEOUL_TARGET_JSON:JSON.stringify({database:'template1',expectedRole:'memory_seoul_runtime',deploymentId:'memory-seoul'})},
  {clientFactory(plan){calls++;valid=plan.transport==='hyperdrive'&&typeof plan.config.connectionString==='string'
- &&plan.startup.user===env.SEOUL_HYPERDRIVE.user&&!('ssl'in plan.config);throw Error('synthetic_stop_before_connect');}});
+ &&plan.startup.user===env.SEOUL_HYPERDRIVE.user&&plan.startup.database===env.SEOUL_HYPERDRIVE.database&&!('ssl'in plan.config);throw Error('synthetic_stop_before_connect');}});
  const response=await app.fetch(new Request('https://fixture.test/.well-known/memory-routing-v2'));
  return Response.json({calls,valid,ready:(await response.json()).target.ready});}}`;
  const built=await build({absWorkingDir:fileURLToPath(new URL('../../',import.meta.url)),stdin:{contents:script,resolveDir:fileURLToPath(new URL('../../',import.meta.url)),loader:'ts'},
@@ -78,7 +79,7 @@ test('actual workerd Hyperdrive binding reaches the discriminated driver factory
  banner:{js:"import {createRequire as _r}from'node:module';const require=_r('/worker/index.mjs');"}});
  const mf=new Miniflare(convertV4MiniflareOptions({name:'hyperdrive-composition',modules:true,cf:false,host:'127.0.0.1',
  script:built.outputFiles[0].text,compatibilityDate:'2026-09-07',compatibilityFlags:['nodejs_compat'],log:new Log(LogLevel.NONE),
- hyperdrives:{SEOUL_HYPERDRIVE:'postgres://synthetic_role:synthetic_only@127.0.0.1:1/template1'}}));
+ hyperdrives:{SEOUL_HYPERDRIVE:`postgres://synthetic_role:synthetic_only@127.0.0.1:1/${proxyDatabase}`}}));
  try{assert.deepEqual(await(await mf.dispatchFetch(origin)).json(),{calls:1,valid:true,ready:false});}
  finally{await mf.dispose();}
 });
