@@ -78,6 +78,8 @@ function parse<T>(schema: z.ZodType<T>, value: unknown, code: SeoulErrorCode): T
   if (!result.success) fail(code);
   return result.data;
 }
+/** Internal shared boundary for the fixed native lifecycle schemas. */
+export { parse as parseSeoulData };
 function enforceSeoul(routing: SeoulIngestInput['routing']): void {
   try { resolveSeoulPlacement(routing, [{ route: 'seoul', requiredRegion: 'kr-seoul' }]); }
   catch { fail('seoul_input_invalid'); }

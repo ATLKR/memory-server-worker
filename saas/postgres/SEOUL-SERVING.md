@@ -3,7 +3,7 @@
 This package implements a native PostgreSQL archive and keyword-search path for
 an explicitly selected Seoul Space. It is a standalone Hono application, not yet
 wired into the deployed Memory Worker. Source tests do not enable a provider,
-install migration 0004, provision a runtime login, or establish GA acceptance.
+install migrations, provision a runtime login, or establish GA acceptance.
 
 ## Storage and processing policy
 
@@ -26,7 +26,8 @@ metadata does not change the native Space policy.
 
 Trusted deployment code constructs `createSeoulRepository` with an explicit
 Supabase Seoul target, verified TLS, expected database/login/deployment identity,
-the six private schemas and schema version 4. It then passes that repository to
+the six private schemas and schema version 4 or 5. Version 5 explicitly enables
+the lifecycle commands below; version 4 keeps the archive/search contract. It passes that repository to
 `createSeoulApp`. Neither constructor discovers ambient credentials or falls
 back to another backend. `title` supplies renameable product branding.
 
@@ -38,6 +39,10 @@ The application exposes:
 | `POST /mcp`, `x-memory-routing: 2` | Native PAT authentication followed by the MCP SDK's initialize, ping, tool discovery and tool-call handling. |
 | `memory_ingest` | Saves the complete accepted transcript verbatim and returns archive metadata. It performs no AI extraction. |
 | `memory_search` | Literal NFC-normalized substring search with ASCII case folding; returns stable message IDs, revision 1 and original excerpts. Explicit semantic requests are rejected. |
+| `memory_archive_erase` (v5) | Removes one archive's active source rows and identifying source metadata under explicit erase authority; returns a revision-bound receipt. |
+| `memory_space_retire` (v5) | Closes the selected Space after its retained source is erased; requires a separate retirement grant. |
+| `memory_pat_revoke_self` (v5) | Revokes only the PAT authenticating the request. |
+| `memory_lifecycle_status` (v5) | Reads an archive state/revision or the current actor's erase receipt under fresh authority. |
 
 The existing routing client can select this origin with
 `protocol: memory-routing-v2`. A credential and Space belong to that selected
@@ -77,6 +82,22 @@ A changed request or actor conflicts. Replay does not create another archive
 or meter event. The meter measures source bytes and message count, not provider
 disk usage or billing. Empty messages still consume the message quota.
 
+Migration 0005 adds a separate NOLOGIN `memory_lifecycle` role and explicit
+`can_erase`/`can_retire` grants, both false by default. Erasure removes message
+rows, session/routing metadata, original ingest operation text/digest and precise
+ingest timestamps. It preserves a minimal archive tombstone, actor/Space
+references, operation-key hash and cumulative meter quantities; these references
+are not anonymous. Retained counters decrease once without refunding cumulative
+quota. An old ingest operation cannot recreate an erased archive.
+
+Erase receipts report active primary-row removal, not physical media or backup
+purge. There is no native restore command. Already admitted reads may finish;
+retirement and self-revocation prevent subsequent ordinary requests. If their
+acknowledgement is lost, an administrator must reconcile the original operation
+manifest through metadata reads. The closed Space or revoked PAT cannot authorize
+its own retry/status request. See [the lifecycle SQL contract](SEOUL-LIFECYCLE-SQL.md)
+for exact inputs, replay behavior and retained data.
+
 An admission lasts at most 30 seconds and is capped by credential, membership
 and grant expiry. The repository includes connection/lock/commit time in that
 budget, retains an unforgeable in-process lease on the original result, and
@@ -94,7 +115,7 @@ any repeat attempt; confirmed rollback and confirmed commit remain distinct.
 
 ## Installation and release gates
 
-Migrations 0001–0003 are unchanged. Apply 0004 only through a reviewed incremental
+Migrations 0001–0004 retain their original source. Apply each new migration through a reviewed incremental
 operator that verifies the existing foundation and reviewed source, temporarily
 permits the provisioner to create the command role and SET the migration owner,
 and restores those permissions after commit or rollback. Do not rerun the empty
@@ -108,9 +129,9 @@ Before activating a real endpoint, finish and record:
   native-client concurrency/expiry tests.
 - Approved ingress and application execution deployment, real PAT onboarding,
   supported central SSO/lifecycle projection, and production routing verification.
-- Erasure, retention, restore/quarantine and lifecycle commands. Hidden/erased
-  archives are excluded from search, but markers alone are not an erasure API
-  and this package intentionally exposes no such API.
+- Live verification of the v5 erasure/lifecycle commands, regional retention and
+  restore/quarantine handling. Marker-only search exclusion does not prove source
+  deletion, and active-row erasure does not prove backup or physical media purge.
 - Regional backup/recovery evidence, operating alerts and the invite-based,
   metered GA budget/acceptance checks. PostgreSQL source completion does not
   establish production D1 cutover or complete managed Agent Memory recovery.
@@ -120,7 +141,7 @@ Before activating a real endpoint, finish and record:
 From `saas`, run `npm run test:postgres` and `npm run typecheck`; the full
 `npm run check` also covers the existing product and routing contracts. Native
 engine tests execute SQL, forced RLS and actual catalogs through PGlite,
-including a composed routing-client → Hono → native-repository lifecycle.
+including routing-client ingest/search and Hono → native-repository lifecycle tests.
 Failure cases cover payload conflict, quotas, revocation, invalid policy,
 partial-write rollback, delayed COMMIT and final response expiry. PGlite is not
 evidence of provider networking, real TLS, independent sockets or deployment.

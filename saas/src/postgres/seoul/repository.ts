@@ -7,6 +7,9 @@ import { parseSeoulAdmissionEnvelope, parseSeoulArchiveReceipt, parseSeoulIngest
   parseSeoulPatDigest, parseSeoulSearchInput, parseSeoulSearchResult } from './codecs.ts';
 import { SeoulRepositoryError } from './types.ts';
 import type { SeoulErrorCode, SeoulRepository, SeoulRequestOptions } from './types.ts';
+import { parseSeoulEraseInput, parseSeoulEraseReceipt, parseSeoulRetireInput, parseSeoulRetireReceipt,
+  parseSeoulRevokeSelfInput, parseSeoulRevokeSelfReceipt, parseSeoulLifecycleStatusInput,
+  parseSeoulLifecycleStatusResult } from './lifecycle-codecs.ts';
 
 export type SeoulRepositoryOptions = Readonly<{
   /** Native transport injection only. All deployment/catalog and command SQL still execute. */
@@ -18,11 +21,16 @@ const schemas = ['memory_control', 'memory_identity', 'memory_content', 'memory_
 const sqlStates: Readonly<Record<string, SeoulErrorCode>> = Object.freeze({
   PA001: 'seoul_input_invalid', PA002: 'seoul_pat_denied', PA003: 'seoul_space_denied',
   PA004: 'seoul_processing_denied', PA005: 'seoul_operation_conflict', PA006: 'seoul_quota_exceeded', PA007: 'seoul_authority_expired',
+  PA008: 'seoul_archive_erased', PA009: 'seoul_revision_conflict',
 });
 const statements = Object.freeze({
   preauthenticatePat: 'SELECT memory_identity.seoul_pat_check($1::text) AS value',
   ingest: 'SELECT memory_content.seoul_archive_ingest($1::text,$2::jsonb) AS value',
   search: 'SELECT memory_content.seoul_keyword_search($1::text,$2::jsonb) AS value',
+  eraseArchive: 'SELECT memory_content.seoul_archive_erase($1::text,$2::jsonb) AS value',
+  retireSpace: 'SELECT memory_control.seoul_space_retire($1::text,$2::jsonb) AS value',
+  revokeSelf: 'SELECT memory_identity.seoul_pat_revoke_self($1::text,$2::jsonb) AS value',
+  status: 'SELECT memory_ops.seoul_lifecycle_status($1::text,$2::jsonb) AS value',
 });
 function fail(code: SeoulErrorCode, outcome: PgOutcome = 'not_started'): never { throw new SeoulRepositoryError(code, outcome); }
 function requestOptions(options: SeoulRequestOptions | undefined): SeoulRequestOptions {
@@ -43,19 +51,21 @@ export function createSeoulRepository(target: PostgresTarget, expected: Expected
   options: SeoulRepositoryOptions = {}): Readonly<SeoulRepository> {
   let connection: ReturnType<typeof createPostgresConnection>;
   let clock: () => number;
+  let schemaVersion: 4 | 5;
   try {
     if (!options || typeof options !== 'object') fail('seoul_unavailable');
     clock = options.monotonicNow ?? (() => performance.now());
     if (!target || !expected || target.provider !== 'supabase' || target.region !== 'kr-seoul'
       || expected.region !== 'kr-seoul' || expected.deploymentId !== target.deploymentId
-      || expected.schemaVersion !== 4 || expected.processingPolicyId !== 'kr-primary-storage-v1'
+      || ![4, 5].includes(expected.schemaVersion) || expected.processingPolicyId !== 'kr-primary-storage-v1'
       || !Array.isArray(target.applicationSchemas) || target.applicationSchemas.length !== schemas.length
       || new Set(target.applicationSchemas).size !== schemas.length || schemas.some(name => !target.applicationSchemas.includes(name))
       || typeof clock !== 'function' || (options.clientFactory !== undefined && typeof options.clientFactory !== 'function')) fail('seoul_unavailable');
     const wanted = Object.freeze({ ...expected }), role = target.expectedRole;
+    schemaVersion = wanted.schemaVersion as 4 | 5;
     connection = createPostgresConnection(target, { clientFactory: options.clientFactory, async verifyDeployment(session) {
       const metadata = await verifyPostgresDeployment(session, wanted);
-      await verifySeoulServingPrivileges(session, role);
+      await verifySeoulServingPrivileges(session, role, schemaVersion);
       return metadata;
     } });
   } catch { fail('seoul_unavailable'); }
@@ -63,7 +73,7 @@ export function createSeoulRepository(target: PostgresTarget, expected: Expected
 
   async function execute<T>(action: keyof typeof statements | 'probe', digest: string | undefined,
     body: string | undefined, decode: ((value: unknown) => T) | undefined, options?: SeoulRequestOptions): Promise<T> {
-    const request = requestOptions(options), write = action === 'ingest';
+    const request = requestOptions(options), write = ['ingest', 'eraseArchive', 'retireSpace', 'revokeSelf'].includes(action);
     let last = -1, started = 0, ttl: number | undefined, terminal = false;
     let localError: SeoulRepositoryError | undefined;
     let dispatched = false;
@@ -107,7 +117,7 @@ export function createSeoulRepository(target: PostgresTarget, expected: Expected
       }, request);
       check('committed'); // COMMIT and socket cleanup also consume admission TTL.
       if (request.signal?.aborted) fail('seoul_unavailable', 'committed');
-      if ((action === 'ingest' || action === 'search') && value && typeof value === 'object') {
+      if ((write || action === 'search' || action === 'status') && value && typeof value === 'object') {
         leases.set(value, () => {
           try {
             if (request.signal?.aborted) { terminal = true; fail('seoul_authority_expired', 'committed'); }
@@ -126,6 +136,24 @@ export function createSeoulRepository(target: PostgresTarget, expected: Expected
   }
 
   const repository: SeoulRepository = {
+    ...(schemaVersion === 5 ? { lifecycle: Object.freeze({
+      eraseArchive: async (digest, input, options) => {
+        const token = parseSeoulPatDigest(digest), saved = parseSeoulEraseInput(input), body = JSON.stringify(saved);
+        return execute('eraseArchive', token, body, value => parseSeoulEraseReceipt(value, saved), options);
+      },
+      retireSpace: async (digest, input, options) => {
+        const token = parseSeoulPatDigest(digest), saved = parseSeoulRetireInput(input), body = JSON.stringify(saved);
+        return execute('retireSpace', token, body, value => parseSeoulRetireReceipt(value, saved), options);
+      },
+      revokeSelf: async (digest, input, options) => {
+        const token = parseSeoulPatDigest(digest), saved = parseSeoulRevokeSelfInput(input), body = JSON.stringify(saved);
+        return execute('revokeSelf', token, body, value => parseSeoulRevokeSelfReceipt(value, saved), options);
+      },
+      status: async (digest, input, options) => {
+        const token = parseSeoulPatDigest(digest), saved = parseSeoulLifecycleStatusInput(input), body = JSON.stringify(saved);
+        return execute('status', token, body, value => parseSeoulLifecycleStatusResult(value, saved), options);
+      },
+    } satisfies NonNullable<SeoulRepository['lifecycle']>) } : {}),
     assertDisclosure: result => {
       const lease = result && typeof result === 'object' ? leases.get(result) : undefined;
       if (!lease) fail('seoul_response_invalid');
