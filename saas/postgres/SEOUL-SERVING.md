@@ -60,7 +60,7 @@ The binding connection string must contain the runtime's exact
 This describes the in-runtime Worker-to-Hyperdrive connection. The Hyperdrive
 origin must separately use `verify-full` and the approved CA certificate.
 See [the runtime binding implementation](https://github.com/cloudflare/workerd/blob/main/src/workerd/api/hyperdrive.c%2B%2B)
-and [origin TLS configuration](https://developers.cloudflare.com/hyperdrive/configuration/tls-ssl-certificates/).
+and [origin TLS configuration](https://developers.cloudflare.com/hyperdrive/configuration/tls-ssl-certificates-for-hyperdrive/).
 
 Deployment requires provider read-back proving `caching.disabled === true`, the
 exact Supabase Seoul direct origin, runtime role, database, approved CA and
