@@ -1,10 +1,14 @@
 # Native PostgreSQL port status
 
-> Current scope: the user's later 2026-09-11 decision prefers Cloudflare for feasible persistence and full raw Agent Memory ingest, with Seoul PostgreSQL only for explicitly external Cloudflare data. See `../docs/cloudflare-storage-research.ko.md`. The full port matrix below is an inventory of the earlier alternative, not an instruction to expand PostgreSQL as the default backend. No native migration after 0003 has been started. No mandatory pgvector or general-memory Neon path is being activated.
+> Current scope: the user's later 2026-09-11 decision prefers Cloudflare for feasible persistence and full raw Agent Memory ingest, with Seoul PostgreSQL only for explicitly external Cloudflare data. See `../docs/cloudflare-storage-research.ko.md`. The full port matrix below is an inventory of the earlier alternative, not an instruction to expand PostgreSQL as the default backend. Migration 0004 and a standalone Hono PAT archive/keyword implementation are now present; see [Seoul serving scope and release gates](SEOUL-SERVING.md). No mandatory pgvector or general-memory Neon path is being activated.
 
-The D1 baseline is preserved at `adfb256545f395274f2645e2e83c16642b596d84`. This directory contains a **foundation**, not an operational Memory backend. No production provider migration or cutover has been executed by this work package. The existing D1 migrations and SQL are unchanged.
+The D1 baseline is preserved at `adfb256545f395274f2645e2e83c16642b596d84`. This directory contains a foundation and a bounded native serving module, not a complete operational Memory backend. This source package does not install migration 0004 or execute a production cutover. Provider installation receipts are separate from source tests. The existing D1 migrations and SQL are unchanged.
 
 ## Implemented foundation
+
+The following foundation details describe migrations 0001–0003. Migration 0004
+extends their runtime authority through named commands, without broad runtime
+identity/content table access; its exact scope is documented separately above.
 
 | Native migration | Result |
 | --- | --- |
@@ -46,11 +50,16 @@ Apply files once, in filename order, as individual transactions. `0001` intentio
 
 `account_emails(id, account_id)` owns the email claim. A membership references that exact pair, and an organization credential references `(membership_id, account_id, email_id)` together. Session/personal PAT rows cannot carry an organization membership/email; organization PATs must carry both. `credentials(id, account_id)` is also unique for future ownership references. SHA-256 token digests are validated as lowercase 64-character hex; no bearer token is stored.
 
-Personal PATs remain independent of an email claim, matching the existing product. Updating an email to revoked does not silently revoke a personal PAT. The current schema does **not** yet perform email/member/account lifecycle revocation cascades or live-admission checks; those need complete atomic commands and event proofs. Consequently there is no granting authority view/function and no runtime INSERT/UPDATE/DELETE/SELECT on identity tables. Do not add a broad runtime policy to make an incomplete flow work.
+Personal PATs remain independent of an email claim, matching the existing product. Updating an email to revoked does not silently revoke a personal PAT. Foundation migrations 0001–0003 provide no live-admission functions. Migration 0004 adds fixed PAT checks and per-Space archive/search commands that lock and recheck current authority. Full email/member/account lifecycle command and event parity remains pending. Runtime still has no direct INSERT/UPDATE/DELETE/SELECT on identity tables; do not add a broad runtime policy to make an incomplete flow work.
 
 Identifiers remain text and include existing colon-prefixed conventions. The native identifier domain limits them to the existing Memory API identifier syntax, so importer validation must flag any historical administrative rows outside that syntax before loading. Provider issuer/subject bounds preserve character limits, not UTF-8 byte limits. Long composite provider keys must also be tested against actual PostgreSQL index limits before full identity parity; do not truncate identifiers to make an import pass.
 
-## Explicit port matrix
+## Historical full-port inventory
+
+This matrix records the foundation-era gaps against the full original product.
+The bounded PAT archive/keyword subset in [SEOUL-SERVING.md](SEOUL-SERVING.md)
+supersedes its relevant authority, ingest, usage and search entries. It does not
+establish full lifecycle, SSO, erasure or recovery parity.
 
 | Existing implementation / contract | Native status | Required next work |
 | --- | --- | --- |
@@ -58,12 +67,12 @@ Identifiers remain text and include existing colon-prefixed conventions. The nat
 | `migrations/0001_schema.sql:7` — account/email/member/credential structure | Structural foundation present | Full live binding, issuance, email proof, revocation authorization and audit command port. |
 | `migrations/0003_product-schema.sql:7` — provider mapping and workspace commands | Provider mapping only | Verified central SSO receipts, invitation/key/sign-in atomic commands and bounded identity freshness. |
 | `migrations/0005_hierarchy-schema.sql:27` — immutable child creation, cycle prevention | Not ported | Native organization creation, immutable hierarchy, arbitrary product depth, no inherited memory permission. |
-| `src/release/authority.ts:35` — PAT/session/Space/share authority | Not ported; access denied | Complete capabilities, selected Space, account/member/email/lifecycle current state, grantor/recipient revocation, execution-time expiry and fenced concurrent mutation. |
+| `src/release/authority.ts:35` — PAT/session/Space/share authority | Bounded native PAT/selected-Space archive/search commands in 0004 | Full session/share/lifecycle parity, grantor/recipient flows and independent-client concurrency acceptance remain pending. |
 | `migrations/0024_lifecycle-schema.sql:36` — issuer proof/sequence/revocation | Not ported | Signed event receipt, exact issuer sequence, replay/conflict rules and region-local fail-closed projection. |
-| `src/release/memory.ts:234` — operation receipt/revision/quotas | Not ported | Atomic idempotency, revision CAS, shared pool/budget lock, immutable meter event and head/history commit. Test actual competing clients. |
+| `src/release/memory.ts:234` — operation receipt/revision/quotas | Native immutable archive receipts, per-Space source/message quotas and one meter event in 0004 | Editable memory revision CAS, shared budgets and full head/history parity remain pending. Test actual competing clients. |
 | `src/release/memory.ts:65` — irreversible erasure and restore | Not ported | Native privacy ledger, tombstone dominance, history/payload removal, retention checks and safe recovery quarantine. |
 | `src/release/payloads.ts:117` — D1 HOT + canonical R2 payloads | Not ported | Region-local PostgreSQL canonical bytes/hash and typed content; preserve old tombstones/import evidence. No hidden active D1/R2 path. |
-| `src/release/search.ts:11` — FTS5 and Vectorize | Not ported | Native full-text language/prefix behavior and local vector projections with Space/current-revision filters and bounded rebuild. |
+| `src/release/search.ts:11` — FTS5 and Vectorize | Literal native archive keyword search in 0004; no semantic capability | Full-text language/prefix parity and approved regional vector projections/rebuild remain separate work. |
 | `src/release/jobs.ts:70` — queue lease/budget/provider fencing | Not ported | Native claim/renew/checkpoint/outbox, no stale completion, expiry after lock wait, independent worker concurrency. |
 | `src/release/ingest.ts:47` — encrypted transient input | Not ported | Region-local ciphertext/key/AAD/TTL, before-provider authority recheck and approved processing policy. |
 | `src/release/storage-readiness.ts:13` / `readiness.ts:94` | Not ported | PostgreSQL-only profile readiness and actual queue/search/storage/backup evidence. D1 acceptance is historical. |

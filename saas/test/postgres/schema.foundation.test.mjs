@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readdir, readFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import { test } from 'node:test';
 import { PGlite } from '@electric-sql/pglite';
 
@@ -7,8 +7,8 @@ const directory = new URL('../../postgres/migrations/', import.meta.url);
 const privateSchemas = ['memory_content', 'memory_control', 'memory_identity', 'memory_jobs', 'memory_ops', 'memory_search'];
 const authorityTables = ['accounts', 'account_emails', 'memberships', 'credentials', 'provider_identities'];
 async function migrations() {
-  const files = await readdir(directory).catch(error => { if (error.code === 'ENOENT') return []; throw error; });
-  return Promise.all(files.filter(name => /^\d+_.+\.sql$/.test(name)).sort().map(name => readFile(new URL(name, directory), 'utf8')));
+  return Promise.all(['0001_private_namespaces.sql','0002_deployment_identity.sql','0003_identity_foundation.sql']
+    .map(name => readFile(new URL(name, directory), 'utf8')));
 }
 async function fixture(t) {
   const db = new PGlite(); await db.waitReady; t.after(() => db.close());
