@@ -1,5 +1,6 @@
 import type { IdentityDatabase, SqlValue } from '../identity.ts';
 import type { Database, Result, Statement } from './types.ts';
+import { bootstrapStatements, type BootstrapScope } from './seoul-projection-bootstrap-capture.ts';
 
 const ISSUER = 'https://auth-api.allen.company';
 const TRUSTED_CONSTRUCTION = Symbol('trusted seoul capture composition');
@@ -82,6 +83,13 @@ export class SeoulProjectionCapture {
   issueKeyStatements(database: Database, scope: KeyScope, commands: Statement[]): Statement[] {
     this.assertDatabase(database);
     return this.plan('scoped-key',scope,commands).statements;
+  }
+  async workspaceBootstrap(database: IdentityDatabase, scope: BootstrapScope, sql: string, values: SqlValue[]): Promise<Result> {
+    this.assertDatabase(database);
+    const plan = bootstrapStatements(this.database,scope,this.database.prepare(sql).bind(...values));
+    const result = await this.database.batch(plan.statements);
+    if (result.length !== plan.statements.length || result.some(row => !row.success)) throw new Error('seoul_capture_batch_failed');
+    return result[plan.commandIndex]!;
   }
   async unlinkEmail(database: IdentityDatabase, scope: UnlinkScope, sql: string, values: SqlValue[]): Promise<Result> {
     this.assertDatabase(database);
@@ -169,7 +177,12 @@ export class SeoulProjectionCapture {
        'countLowerBound',min(2049,identity_count+membership_count+credential_count+space_count),'byteEstimate',max(identity_bytes,source_bytes),'captureAttemptId',a.id),captured_at
      FROM release_seoul_capture_attempts a WHERE a.id=? AND accepted=1 AND exclusion_reason IS NOT NULL AND anchor_subject IS NOT NULL AND ${validId('account_id')}`);
     add(`INSERT INTO release_seoul_authority_changes(source_command_id,stream_kind,stream_key,event_id,record_bytes,created_at)
-     SELECT a.id,k.stream_kind,k.stream_key,${UUID},CASE WHEN k.stream_kind='email' THEN json_set(k.after_bytes,'$.changedClaim',json((SELECT json_object('id',e.id,'verifiedAtMs',e.verified_at,'revokedAtMs',e.revoked_at) FROM account_emails e WHERE e.id=k.prior_claim_id AND e.revoked_at IS NOT NULL))) ELSE k.after_bytes END,a.captured_at
+     SELECT a.id,k.stream_kind,k.stream_key,${UUID},json_set(
+      CASE WHEN k.stream_kind='email' THEN json_set(k.after_bytes,'$.changedClaim',json((SELECT json_object('id',e.id,'verifiedAtMs',e.verified_at,'revokedAtMs',e.revoked_at) FROM account_emails e WHERE e.id=k.prior_claim_id AND e.revoked_at IS NOT NULL))) ELSE k.after_bytes END,
+      '$.origin',json_object('kind','command','commandType',CASE WHEN a.command_kind='scoped-key' THEN 'scoped-key-issue' ELSE 'self-email-unlink' END,'receiptId',CASE WHEN a.command_kind='scoped-key' THEN NULL ELSE a.receipt_id END),
+      '$.effect',json(CASE WHEN k.stream_kind IN ('membership','credential') AND json_extract(k.after_bytes,'$.revokedAtMs') IS NOT NULL
+       THEN json_object('type','entity-negative','entityKind',k.stream_kind,'entityId',k.stream_key,'state','revoked','occurredAtMs',json_extract(k.after_bytes,'$.revokedAtMs'))
+       ELSE json_object('type','entity-head','disposition',CASE WHEN a.command_kind='scoped-key' THEN 'present' ELSE 'changed' END) END)),a.captured_at
      FROM release_seoul_capture_scope k JOIN release_seoul_capture_attempts a ON a.id=k.attempt_id
      WHERE a.id=? AND a.accepted=1 AND a.exclusion_reason IS NULL AND k.after_bytes IS NOT NULL AND k.before_bytes IS NOT k.after_bytes
      ORDER BY k.stream_kind COLLATE BINARY,k.stream_key COLLATE BINARY`);

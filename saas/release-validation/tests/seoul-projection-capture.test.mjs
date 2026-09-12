@@ -39,7 +39,8 @@ for(const recursive of ['ON','OFF'])test('scoped key capture stores final canoni
  const f=await setup(t,{recursive});
  const key=await f.admin.issueKey(f.token,{label:'private label',organizationId:'org',capabilities:['read','create'],spaceIds:['so'],expiresInDays:1});
  const records=captured(f);assert.equal(records.length,1);const body=JSON.parse(records[0].record_bytes);
- assert.deepEqual(Object.keys(body),['version','kind','id','accountId','credentialKind','tokenDigest','membershipId','emailId','permission','expiresAtMs','revokedAtMs','policy']);
+ assert.deepEqual(Object.keys(body),['version','kind','id','accountId','credentialKind','tokenDigest','membershipId','emailId','permission','expiresAtMs','revokedAtMs','policy','origin','effect']);
+ assert.deepEqual(body.origin,{kind:'command',commandType:'scoped-key-issue',receiptId:null});assert.deepEqual(body.effect,{type:'entity-head',disposition:'present'});
  assert.equal(body.kind,'credential-source');assert.equal(body.id,key.id);assert.equal(body.credentialKind,'api_key');assert.equal(body.emailId,'e1');assert.equal(body.membershipId,'m1');
  assert.deepEqual(body.policy,{capabilities:['create','read'],spaceIds:['so']});assert.equal(body.expiresAtMs,key.expiresAt);
  assert.equal(body.tokenDigest,f.raw.prepare('SELECT token_digest FROM credentials WHERE id=?').get(key.id).token_digest);
@@ -58,7 +59,8 @@ for(const recursive of ['ON','OFF'])test('self unlink captures exact two-subject
  await f.identity.unlinkEmail(f.token,'e1');const records=captured(f),core=bodies(f);
  assert.deepEqual(records.map(r=>r.stream_kind).sort(),['credential','email','email','membership']);
  assert.deepEqual(core.filter(r=>r.kind==='email-source').map(r=>r.subject).sort(),['alpha\nopaque','zeta']);
- for(const email of core.filter(r=>r.kind==='email-source')){assert.equal(email.liveClaim,null);assert.deepEqual(email.changedClaim,{id:'e1',verifiedAtMs:at,revokedAtMs:at});assert.deepEqual(email.lifecycle,{state:'absent'});assert.equal(email.legacyRevoked,false);}
+ for(const email of core.filter(r=>r.kind==='email-source')){assert.equal(email.liveClaim,null);assert.deepEqual(email.changedClaim,{id:'e1',verifiedAtMs:at,revokedAtMs:at});assert.deepEqual(email.lifecycle,{state:'absent'});assert.equal(email.legacyRevoked,false);assert.deepEqual(email.effect,{type:'entity-head',disposition:'changed'});}
+ const receipt=f.raw.prepare("SELECT id FROM revocations WHERE email_id='e1'").get().id;for(const body of core){assert.deepEqual(body.origin,{kind:'command',commandType:'self-email-unlink',receiptId:receipt});assert.deepEqual(Object.keys(body).slice(-2),['origin','effect']);if(body.kind==='membership-source'||body.kind==='credential-source')assert.deepEqual(body.effect,{type:'entity-negative',entityKind:body.kind==='membership-source'?'membership':'credential',entityId:body.id,state:'revoked',occurredAtMs:at});}
  assert.deepEqual(records.filter(r=>r.stream_kind==='email').map(r=>r.stream_key).sort(),[issuer+'\nalpha\nopaque\nalice@example.com',issuer+'\nzeta\nalice@example.com']);
  assert.equal(core.find(r=>r.kind==='credential-source').id,orgKey.id);assert.equal(core.find(r=>r.kind==='credential-source').revokedAtMs,at);assert.equal(core.find(r=>r.kind==='membership-source').revokedAtMs,at);
  assert.equal(f.raw.prepare("SELECT revoked_at FROM credentials WHERE id='key:alice'").get().revoked_at,null);assert.deepEqual(list(f,'release_seoul_dirty_spaces').map(r=>r.space_id),['so']);

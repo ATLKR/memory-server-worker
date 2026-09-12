@@ -1,6 +1,7 @@
 import { sqlNow } from './sql-clock.ts';
 import { canonicalEmail, IdentityInvalid } from './identity.ts';
 import type { IdentityDatabase, SqlValue } from './identity.ts';
+import type { SeoulProjectionCapture } from './release/seoul-projection-capture.ts';
 
 export class WorkspaceError extends Error {
   readonly status: number;
@@ -76,7 +77,10 @@ export class WorkspaceService {
   private readonly db: IdentityDatabase;
   private readonly clock: () => number;
   private readonly identityLifecycle: boolean;
-  constructor(db: IdentityDatabase, clock: () => number = Date.now, options: { identityLifecycle?: boolean } = {}) {
+  private readonly capture?: SeoulProjectionCapture;
+  constructor(db: IdentityDatabase, clock: () => number = Date.now, options: { identityLifecycle?: boolean } = {}, capture?: SeoulProjectionCapture) {
+    capture?.assertDatabase(db);
+    this.capture = capture;
     this.db = db;
     this.clock = clock;
     this.identityLifecycle = options.identityLifecycle === true;
@@ -136,11 +140,17 @@ export class WorkspaceService {
       let email: { address: string; domain: string } | null = null;
       if (principal.emailVerified === true && principal.email !== undefined) email = canonicalEmail(principal.email);
       const credentialId = externalToken === undefined ? `session:${crypto.randomUUID()}` : `oauth:${digest}`;
-      await this.write(`INSERT INTO workspace_sign_ins(id,issuer,subject,new_account_id,credential_id,token_digest,
+      const receiptId = crypto.randomUUID(), newAccountId = crypto.randomUUID(), emailId = crypto.randomUUID(), spaceId = crypto.randomUUID();
+      const sql = `INSERT INTO workspace_sign_ins(id,issuer,subject,new_account_id,credential_id,token_digest,
         expires_at,permission,email_id,address,domain,personal_space_id,created_at${this.identityLifecycle ? ',issued_at' : ''})
-        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?${this.identityLifecycle ? ',?' : ''} WHERE ?>${sqlNow()}`, [crypto.randomUUID(), issuer, subject, crypto.randomUUID(), credentialId,
-        digest, expiresAt, granted, crypto.randomUUID(), email?.address ?? null, email?.domain ?? null, crypto.randomUUID(), at,
-        ...(this.identityLifecycle ? [principal.issuedAt ?? null] : []), expiresAt, at]);
+        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?${this.identityLifecycle ? ',?' : ''} WHERE ?>${sqlNow()}`;
+      const values = [receiptId, issuer, subject, newAccountId, credentialId,
+        digest, expiresAt, granted, emailId, email?.address ?? null, email?.domain ?? null, spaceId, at,
+        ...(this.identityLifecycle ? [principal.issuedAt ?? null] : []), expiresAt, at];
+      if (this.capture) {
+        const result = await this.capture.workspaceBootstrap(this.db, { commandType:'workspace-sign-in', receiptId, issuer, subject, newAccountId, credentialId, emailId, address:email?.address ?? null, spaceId }, sql, values);
+        if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new WorkspaceError();
+      } else await this.write(sql, values);
       const created = await this.db.withSession('first-primary').prepare(`
         SELECT c.account_id AS accountId,c.expires_at AS expiresAt FROM active_credentials c
         JOIN provider_identities p ON p.account_id=c.account_id AND p.issuer=? AND p.subject=?
@@ -230,24 +240,30 @@ export class WorkspaceService {
       const orgName = name(input.name); const emailId = identifier(input.emailId);
       const parentId = input.parentOrganizationId === undefined ? null : identifier(input.parentOrganizationId);
       const id = crypto.randomUUID(); const spaceId = crypto.randomUUID();
+      const membershipId = crypto.randomUUID();
+      let sql: string, values: SqlValue[];
       if (parentId === null) {
-        await this.write(`INSERT INTO workspace_organization_creations(id,name,actor_credential_id,email_id,membership_id,space_id,created_at)
+        sql = `INSERT INTO workspace_organization_creations(id,name,actor_credential_id,email_id,membership_id,space_id,created_at)
           SELECT ?,?,c.id,e.id,?,?,? FROM active_credentials c JOIN account_emails e ON e.account_id=c.account_id
-          WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE} AND e.id=? AND e.revoked_at IS NULL`,
-          [id, orgName, crypto.randomUUID(), spaceId, at, hash, at, emailId]);
+          WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE} AND e.id=? AND e.revoked_at IS NULL`;
+        values = [id, orgName, membershipId, spaceId, at, hash, at, emailId];
       } else {
         // One command atomically creates the child, owner membership, default
         // Space and immutable edge. Parent authority is used only at creation.
-        await this.write(`INSERT INTO workspace_child_organization_creations
+        sql = `INSERT INTO workspace_child_organization_creations
           (id,parent_organization_id,name,actor_credential_id,email_id,membership_id,space_id,created_at)
           SELECT ?,m.organization_id,?,c.id,e.id,?,?,? FROM active_credentials c
           JOIN active_memberships m ON m.account_id=c.account_id
           JOIN account_emails e ON e.account_id=c.account_id
           WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}
             AND m.organization_id=? AND m.expires_at>${sqlNow()} AND m.role IN ('owner','admin')
-            AND e.id=? AND e.revoked_at IS NULL`,
-          [id, orgName, crypto.randomUUID(), spaceId, at, hash, at, parentId, at, emailId]);
+            AND e.id=? AND e.revoked_at IS NULL`;
+        values = [id, orgName, membershipId, spaceId, at, hash, at, parentId, at, emailId];
       }
+      if (this.capture) {
+        const result = await this.capture.workspaceBootstrap(this.db, { commandType:parentId === null ? 'organization-create' : 'organization-child-create', receiptId:id, emailId, membershipId, spaceId }, sql, values);
+        if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new WorkspaceError();
+      } else await this.write(sql, values);
       return { id, name: orgName, spaceId };
     });
   }
