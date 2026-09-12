@@ -1,4 +1,5 @@
 import { sqlNow } from '../sql-clock.ts';
+import type { SeoulProjectionCapture } from './seoul-projection-capture.ts';
 import { receiveLifecycle } from './lifecycle.ts';
 import type { Database, ReleaseEnv, Capability } from './types.ts';
 import { readSettings } from '../config.ts';
@@ -93,7 +94,8 @@ export class Admin {
     db: Database;
     clock: () => number;
     fetcher: typeof fetch;
-    constructor(env: ReleaseEnv, clock: () => number = Date.now) { this.env = env; this.db = env.DB; this.clock = clock; this.fetcher = env.fetch ?? globalThis.fetch; }
+    private readonly capture?: SeoulProjectionCapture;
+    constructor(env: ReleaseEnv, clock: () => number = Date.now, capture?: SeoulProjectionCapture) { capture?.assertDatabase(env.DB); this.env = env; this.db = env.DB; this.clock = clock; this.fetcher = env.fetch ?? globalThis.fetch; this.capture = capture; }
     async orgAdmin(token: string, org: string): Promise<{
         accountId: string;
         membershipId: string;
@@ -152,7 +154,7 @@ export class Admin {
             await this.orgAdmin(token, org);
         const keyId = 'key:' + crypto.randomUUID(), raw = 'mem_' + randomToken(), keyHash = await tokenHash(raw);
         const at = this.clock(), expiresAt = at + input.expiresInDays * 86400000;
-        await batch(this.db, [
+        const commands = [
             stmt(this.db, `INSERT INTO credentials(id,account_id,membership_id,email_id,kind,token_digest,expires_at,permission)
     SELECT ?,c.account_id,m.id,m.email_id,CASE WHEN ? IS NULL THEN 'personal_key' ELSE 'api_key' END,?,?,? FROM active_credentials c
     LEFT JOIN memberships m ON m.id=(SELECT candidate.id FROM active_memberships candidate WHERE candidate.account_id=c.account_id AND candidate.organization_id=?)
@@ -161,7 +163,8 @@ export class Admin {
             stmt(this.db, 'INSERT INTO release_credential_policies(credential_id,capabilities,space_ids) SELECT id,?,? FROM credentials WHERE id=?', [canonical(caps), spaceIds ? canonical(spaceIds) : null, keyId]),
             stmt(this.db, 'INSERT INTO workspace_key_metadata(credential_id,label,actor_credential_id,created_at) SELECT id,?,?,? FROM credentials WHERE id=?', [label, actor.id, at, keyId]),
             stmt(this.db, "INSERT INTO release_events(action,actor_credential_id,resource_id,created_at) SELECT 'scoped_key_issued',?,?,? FROM credentials WHERE id=?", [actor.id, keyId, at, keyId])
-        ]);
+        ];
+        await batch(this.db, this.capture ? this.capture.issueKeyStatements(this.db, { accountId: actor.accountId, keyId, organizationId: org, spaceIds }, commands) : commands);
         if (!await one(this.db, 'SELECT id FROM credentials WHERE id=?', [keyId]))
             fail(403, 'key_limit_or_authority');
         await interactive(this.db, token, this.clock, true);

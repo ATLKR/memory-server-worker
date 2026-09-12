@@ -1,4 +1,5 @@
 import { sqlNow, SQL_NOW_MS } from './sql-clock.ts';
+import type { SeoulProjectionCapture } from './release/seoul-projection-capture.ts';
 /**
  * Internal identity service. No public HTTP routes or central-auth changes.
  * D1 is a storage adapter, not the identity model. Use fresh primary reads for
@@ -77,7 +78,10 @@ const REAUTH_WINDOW_MS = 5 * 60 * 1000;
 export class IdentityService {
   private readonly db: IdentityDatabase;
   private readonly clock: () => number;
-  constructor(db: IdentityDatabase, clock: () => number = Date.now) {
+  private readonly capture?: SeoulProjectionCapture;
+  constructor(db: IdentityDatabase, clock: () => number = Date.now, capture?: SeoulProjectionCapture) {
+    capture?.assertDatabase(db);
+    this.capture = capture;
     this.db = db;
     this.clock = clock;
   }
@@ -182,12 +186,17 @@ export class IdentityService {
   async unlinkEmail(token: string, emailId: string): Promise<void> {
     const hash = await digestToken(token);
     const at = this.now();
-    await this.write(`INSERT INTO revocations(id,kind,actor_credential_id,email_id,created_at)
+    const revocationId = crypto.randomUUID();
+    const sql = `INSERT INTO revocations(id,kind,actor_credential_id,email_id,created_at)
       SELECT ?,'self',c.id,e.id,? FROM active_credentials c
       JOIN account_emails e ON e.account_id=c.account_id
       WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${RECENT_SESSION}
-        AND e.id=? AND e.revoked_at IS NULL`,
-      [crypto.randomUUID(), at, hash, at, at - REAUTH_WINDOW_MS, at, identifier(emailId)]);
+        AND e.id=? AND e.revoked_at IS NULL`;
+    const values = [revocationId, at, hash, at, at - REAUTH_WINDOW_MS, at, identifier(emailId)];
+    if (this.capture) {
+      const result = await this.capture.unlinkEmail(this.db, { emailId, revocationId }, sql, values);
+      if (!result.success || !Number.isInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new IdentityDenied();
+    } else await this.write(sql, values);
   }
 
   /**
