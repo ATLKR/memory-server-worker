@@ -1,6 +1,7 @@
 import type { RoutingDecision } from '../../routing/policy.ts';
 import type { SeoulKeywordSearchResult } from '../../routing/capabilities.ts';
 import type { PgOutcome } from '../connection.ts';
+import type { SeoulLifecycleRepository, SeoulLifecycleResult } from './lifecycle-types.ts';
 
 export type { SeoulKeywordSearchResult };
 export type SeoulRequestOptions = Readonly<{ signal?: AbortSignal }>;
@@ -34,6 +35,8 @@ export type SeoulArchiveReceipt = Readonly<{
 }>;
 
 export interface SeoulRepository {
+  /** Present only when the exact version-5 lifecycle deployment is selected. */
+  readonly lifecycle?: Readonly<SeoulLifecycleRepository>;
   /** Fresh deployment and serving-privilege check; no content access. */
   probe(options?: SeoulRequestOptions): Promise<void>;
   /** Pre-body credential check, never a grant for a later content operation. */
@@ -41,7 +44,7 @@ export interface SeoulRepository {
   ingest(tokenDigest: string, input: SeoulIngestInput, options?: SeoulRequestOptions): Promise<SeoulArchiveReceipt>;
   search(tokenDigest: string, input: SeoulSearchInput, options?: SeoulRequestOptions): Promise<SeoulKeywordSearchResult>;
   /** Call on the original result immediately before final response disclosure. */
-  assertDisclosure(result: SeoulArchiveReceipt | SeoulKeywordSearchResult): void;
+  assertDisclosure(result: SeoulArchiveReceipt | SeoulKeywordSearchResult | SeoulLifecycleResult): void;
 }
 
 export type SeoulErrorCode =
@@ -50,6 +53,8 @@ export type SeoulErrorCode =
   | 'seoul_space_denied'
   | 'seoul_processing_denied'
   | 'seoul_operation_conflict'
+  | 'seoul_archive_erased'
+  | 'seoul_revision_conflict'
   | 'seoul_quota_exceeded'
   | 'seoul_authority_expired'
   | 'seoul_response_invalid'
