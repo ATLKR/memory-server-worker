@@ -1,11 +1,14 @@
 import { z } from 'zod';
-import { assertRoutingTarget, resolveMemoryRoute, routingDecisionSchema, routingTargetSchema } from './policy.ts';
-import type { RoutingPlan, RoutingRestriction } from './policy.ts';
+import { assertRoutingTarget, resolveMemoryRoute, resolveSeoulPlacement, routingDecisionSchema, routingTargetSchema } from './policy.ts';
+import type { RoutingPlan, RoutingRestriction, SeoulPlacement } from './policy.ts';
+import { assertSeoulRoutingCapability, parseSeoulKeywordSearchResult, searchModeSchema } from './capabilities.ts';
+import type { SeoulKeywordSearchResult } from './capabilities.ts';
 import type { GeneralOperation } from './general-types.ts';
 
 type Route = RoutingPlan['route'];
+type LegacyEndpoint = { origin: string; spaceId: string; protocol?: 'memory-routing-v1' };
 export interface RoutingClientConfig {
-  targets: Partial<Record<Route, { origin: string; spaceId: string }>>;
+  targets: Partial<Record<Route, LegacyEndpoint>>;
   credential: (target: { route: Route; origin: string }) => Promise<{ kind: 'pat' | 'sso'; token: string }>;
   /** Local operator/source-context constraints. Recreate the client for a new
    * source context; tool input must never replace these inherited restrictions. */
@@ -13,8 +16,19 @@ export interface RoutingClientConfig {
   fetch?: typeof fetch;
   timeoutMs?: number;
 }
+export interface CapabilityRoutingClientConfig extends Omit<RoutingClientConfig, 'targets'> {
+  targets: { 'agent-memory'?: LegacyEndpoint;
+    seoul?: { origin: string; spaceId: string; protocol?: 'memory-routing-v1' | 'memory-routing-v2' } };
+}
 export interface RoutingCallOptions { signal?: AbortSignal }
-export interface RoutingToolResult { content: { type: 'text'; text: string }[]; isError?: boolean }
+export interface RoutingToolResult { content: { type: 'text'; text: string }[]; isError?: boolean;
+  /** Present only for the validated v2 keyword response, never copied from an upstream claim. */
+  structuredContent?: SeoulKeywordSearchResult;
+}
+export interface RoutingClient<Plan extends RoutingPlan | SeoulPlacement = RoutingPlan> {
+  plan(decision: unknown): Plan;
+  call(name: GeneralOperation, args: unknown, options?: RoutingCallOptions): Promise<{ routing: Plan; result: RoutingToolResult }>;
+}
 const utf8 = new TextEncoder();
 const identifier = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/);
 const wellFormed = (value: string) => !/[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/u.test(value);
@@ -36,6 +50,7 @@ export const ingestRoutingInputSchema = z.strictObject({
 export const searchRoutingInputSchema = z.strictObject({
   routing: routingDecisionSchema, query: z.string().min(1).refine(s => wellFormed(s) && utf8.encode(s).length <= 1024),
   limit: z.number().int().min(1).max(50).optional(),
+  mode: searchModeSchema.optional(),
 });
 export const clearRoutingInputSchema = z.strictObject({
   routing: routingDecisionSchema, operationId: identifier, scope: z.literal('all-general-memory-in-space'),
@@ -61,8 +76,9 @@ const resultSchema = z.object({
   content: z.array(z.strictObject({ type: z.literal('text'), text: z.string() })).max(100),
   isError: z.boolean().optional(),
 });
-const endpoint = z.strictObject({ origin: z.string(), spaceId: identifier });
-const targetsSchema = z.strictObject({ 'agent-memory': endpoint.optional(), seoul: endpoint.optional() });
+const endpoint = z.strictObject({ origin: z.string(), spaceId: identifier, protocol: z.literal('memory-routing-v1').optional() });
+const targetsSchema = z.strictObject({ 'agent-memory': endpoint.optional(),
+  seoul: endpoint.extend({ protocol: z.enum(['memory-routing-v1', 'memory-routing-v2']).optional() }).optional() });
 
 class RoutingClientError extends Error {
   readonly code: string;
@@ -75,7 +91,9 @@ function mediaType(response: Response): string { return (response.headers.get('c
  * Target URLs and credentials are operator configuration, never tool arguments.
  * A ready manifest is a protocol declaration, not physical residency attestation.
  */
-export function createRoutingClient(config: RoutingClientConfig) {
+export function createRoutingClient(config: RoutingClientConfig): Readonly<RoutingClient>;
+export function createRoutingClient(config: CapabilityRoutingClientConfig): Readonly<RoutingClient<RoutingPlan | SeoulPlacement>>;
+export function createRoutingClient(config: CapabilityRoutingClientConfig): Readonly<RoutingClient<RoutingPlan | SeoulPlacement>> {
   const parsed = targetsSchema.safeParse(config?.targets);
   if (!parsed.success || typeof config?.credential !== 'function') fail('routing_configuration_invalid');
   const targets = parsed.data;
@@ -92,11 +110,13 @@ export function createRoutingClient(config: RoutingClientConfig) {
     resolveMemoryRoute({ version: 1, classification: 'general' }, copied);
     restrictions = Object.freeze(copied.map(restriction => Object.freeze(restriction)));
   } catch { fail('routing_configuration_invalid'); }
-  function planDecision(decision: unknown, ...unexpected: unknown[]): RoutingPlan {
+  function planDecision(decision: unknown, ...unexpected: unknown[]): RoutingPlan | SeoulPlacement {
     // Do not present the policy helper's optional argument as a one-off plan
     // override that a later call() could forget. Bind constraints to the client.
     if (unexpected.length) fail('routing_configuration_invalid');
-    return resolveMemoryRoute(decision, restrictions);
+    const plan = resolveMemoryRoute(decision, restrictions);
+    return plan.route === 'seoul' && targets.seoul?.protocol === 'memory-routing-v2'
+      ? resolveSeoulPlacement(decision, restrictions) : plan;
   }
   const timeoutMs = config.timeoutMs ?? 60000;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 120000) fail('routing_configuration_invalid');
@@ -104,11 +124,17 @@ export function createRoutingClient(config: RoutingClientConfig) {
   const credential = config.credential;
   if (typeof request !== 'function') fail('routing_configuration_invalid');
 
-  async function call(name: GeneralOperation, args: unknown, options: RoutingCallOptions = {}): Promise<{ routing: RoutingPlan; result: RoutingToolResult }> {
+  async function call(name: GeneralOperation, args: unknown, options: RoutingCallOptions = {}): Promise<{ routing: RoutingPlan | SeoulPlacement; result: RoutingToolResult }> {
     if (!Object.hasOwn(routingToolSchemas,name)) fail('routing_request_invalid');
     const parsedArgs = routingToolSchemas[name].safeParse(args);
     if (!parsedArgs.success) fail('routing_request_invalid');
     const input = parsedArgs.data, plan = planDecision(input.routing), target = targets[plan.route];
+    const searchInput = name === 'memory_search' ? searchRoutingInputSchema.parse(input) : undefined;
+    const mode = searchInput?.mode;
+    // Semantic execution is deliberately absent, even if a target advertises it.
+    // Never strip an explicit mode and send an ambiguous query to a v1 service.
+    if (mode === 'semantic' || (plan.version === 1 && mode !== undefined)) fail('routing_search_mode_unavailable');
+    const effectiveMode = plan.version === 2 && name === 'memory_search' ? 'keyword' as const : undefined;
     if (['memory_clear_space','memory_usage'].includes(name) && (input.routing.classification !== 'general'
       || input.routing.medicalCloudflareConsent)) fail('routing_request_invalid');
     const maintenance=name==='memory_clear_space'||name==='memory_usage';
@@ -120,7 +146,8 @@ export function createRoutingClient(config: RoutingClientConfig) {
     const effectiveRouting = { ...input.routing, destination: plan.route,
       ...(plan.requiredRegion === 'kr-seoul' ? { requiredRegion: 'kr-seoul' as const } : {}) };
     const serialize = () => {
-      const value = JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: { ...input, routing: effectiveRouting, spaceId: target.spaceId } } });
+      const value = JSON.stringify({ jsonrpc: '2.0', id, method: 'tools/call', params: { name, arguments: { ...input,
+        ...(effectiveMode ? { mode: effectiveMode } : {}), routing: effectiveRouting, spaceId: target.spaceId } } });
       if (utf8.encode(value).length > 2 * 1024 * 1024) fail('routing_request_invalid');
       return value;
     };
@@ -219,20 +246,24 @@ export function createRoutingClient(config: RoutingClientConfig) {
     const init = { credentials: 'omit', redirect: 'error', referrerPolicy: 'no-referrer', cache: 'no-store', signal: controller.signal } as const;
     try {
       check();
-      const discovery = await bounded(() => request(target.origin + '/.well-known/memory-routing', {
+      const discovery = await bounded(() => request(target.origin + (plan.version === 2 ? '/.well-known/memory-routing-v2' : '/.well-known/memory-routing'), {
         ...init, method: 'GET', headers: { accept: 'application/json' },
       }));
       if (!discovery.ok || mediaType(discovery) !== 'application/json') {
         void discovery.body?.cancel().catch(() => undefined); fail('routing_target_unavailable');
       }
-      let advertised;
-      try { advertised = metadataSchema.safeParse(JSON.parse(await text(discovery, 8192))); }
+      let advertised: unknown;
+      try { advertised = JSON.parse(await text(discovery, 8192)); }
       catch (error) { if (error instanceof RoutingClientError && ['routing_request_timeout', 'routing_request_aborted'].includes(error.code)) throw error; fail('routing_target_unavailable'); }
-      if (!advertised.success) fail('routing_target_unavailable');
       // Explicit, content-free maintenance remains usable while spend admission
       // is paused. Still require the exact protocol/storage/region declaration;
       // the server independently checks ACL and available cleanup bindings.
-      assertRoutingTarget(plan, maintenance?{...advertised.data.target,ready:true}:advertised.data.target);
+      if (plan.version === 2) assertSeoulRoutingCapability(plan, advertised, name, effectiveMode);
+      else {
+        const legacy = metadataSchema.safeParse(advertised);
+        if (!legacy.success) fail('routing_target_unavailable');
+        assertRoutingTarget(plan, maintenance ? { ...legacy.data.target, ready: true } : legacy.data.target);
+      }
       check();
       const auth = await bounded(() => credential({ route: plan.route, origin: target.origin }));
       if (!auth || !['pat', 'sso'].includes(auth.kind) || typeof auth.token !== 'string'
@@ -306,7 +337,7 @@ export function createRoutingClient(config: RoutingClientConfig) {
         if (Date.now() >= consentExpiresAt) fail('routing_consent_unavailable');
         dispatched = true;
         return request(target.origin + '/mcp', { ...init, method: 'POST', body, headers: {
-          authorization: 'Bearer ' + auth.token, 'content-type': 'application/json', 'x-memory-routing': '1',
+          authorization: 'Bearer ' + auth.token, 'content-type': 'application/json', 'x-memory-routing': String(plan.version),
           accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25',
           ...(consentReceipt ? { 'x-memory-consent-receipt': consentReceipt } : {}),
         } });
@@ -325,12 +356,21 @@ export function createRoutingClient(config: RoutingClientConfig) {
       // Upstream tool failures may contain arbitrary diagnostics, including
       // reflected credentials or transcript fragments. Do not expose them.
       if (tool.data.isError) fail('routing_upstream_rejected');
+      let validatedSearch: SeoulKeywordSearchResult | undefined;
+      if (effectiveMode && searchInput) {
+        if (tool.data.content.length !== 1) fail('routing_response_invalid');
+        let payload: unknown;
+        try { payload = JSON.parse(tool.data.content[0]!.text); } catch { fail('routing_response_invalid'); }
+        validatedSearch = parseSeoulKeywordSearchResult(payload, target.spaceId, searchInput.limit ?? 20);
+        tool.data.content = [{ type: 'text', text: JSON.stringify(validatedSearch) }];
+      }
       check();
-      return { routing: plan, result: tool.data };
+      return { routing: plan, result: { ...tool.data, ...(validatedSearch ? { structuredContent: validatedSearch } : {}) } };
     } catch (error) {
       if ((name === 'memory_ingest' || name === 'memory_clear_space') && dispatched) fail('routing_write_outcome_unknown');
       if (error instanceof RoutingClientError) throw error;
-      if (error && typeof error === 'object' && 'code' in error && error.code === 'routing_target_unavailable') fail('routing_target_unavailable');
+      if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string'
+        && ['routing_target_unavailable', 'routing_search_mode_unavailable', 'routing_response_invalid'].includes(error.code)) fail(error.code);
       return fail('routing_upstream_unavailable');
     } finally {
       clearTimeout(timer); signal?.removeEventListener('abort', onAbort); controller.abort();

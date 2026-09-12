@@ -51,12 +51,13 @@ test('unexpected local credentials and malformed manifests are rejected', async 
   assert.ok(issues.includes('plugin_manifest_invalid'));
 });
 
-test('built bundle runs from an isolated package copy without source checkout or npm modules', async t => {
+for (const protocol of ['memory-routing-v1','memory-routing-v2']) test(`built ${protocol} bundle plans offline from an isolated package without source checkout or npm modules`, async t => {
   const root = await fixture(t);
   const bundle = await readFile(new URL('../scripts/mcp-stdio.mjs', import.meta.url));
   await writeFile(join(root, 'scripts/mcp-stdio.mjs'), bundle);
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (key.startsWith('MEMORY_') || key === 'NODE_PATH' || key === 'NODE_OPTIONS') delete env[key];
+  if(protocol==='memory-routing-v2')env.MEMORY_SEOUL_ROUTING_PROTOCOL=protocol;
   const child = spawn(process.execPath, [join(root, 'scripts/mcp-stdio.mjs')], { cwd: root, env, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
   let stdout = '', stderr = '';
   child.stdout.on('data', part => { stdout += part; }); child.stderr.on('data', part => { stderr += part; });
@@ -72,5 +73,7 @@ test('built bundle runs from an isolated package copy without source checkout or
   assert.equal(code, 0, stderr);
   const messages = stdout.trim().split('\n').map(line => JSON.parse(line));
   assert.equal(messages.length, 2);
-  assert.equal(messages[1].result.structuredContent.route, 'seoul');
+  assert.deepEqual(messages[1].result.structuredContent,protocol==='memory-routing-v2'
+    ? {version:2,route:'seoul',storage:'postgres',requiredRegion:'kr-seoul'}
+    : {version:1,route:'seoul',storage:'postgres',vector:'pgvector',requiredRegion:'kr-seoul'});
 });

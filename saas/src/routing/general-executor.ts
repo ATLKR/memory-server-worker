@@ -83,6 +83,7 @@ export function createGeneralExecutor(ports:GeneralExecutorPorts) {
       // Zod copied the full input before the first await; caller mutation cannot
       // substitute content while authority/budget calls are in progress.
       const {operation:kind,arguments:input}=parsed.data;
+      if(kind==='memory_search'&&input.mode!==undefined)reject('routing_search_mode_unavailable');
       const plan=resolveMemoryRoute(input.routing,seoul.has(input.spaceId)?[{route:'seoul'}]:[]);
       if(plan.route!=='agent-memory'||input.routing.classification!=='general'||input.routing.medicalCloudflareConsent
         ||!allowed.has(input.spaceId))reject('routing_space_not_enabled');

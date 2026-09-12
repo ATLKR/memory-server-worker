@@ -18,9 +18,19 @@ export function loadRoutingRestrictions(env = process.env) {
   return Object.freeze([Object.freeze({ route: 'seoul', requiredRegion: 'kr-seoul' })]);
 }
 
+// Protocol metadata is safe to read for offline planning. Do not load the
+// origin, Space, PAT or SSO token merely to explain a placement decision.
+export function loadSeoulRoutingProtocol(env = process.env) {
+  const configured = env.MEMORY_SEOUL_ROUTING_PROTOCOL;
+  const protocol = configured === undefined ? 'memory-routing-v1' : configured;
+  if (!['memory-routing-v1', 'memory-routing-v2'].includes(protocol)) throw new Error('route_configuration_invalid');
+  return protocol;
+}
+
 // Read only the chosen route. There is deliberately no legacy/shared token fallback.
 export function loadRouteConfiguration(route, env = process.env) {
   if (route !== 'agent-memory' && route !== 'seoul') throw new Error('route_configuration_invalid');
+  const protocol = route === 'seoul' ? loadSeoulRoutingProtocol(env) : 'memory-routing-v1';
   const prefix = route === 'agent-memory' ? 'MEMORY_CF_' : 'MEMORY_SEOUL_';
   const rawOrigin = env[`${prefix}ORIGIN`] ?? (route === 'agent-memory' ? 'https://memory.allenlabs.org' : undefined);
   const spaceId = env[`${prefix}SPACE_ID`];
@@ -40,7 +50,7 @@ export function loadRouteConfiguration(route, env = process.env) {
   if (typeof token !== 'string' || !/^[\x21-\x7e]{1,8192}$/.test(token)) throw new Error('route_credential_invalid');
   const origin = target.origin;
   return {
-    targets: { [route]: { origin, spaceId } },
+    targets: { [route]: { origin, spaceId, ...(protocol === 'memory-routing-v2' ? { protocol } : {}) } },
     credential: async (request) => {
       if (request.route !== route || request.origin !== origin) throw new Error('credential_target_mismatch');
       return { kind: pat !== undefined ? 'pat' : 'sso', token };

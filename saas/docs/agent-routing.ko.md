@@ -26,6 +26,24 @@
 
 `consent.ts`의 permit은 위 검사를 위한 **서명되지 않은 내부 검증 결과**다. 그대로 HTTP receipt로 사용하면 안 된다. 실제 receipt 발급·원장 영속화·원자적 재검증은 서버 adapter의 책임이다. 플러그인 요청마다 서버 확인을 하되 사용자 상호작용은 요구하지 않는다. 전송이 시작된 뒤 취소·시간 초과된 ingest는 `routing_write_outcome_unknown`으로 보고하며 자동 재시도하지 않는다.
 
+## 서울 저장·키워드 검색용 v2 계약
+
+기본 설정은 위의 v1 그대로다. 운영자가 서울 목적지에 `MEMORY_SEOUL_ROUTING_PROTOCOL=memory-routing-v2`를 명시하면 새 클라이언트와 플러그인은 서울 저장 위치와 검색 기능을 분리한다. 클라이언트 API에서는 서울 endpoint의 `protocol` 필드에 같은 값을 넣는다. 일반 Cloudflare 경로에는 v2를 적용하지 않는다. 분류 규칙, 서울 고정 제한, 목적지별 자격증명과 선택한 Space는 유지된다.
+
+v2의 로컬 계획은 `{version:2,route:"seoul",storage:"postgres",requiredRegion:"kr-seoul"}`이다. `vector` 필드나 준비 완료 주장은 없다. 플러그인은 원문·인증 없이 같은 목적지의 `/.well-known/memory-routing-v2`만 조회하고, 다른 버전이나 지역으로 재시도하지 않는다. 요청에는 `cache: no-store`와 리디렉션 거부가 적용된다. 실제 MCP 요청은 `x-memory-routing: 2`를 사용한다.
+
+```json
+{"version":2,"protocol":"memory-routing-v2","target":{"route":"seoul","storage":"postgres","region":"kr-seoul","ready":true,"capabilities":{"ingest":true,"search":{"keyword":true,"semantic":false}}}}
+```
+
+이 예시는 앞으로 구현할 저장·키워드 서비스의 계약이다. 현재 PostgreSQL 기초 스키마만 설치한 상태는 `ready:false`, ingest·keyword·semantic 모두 false이며 제품 요청을 허용하지 않는다. ready는 ingest 또는 keyword 중 하나 이상을 제공할 수 있다는 뜻이고, 각 요청에는 해당 기능도 필요하다. 잘못된 지역, 누락·추가 필드, 모순된 기능 표시를 거부한다. **현재 semantic은 false만 허용한다.** 향후 의미 검색에는 encoder와 임베딩 세대를 검증하는 별도 계약이 필요하다.
+
+`memory_search`의 선택 인수 `mode`는 `keyword` 또는 `semantic`이다. v2에서 생략하면 keyword를 명시해 전송한다. semantic 요청은 discovery·자격증명 호출·검색어 전송 전에 거부한다. v1에서는 mode를 생략해야 기존 관리형 검색을 사용하며, 명시한 mode를 무시하거나 다른 검색으로 바꾸지 않는다. Cloudflare 일반·의료 서버도 명시한 mode를 거부한다.
+
+v2 검색 결과는 단일 JSON text와 이를 검증해 만든 structured output으로 전달한다. 형식은 `{spaceId,mode:"keyword",matches:[{memoryId,revision,excerpt}],count}`이다. 클라이언트는 Space 일치, 양의 안전 정수 revision, 식별자, UTF-8 excerpt 최대 32,768바이트, 중복 없는 memoryId와 요청 limit 이내의 결과 수를 검사한다. 누락·다른 mode나 Space, 구조 없는 답변은 공개하지 않는다. 검색 결과는 여전히 신뢰하지 않는 외부 내용이며, 이 검사가 서버의 실제 원문·ACL 검증을 대신하지 않는다.
+
+이 변경은 클라이언트 계약과 로컬 Hono 시험을 제공하며 서울 serving endpoint를 활성화하지 않는다. 실제 서비스에는 현재 계정·자격증명·조직·Space 권한, 원자적 저장/수정/삭제, 키워드 질의와 사용 시점 기능 검증이 필요하다. `kr-primary-storage / approved-processors`는 Cloudflare Hono API와 서울 PostgreSQL을 함께 사용할 수 있지만, `kr` 또는 `kr-seoul` 처리 경계는 별도 검증이 필요하다. DB 지역과 discovery가 그 처리 경계를 증명하지 않는다.
+
 ## 혼합 내용과 동시 검색
 
 서로 독립적으로 이해할 수 있는 내용만 분리 저장한다. 예를 들어 일반적인 업무 선호와 별개의 진료 기록은 다른 메모리로 나눌 수 있다. 한 환자의 진단·약물·부작용처럼 함께 있어야 의미가 유지되는 내용은 강한 제한 경로에 함께 둔다. 원문을 모든 경로에 중복 복사하거나 문장을 기계적으로 자르지 않는다.
