@@ -12,7 +12,7 @@ const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
 const byteLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteLength')!.get!;
 const byteBrand = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag)!.get!;
 const INVALID = Symbol(), UNSUPPORTED = Symbol();
-const commands = ['scoped-key-issue', 'self-email-unlink', 'workspace-sign-in', 'organization-create', 'organization-child-create'] as const;
+const commands = ['scoped-key-issue', 'self-email-unlink', 'workspace-sign-in', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke'] as const;
 const streamKinds = ['subject', 'email', 'credential', 'membership', 'organization', 'space'] as const;
 type StreamKind = typeof streamKinds[number];
 type Command = typeof commands[number];
@@ -178,7 +178,7 @@ function origin(value: unknown): Origin {
   return { kind: 'command', commandType, receiptId };
 }
 function effect(value: unknown, kind: StreamKind, key: string, command: Command, revokedAtMs: number | null): SeoulHeadEffect {
-  if (command === 'self-email-unlink' && (kind === 'credential' || kind === 'membership')) {
+  if (['self-email-unlink', 'membership-revoke', 'workspace-key-revoke'].includes(command) && (kind === 'credential' || kind === 'membership')) {
     const x = record(value, ['type', 'entityKind', 'entityId', 'state', 'occurredAtMs']);
     if (revokedAtMs === null || x.occurredAtMs !== revokedAtMs) invalid();
     return { type: literal(x.type, 'entity-negative'), entityKind: literal(x.entityKind, kind), entityId: literal(x.entityId, key), state: literal(x.state, 'revoked'), occurredAtMs: integer(x.occurredAtMs) };
@@ -204,7 +204,7 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
   if (x.kind !== kind + '-source') invalid();
   const capturedOrigin = origin(x.origin), command = capturedOrigin.commandType;
   const matrix: Record<StreamKind, readonly Command[]> = {
-    credential: ['scoped-key-issue', 'self-email-unlink'], membership: ['self-email-unlink', 'organization-create', 'organization-child-create'],
+    credential: ['scoped-key-issue', 'self-email-unlink', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke'], membership: ['self-email-unlink', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke'],
     subject: ['workspace-sign-in'], email: ['workspace-sign-in', 'self-email-unlink'], organization: ['organization-create', 'organization-child-create'],
     space: ['workspace-sign-in', 'organization-create', 'organization-child-create'],
   };
@@ -216,7 +216,9 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
       record(x, ['version', 'kind', 'id', 'accountId', 'credentialKind', 'tokenDigest', 'membershipId', 'emailId', 'permission', 'expiresAtMs', 'revokedAtMs', 'policy', 'origin', 'effect']);
       const credentialKind = choice(x.credentialKind, ['personal_key', 'api_key']), membershipId = nullable(x.membershipId, identifier), emailId = nullable(x.emailId, identifier), revokedAtMs = nullable(x.revokedAtMs, integer);
       if (credentialKind === 'personal_key' ? membershipId !== null || emailId !== null : membershipId === null || emailId === null) invalid();
-      if (command === 'scoped-key-issue' ? revokedAtMs !== null : credentialKind !== 'api_key' || revokedAtMs === null) invalid();
+      if (command === 'scoped-key-issue' || command === 'workspace-key-issue') { if (revokedAtMs !== null) invalid(); }
+      else if (revokedAtMs === null || (command !== 'workspace-key-revoke' && credentialKind !== 'api_key')) invalid();
+      if (command === 'workspace-key-issue' && (capturedOrigin.receiptId !== x.id || x.policy !== null)) invalid();
       const policy = nullable(x.policy, value => {
         const p = record(value, ['capabilities', 'spaceIds']);
         return { capabilities: sorted(list(p.capabilities, value => choice<Capability>(value, ['create', 'delete', 'export', 'read', 'update']), 5), compare),
@@ -227,7 +229,8 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
     }
     case 'membership': {
       record(x, ['version', 'kind', 'id', 'organizationId', 'accountId', 'emailId', 'role', 'expiresAtMs', 'revokedAtMs', 'origin', 'effect']);
-      const revokedAtMs = nullable(x.revokedAtMs, integer); if ((command === 'self-email-unlink') !== (revokedAtMs !== null)) invalid();
+      const revokedAtMs = nullable(x.revokedAtMs, integer); if ((command === 'self-email-unlink' || command === 'membership-revoke') !== (revokedAtMs !== null)) invalid();
+      if (command === 'invite-accept' && capturedOrigin.receiptId !== x.id) invalid();
       return { version: 3, kind: 'membership-source', id: id(), organizationId: identifier(x.organizationId), accountId: identifier(x.accountId), emailId: identifier(x.emailId),
         role: choice(x.role, ['owner', 'admin', 'member']), expiresAtMs: integer(x.expiresAtMs), revokedAtMs, ...descriptors(revokedAtMs) };
     }

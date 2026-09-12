@@ -82,8 +82,8 @@ test('deterministic replay and input/output ownership before first await', async
   assert.deepEqual(decoded, source());
 });
 
-const commands = ['scoped-key-issue', 'self-email-unlink', 'workspace-sign-in', 'organization-create', 'organization-child-create'];
-const allowed = { credential: ['scoped-key-issue', 'self-email-unlink'], membership: ['self-email-unlink', 'organization-create', 'organization-child-create'], email: ['self-email-unlink', 'workspace-sign-in'], subject: ['workspace-sign-in'], organization: ['organization-create', 'organization-child-create'], space: ['workspace-sign-in', 'organization-create', 'organization-child-create'] };
+const commands = ['scoped-key-issue', 'self-email-unlink', 'workspace-sign-in', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke'];
+const allowed = { credential: ['scoped-key-issue', 'self-email-unlink', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke'], membership: ['self-email-unlink', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke'], email: ['self-email-unlink', 'workspace-sign-in'], subject: ['workspace-sign-in'], organization: ['organization-create', 'organization-child-create'], space: ['workspace-sign-in', 'organization-create', 'organization-child-create'] };
 function commandBody(kind, command) {
   const b = copy(bodies[kind]); b.origin = origin(command, command === 'scoped-key-issue' ? null : 'receipt:one');
   if (command === 'self-email-unlink') {
@@ -91,9 +91,27 @@ function commandBody(kind, command) {
     if (kind === 'credential' || kind === 'membership') { b.revokedAtMs = 99; b.effect = negative(kind); }
     if (kind === 'email') { b.liveClaim = null; b.changedClaim = { id: 'email:one', verifiedAtMs: 1, revokedAtMs: 99 }; }
   }
+  if (command === 'membership-revoke' || command === 'workspace-key-revoke') {
+    if (kind === 'credential' && command === 'membership-revoke') Object.assign(b, { credentialKind: 'api_key', membershipId: 'membership:one', emailId: 'email:one' });
+    if (kind === 'credential' || kind === 'membership') { b.revokedAtMs = 99; b.effect = negative(kind); }
+  }
+  if (command === 'invite-accept' || command === 'workspace-key-issue') b.origin.receiptId = b.id;
   if (kind === 'space' && command === 'workspace-sign-in') { b.accountId = 'account:one'; b.organizationId = null; }
   return b;
 }
+
+test('Workspace issuance/acceptance bind actual candidate receipt and only the admitted key effects', () => {
+  for (const credentialKind of ['personal_key','api_key']) for (const command of ['workspace-key-issue','workspace-key-revoke']) {
+    const b=commandBody('credential',command);Object.assign(b,{credentialKind,membershipId:credentialKind==='api_key'?'membership:one':null,emailId:credentialKind==='api_key'?'email:one':null});
+    assert.deepEqual(parseSeoulAuthoritySourceRow(row(source(b))),source(b));
+    if(command==='workspace-key-issue'){
+      invalid(()=>encodeSeoulAuthoritySource(source({...b,policy:{capabilities:['read'],spaceIds:null}})));
+      invalid(()=>encodeSeoulAuthoritySource(source({...b,origin:origin(command,'different-receipt')})));
+    }
+  }
+  const member=commandBody('membership','invite-accept');invalid(()=>encodeSeoulAuthoritySource(source({...member,origin:origin('invite-accept','different-receipt')})));
+  const personal=commandBody('credential','membership-revoke');Object.assign(personal,{credentialKind:'personal_key',membershipId:null,emailId:null});invalid(()=>encodeSeoulAuthoritySource(source(personal)));
+});
 for (const [kind, accepted] of Object.entries(allowed)) {
   test(`${kind}: complete command/effect matrix`, async () => {
     for (const command of commands) {

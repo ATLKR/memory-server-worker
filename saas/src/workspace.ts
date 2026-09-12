@@ -293,7 +293,7 @@ export class WorkspaceService {
     return this.safe(async () => {
       const hash = await hashToken(token); const inviteHash = await hashToken(inviteToken); const at = this.now();
       const id = crypto.randomUUID();
-      await this.write(`INSERT INTO workspace_invitation_acceptances(id,invitation_id,actor_credential_id,email_id,created_at)
+      const sql = `INSERT INTO workspace_invitation_acceptances(id,invitation_id,actor_credential_id,email_id,created_at)
         SELECT ?,i.id,c.id,e.id,? FROM workspace_invitations i
         JOIN active_memberships creator ON creator.id=i.creator_membership_id AND creator.organization_id=i.organization_id
         JOIN active_credentials c ON c.token_digest=?
@@ -303,8 +303,12 @@ export class WorkspaceService {
           AND creator.expires_at>${sqlNow()} AND creator.role IN ('owner','admin')
           AND NOT EXISTS(SELECT 1 FROM email_blocks b WHERE b.address=i.address)
           AND NOT EXISTS(SELECT 1 FROM memberships existing WHERE existing.organization_id=i.organization_id
-            AND existing.account_id=c.account_id AND existing.revoked_at IS NULL)`,
-        [id, at, hash, inviteHash, at, at, at]);
+            AND existing.account_id=c.account_id AND existing.revoked_at IS NULL)`;
+      const values = [id, at, hash, inviteHash, at, at, at];
+      if (this.capture) {
+        const result = await this.capture.workspaceCommand(this.db, { commandType:'invite-accept', receiptId:id, entityId:id, actorDigest:hash, invitationDigest:inviteHash, commandAt:at }, sql, values);
+        if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new WorkspaceError();
+      } else await this.write(sql, values);
       const result = await this.db.withSession('first-primary').prepare(`
         SELECT organization_id AS organizationId FROM memberships WHERE id=?`).bind(id).first<{ organizationId: string }>();
       if (!result) throw new WorkspaceError();
@@ -341,15 +345,20 @@ export class WorkspaceService {
     return this.safe(async () => {
       const hash = await hashToken(token); const at = this.now();
       const organizationId = identifier(orgId); const targetId = identifier(membershipId);
-      await this.write(`INSERT INTO workspace_membership_revocations(id,actor_credential_id,organization_id,membership_id,created_at)
+      const receiptId = crypto.randomUUID();
+      const sql = `INSERT INTO workspace_membership_revocations(id,actor_credential_id,organization_id,membership_id,created_at)
         SELECT ?,c.id,actor.organization_id,target.id,? FROM active_credentials c
         JOIN active_memberships actor ON actor.account_id=c.account_id AND actor.organization_id=?
         JOIN memberships target ON target.id=? AND target.organization_id=actor.organization_id
         WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}
           AND actor.expires_at>${sqlNow()} AND actor.role IN ('owner','admin') AND target.revoked_at IS NULL
           AND (target.role<>'owner' OR (actor.role='owner' AND EXISTS(SELECT 1 FROM active_memberships other
-            WHERE other.organization_id=actor.organization_id AND other.role='owner' AND other.expires_at>${sqlNow()} AND other.id<>target.id)))`,
-        [crypto.randomUUID(), at, organizationId, targetId, hash, at, at, at]);
+            WHERE other.organization_id=actor.organization_id AND other.role='owner' AND other.expires_at>${sqlNow()} AND other.id<>target.id)))`;
+      const values = [receiptId, at, organizationId, targetId, hash, at, at, at];
+      if (this.capture) {
+        const result = await this.capture.workspaceCommand(this.db, { commandType:'membership-revoke', receiptId, entityId:targetId, actorDigest:hash, organizationId, commandAt:at }, sql, values);
+        if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new WorkspaceError();
+      } else await this.write(sql, values);
     });
   }
 
@@ -361,14 +370,18 @@ export class WorkspaceService {
       if (!Number.isInteger(input.expiresInDays) || input.expiresInDays < 1 || input.expiresInDays > 90) invalid();
       const id = crypto.randomUUID(); const proof = randomToken(); const proofHash = await hashToken(proof);
       const at = this.now(); const expiresAt = at + input.expiresInDays * DAY;
-      await this.write(`INSERT INTO workspace_key_issuances(id,actor_credential_id,organization_id,label,permission,token_digest,created_at,expires_at)
+      const sql = `INSERT INTO workspace_key_issuances(id,actor_credential_id,organization_id,label,permission,token_digest,created_at,expires_at)
         SELECT ?,c.id,?,?,?,?,?,? FROM active_credentials c
         WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}
           AND (?='read' OR c.permission='write')
           AND (? IS NULL OR EXISTS(SELECT 1 FROM active_memberships m
             WHERE m.account_id=c.account_id AND m.organization_id=? AND m.expires_at>${sqlNow()}
-              AND (?='read' OR m.role IN ('owner','admin'))))`,
-        [id, organizationId, label, granted, proofHash, at, expiresAt, hash, at, granted, organizationId, organizationId, at, granted]);
+              AND (?='read' OR m.role IN ('owner','admin'))))`;
+      const values = [id, organizationId, label, granted, proofHash, at, expiresAt, hash, at, granted, organizationId, organizationId, at, granted];
+      if (this.capture) {
+        const result = await this.capture.workspaceCommand(this.db, { commandType:'workspace-key-issue', receiptId:id, entityId:id, actorDigest:hash, organizationId, commandAt:at }, sql, values);
+        if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new WorkspaceError();
+      } else await this.write(sql, values);
       return { id, token: proof, expiresAt };
     });
   }
@@ -376,15 +389,20 @@ export class WorkspaceService {
   async revokeKey(token: string, keyId: string): Promise<void> {
     return this.safe(async () => {
       const hash = await hashToken(token); const at = this.now(); const id = identifier(keyId);
-      await this.write(`INSERT INTO workspace_key_revocations(id,actor_credential_id,credential_id,created_at)
+      const receiptId = crypto.randomUUID();
+      const sql = `INSERT INTO workspace_key_revocations(id,actor_credential_id,credential_id,created_at)
         SELECT ?,c.id,target.id,? FROM active_credentials c JOIN credentials target ON target.id=?
         LEFT JOIN memberships target_member ON target_member.id=target.membership_id
         WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}
           AND target.kind IN ('personal_key','api_key') AND target.revoked_at IS NULL
           AND (target.account_id=c.account_id OR EXISTS(SELECT 1 FROM active_memberships actor
             WHERE actor.account_id=c.account_id AND actor.organization_id=target_member.organization_id
-              AND actor.expires_at>${sqlNow()} AND actor.role IN ('owner','admin')))`,
-        [crypto.randomUUID(), at, id, hash, at, at]);
+              AND actor.expires_at>${sqlNow()} AND actor.role IN ('owner','admin')))`;
+      const values = [receiptId, at, id, hash, at, at];
+      if (this.capture) {
+        const result = await this.capture.workspaceCommand(this.db, { commandType:'workspace-key-revoke', receiptId, entityId:id, actorDigest:hash, commandAt:at }, sql, values);
+        if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new WorkspaceError();
+      } else await this.write(sql, values);
     });
   }
 }

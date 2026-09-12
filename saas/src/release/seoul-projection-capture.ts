@@ -1,6 +1,7 @@
 import type { IdentityDatabase, SqlValue } from '../identity.ts';
 import type { Database, Result, Statement } from './types.ts';
 import { bootstrapStatements, type BootstrapScope } from './seoul-projection-bootstrap-capture.ts';
+import { workspaceStatements, type WorkspaceCaptureScope } from './seoul-projection-workspace-capture.ts';
 
 const ISSUER = 'https://auth-api.allen.company';
 const TRUSTED_CONSTRUCTION = Symbol('trusted seoul capture composition');
@@ -87,6 +88,13 @@ export class SeoulProjectionCapture {
   async workspaceBootstrap(database: IdentityDatabase, scope: BootstrapScope, sql: string, values: SqlValue[]): Promise<Result> {
     this.assertDatabase(database);
     const plan = bootstrapStatements(this.database,scope,this.database.prepare(sql).bind(...values));
+    const result = await this.database.batch(plan.statements);
+    if (result.length !== plan.statements.length || result.some(row => !row.success)) throw new Error('seoul_capture_batch_failed');
+    return result[plan.commandIndex]!;
+  }
+  async workspaceCommand(database: IdentityDatabase, scope: WorkspaceCaptureScope, sql: string, values: SqlValue[]): Promise<Result> {
+    this.assertDatabase(database);
+    const plan = workspaceStatements(this.database,scope,this.database.prepare(sql).bind(...values));
     const result = await this.database.batch(plan.statements);
     if (result.length !== plan.statements.length || result.some(row => !row.success)) throw new Error('seoul_capture_batch_failed');
     return result[plan.commandIndex]!;

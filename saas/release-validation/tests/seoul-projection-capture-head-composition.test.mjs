@@ -10,6 +10,7 @@ import { createSeoulProjectionCapture } from '../../src/release/seoul-projection
 import { createDurableDatabase } from '../../src/durable-sql/client.ts';
 import { SqlDatabaseEngine } from '../../src/durable-sql/engine.ts';
 import { parseSeoulAuthoritySourceRow, prepareSeoulHeadCandidate } from '../../src/release/seoul-projection-source-codec.ts';
+import { createSeoulProjectionPreparer } from '../../src/release/seoul-projection-preparer.ts';
 import { signSeoulProjectionRequest, verifySeoulProjectionRequest } from '../../src/release/seoul-projection-auth.ts';
 import { verifySeoulHeadReceiptForEvent } from '../../src/release/seoul-projection-head-receipt-codec.ts';
 import { createHeadFixture } from '../../test/postgres/seoul-projection-head-fixture.mjs';
@@ -22,7 +23,7 @@ const rows = (raw, table) => raw.prepare('SELECT * FROM ' + table + ' ORDER BY r
 
 async function central(t, recursive) {
   const f = await fixture(); t.after(() => f.db.close()); const raw = f.db.raw;
-  for (const name of ['0026_seoul-projection-schema.sql', '0027_seoul-projection-capture-schema.sql', '0028_seoul-projection-bootstrap-schema.sql'])
+  for (const name of ['0026_seoul-projection-schema.sql', '0027_seoul-projection-capture-schema.sql', '0028_seoul-projection-bootstrap-schema.sql', '0029_seoul-projection-preparation-schema.sql'])
     raw.exec(readFileSync(new URL('../../migrations/' + name, import.meta.url), 'utf8'));
   raw.exec('PRAGMA recursive_triggers=' + recursive);
   const requests = [];
@@ -39,7 +40,7 @@ async function central(t, recursive) {
     { deploymentId: 'staging', databaseId: 'control', kind: 'control', epoch: 1 });
   const capture = createSeoulProjectionCapture(db, 'durable-sql');
   for (const subject of ['alice', 'alias\n😀']) raw.prepare('INSERT INTO provider_identities VALUES(?,?,?,?)').run(issuer, subject, 'alice', at);
-  return { ...f, raw, requests, workspace: new WorkspaceService(db, () => at, { identityLifecycle: true }, capture),
+  return { ...f, raw, requests, preparer: createSeoulProjectionPreparer(db, 'durable-sql'), workspace: new WorkspaceService(db, () => at, { identityLifecycle: true }, capture),
     admin: new Admin({ DB: db }, () => at, capture), identity: new IdentityService(db, () => at, capture) };
 }
 const positive = async f => (await f.db.query(`SELECT jsonb_build_object(
@@ -53,7 +54,7 @@ const positive = async f => (await f.db.query(`SELECT jsonb_build_object(
   'grants',(SELECT jsonb_agg(g) FROM memory_identity.pat_space_grants g),
   'usage',(SELECT jsonb_agg(u) FROM memory_ops.space_usage u)) AS value`)).rows[0].value;
 
-for (const recursive of ['ON', 'OFF']) test('actual capture -> canonical source/head -> HMAC -> private SQL/receipt; recursion ' + recursive, async t => {
+for (const prepared of [false, true]) for (const recursive of ['ON', 'OFF']) test('actual capture -> canonical source/head -> HMAC -> private SQL/receipt; prepared=' + prepared + ', recursion ' + recursive, async t => {
   const d1 = await central(t, recursive), pg = await createHeadFixture(t), initialPositive = await positive(pg);
   const signedIn = await d1.workspace.signIn(principal('new\n\uE000😀', { emailVerified: true, email: 'new@example.com' }));
   const rootOrganization = await d1.workspace.createOrganization(d1.token, { name: 'Root', emailId: 'e1' });
@@ -68,21 +69,32 @@ for (const recursive of ['ON', 'OFF']) test('actual capture -> canonical source/
   for (const secret of [signedIn.token, personal.token, organization.token, d1.token]) assert.ok(!JSON.stringify(sourceRows).includes(secret));
   const key = await crypto.subtle.importKey('raw', new Uint8Array(32).fill(19), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign', 'verify']);
   const receipts = [], outcomes = new Set();
+  const beforePreparation = preparationInvariants(d1.raw);
   for (const row of sourceRows.slice().reverse()) {
     const source = parseSeoulAuthoritySourceRow(row), candidate = await prepareSeoulHeadCandidate(row);
     assert.deepEqual(candidate.rowGuard, { ...row });
     assert.equal(hash(candidate.sourceCoreBytes), candidate.sourceChangeSha256);
     assert.equal(hash(candidate.eventBytes), candidate.transportPayloadSha256);
     assert.notEqual(candidate.sourceChangeSha256, candidate.transportPayloadSha256);
-    const headers = await signSeoulProjectionRequest(key, { method: 'POST', url: endpoint, body: candidate.eventBytes, timestampMs: at });
-    const request = new Request(endpoint, { method: 'POST', headers, body: candidate.eventBytes });
+    let transportBytes = candidate.eventBytes;
+    if (prepared) {
+      assert.deepEqual(await d1.preparer.prepare(row.revision), { status: 'prepared', revision: row.revision, eventId: row.event_id,
+        sourceChangeSha256: candidate.sourceChangeSha256, transportPayloadSha256: candidate.transportPayloadSha256 });
+      const persisted = d1.raw.prepare('SELECT payload_bytes,payload_sha256 FROM release_seoul_projection_events WHERE event_id=?').get(row.event_id);
+      assert.equal(persisted.payload_bytes, candidate.eventText); assert.equal(persisted.payload_sha256, candidate.transportPayloadSha256);
+      // Send bytes read from the persisted transport, including older positive
+      // sources prepared after the same stream's newer terminal head.
+      transportBytes = utf8.encode(persisted.payload_bytes);
+    }
+    const headers = await signSeoulProjectionRequest(key, { method: 'POST', url: endpoint, body: transportBytes, timestampMs: at });
+    const request = new Request(endpoint, { method: 'POST', headers, body: transportBytes });
     const actualRequestBytes = new Uint8Array(await request.arrayBuffer());
     const verified = await verifySeoulProjectionRequest(key, request, actualRequestBytes, at);
     assert.equal(verified.method, 'POST'); assert.equal(verified.envelope.eventId, source.eventId);
     assert.equal(verified.envelope.head.eventId, source.eventId);
     assert.equal(verified.envelope.head.payloadSha256, candidate.sourceChangeSha256);
     const receiptText = await pg.apply(new TextDecoder().decode(verified.rawBody), verified.transportPayloadSha256);
-    const receipt = await verifySeoulHeadReceiptForEvent(utf8.encode(receiptText), candidate.eventBytes);
+    const receipt = await verifySeoulHeadReceiptForEvent(utf8.encode(receiptText), transportBytes);
     assert.notEqual(receipt.outcome, 'conflict'); outcomes.add(receipt.outcome);
     const statusUrl = endpoint + '/' + source.eventId + '?payloadSha256=' + candidate.transportPayloadSha256;
     const statusHeaders = await signSeoulProjectionRequest(key, { method: 'GET', url: statusUrl, body: new Uint8Array(), timestampMs: at });
@@ -111,16 +123,28 @@ for (const recursive of ['ON', 'OFF']) test('actual capture -> canonical source/
     assert.equal(beforeReplay.identity_projection_heads.find(row => row.kind === kind && row.stream_key === id).source_revision, negative.revision);
   }
   assert.deepEqual(await positive(pg), initialPositive);
-  assert.ok(rows(d1.raw, 'release_seoul_authority_heads').every(row => row.payload_sha256 === null));
-  assert.equal(rows(d1.raw, 'release_seoul_prepared_sources').length, 0);
+  assert.ok(rows(d1.raw, 'release_seoul_authority_heads').every(row => prepared ? row.payload_sha256 !== null : row.payload_sha256 === null));
+  assert.equal(rows(d1.raw, 'release_seoul_prepared_sources').length, prepared ? sourceRows.length : 0);
+  assert.deepEqual(preparationInvariants(d1.raw), beforePreparation);
+  if (prepared) {
+    assert.equal(rows(d1.raw, 'release_seoul_projection_deliveries').length, sourceRows.length);
+    assert.ok(rows(d1.raw, 'release_seoul_projection_deliveries').every(row => row.state === 'pending' && row.attempts === 0 && row.receipt_bytes === null));
+    const before = rows(d1.raw, 'release_seoul_projection_events');
+    for (const row of sourceRows) assert.equal((await d1.preparer.prepare(row.revision)).status, 'already_prepared');
+    assert.deepEqual(rows(d1.raw, 'release_seoul_projection_events'), before);
+  }
   assert.equal(d1.raw.prepare('SELECT state FROM release_seoul_projection_state').get().state, 'backfill-required');
   for (const table of ['release_seoul_capture_attempts', 'release_seoul_capture_scope', 'release_seoul_capture_spaces',
-    'release_seoul_bootstrap_attempts', 'release_seoul_bootstrap_scope', 'release_seoul_bootstrap_spaces']) assert.equal(rows(d1.raw, table).length, 0);
+    'release_seoul_bootstrap_attempts', 'release_seoul_bootstrap_scope', 'release_seoul_bootstrap_spaces', 'release_seoul_preparation_stage']) assert.equal(rows(d1.raw, table).length, 0);
   assert.ok(d1.requests.every(request => request.statements.length <= 100 && Buffer.byteLength(JSON.stringify(request)) <= 1048576));
-  t.diagnostic(sourceRows.length + ' real captured rows; all six normal bodies; negative-before-old-positive delivery; immutable replay; no positive SQL authority or D1 preparation');
+  t.diagnostic(sourceRows.length + ' real captured rows; all six normal bodies; negative-before-old-positive delivery; immutable replay; no positive SQL authority; D1 prepared=' + prepared);
 });
 
-test('actual excluded bootstrap marker remains a non-authorizing head through the same codecs and SQL', async t => {
+const preparationInvariants = raw => Object.fromEntries(['release_seoul_authority_changes', 'release_seoul_projection_state',
+  'release_seoul_dirty_spaces', 'release_seoul_targets', 'release_seoul_projection_lock', 'release_seoul_published_snapshots',
+  'release_seoul_account_exclusions'].map(table => [table, rows(raw, table)]));
+
+for (const prepared of [false, true]) test('actual excluded bootstrap marker remains a non-authorizing head through the same codecs and SQL; prepared=' + prepared, async t => {
   const d1 = await central(t, 'ON'), pg = await createHeadFixture(t), initialPositive = await positive(pg);
   d1.raw.prepare('INSERT INTO provider_identities VALUES(?,?,?,?)').run('https://retained.invalid', 'foreign', 'alice', at);
   const created = await d1.workspace.createOrganization(d1.token, { name: 'Excluded central success', emailId: 'e1' });
@@ -129,10 +153,17 @@ test('actual excluded bootstrap marker remains a non-authorizing head through th
   const source = parseSeoulAuthoritySourceRow(sourceRows[0]); assert.equal(source.body.kind, 'subject-source-unrepresentable');
   assert.equal(source.sourceCommandId, source.body.captureAttemptId);
   const candidate = await prepareSeoulHeadCandidate(sourceRows[0]);
+  const beforePreparation = preparationInvariants(d1.raw);
+  if (prepared) {
+    assert.equal((await d1.preparer.prepare(source.revision)).status, 'prepared');
+    const persisted = d1.raw.prepare('SELECT payload_bytes,payload_sha256 FROM release_seoul_projection_events WHERE event_id=?').get(source.eventId);
+    assert.equal(persisted.payload_bytes, candidate.eventText); assert.equal(persisted.payload_sha256, candidate.transportPayloadSha256);
+  }
   const receiptText = await pg.apply(candidate.eventText, candidate.transportPayloadSha256);
   const receipt = await verifySeoulHeadReceiptForEvent(utf8.encode(receiptText), candidate.eventBytes);
   assert.equal(receipt.outcome, 'applied'); assert.equal(JSON.parse(candidate.eventText).effect.disposition, 'changed');
   assert.equal(rows(d1.raw, 'release_seoul_account_exclusions').length, 1);
   assert.equal(rows(d1.raw, 'release_seoul_dirty_spaces').length, 0);
+  assert.deepEqual(preparationInvariants(d1.raw), beforePreparation);
   assert.deepEqual(await positive(pg), initialPositive);
 });
