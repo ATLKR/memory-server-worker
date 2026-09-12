@@ -142,7 +142,7 @@ function validateTarget(input: PostgresTarget) {
             || typeof binding.port !== 'number' || !Number.isSafeInteger(binding.port) || binding.port < 1 || binding.port > 65535
             || typeof binding.user !== 'string' || !binding.user || binding.user.includes('\0') || encoder.encode(binding.user).length > 255
             || typeof binding.password !== 'string' || !binding.password || binding.password.includes('\0') || encoder.encode(binding.password).length > 4096
-            || typeof binding.database !== 'string' || binding.database !== input.database) fail();
+            || typeof binding.database !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(binding.database)) fail();
         let url: URL; try { url = new URL(binding.connectionString); } catch { return fail(); }
         if (!['postgres:', 'postgresql:'].includes(url.protocol) || url.search !== '?sslmode=disable' || url.hash || !url.port
             || url.hostname !== binding.host || Number(url.port) !== binding.port || decodeUrl(url.username) !== binding.user
