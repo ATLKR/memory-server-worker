@@ -4,6 +4,7 @@ import { readFile, readdir, mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { DatabaseSync } from 'node:sqlite';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { createDurableDatabase } from '../../src/durable-sql/client.ts';
@@ -13,6 +14,17 @@ import { MemoryService } from '../../src/memory.ts';
 const directory = new URL('../../migrations/', import.meta.url);
 const migrations = await Promise.all((await readdir(directory)).filter(name => name.endsWith('.sql')).sort()
   .map(async name => ({ name, sql: await readFile(new URL(name, directory), 'utf8') })));
+const authoritySchemaQuery = "SELECT type,name,tbl_name FROM sqlite_master WHERE type IN ('trigger','view') ORDER BY type,name";
+// Compare the complete schema across SQLite engines so additive migrations do
+// not leave the native restart check behind a stale aggregate count.
+const expectedAuthoritySchema = (() => {
+  const db = new DatabaseSync(':memory:');
+  try {
+    db.exec('PRAGMA foreign_keys=ON');
+    for (const migration of migrations) db.exec(migration.sql);
+    return db.prepare(authoritySchemaQuery).all().map(row => ({ ...row }));
+  } finally { db.close(); }
+})();
 const shard = await readFile(new URL('../../shard-migrations/0001_payloads.sql', import.meta.url), 'utf8');
 const built = await build({ stdin: { contents: `
 import { MemorySqlDatabase } from '../../src/durable-sql/object.ts';
@@ -23,7 +35,7 @@ export class Fixture extends MemorySqlDatabase {
   if(sql.exec('SELECT count(*) AS n FROM durable_sql_state').toArray()[0].n!==0)throw Error('fixture_already_bootstrapped');
   for(const migration of(identity.kind==='hot'?[{name:'hot',sql:shard}]:migrations))this.ctx.storage.transactionSync(()=>sql.exec(migration.sql).toArray());
   sql.exec('INSERT INTO durable_sql_state VALUES(1,?,?,?,?,?,?,?)',identity.deploymentId,identity.databaseId,identity.kind,identity.epoch,'ready','a'.repeat(64),'b'.repeat(64)).toArray();
-  return sql.exec('SELECT type,count(*) AS n FROM sqlite_master GROUP BY type').toArray();
+  return sql.exec(${JSON.stringify(authoritySchemaQuery)}).toArray();
  }
  maintenance(input){
   if(input.operation==='pause'){this.ctx.storage.sql.exec("UPDATE durable_sql_state SET status='importing'").toArray();return null;}
@@ -63,9 +75,7 @@ async function fixture(t, { kind = 'control', persist = false } = {}) {
 test('native named RPC stays unserved before activation and retains ready data across restart', { timeout: 30000 }, async t => {
   const f = await fixture(t, { persist: true });
   await assert.rejects(f.db.prepare('SELECT 1').first(), /durable_sql_not_ready/);
-  const counts = await f.bootstrap();
-  assert.equal(counts.find(row => row.type === 'trigger').n, 227);
-  assert.equal(counts.find(row => row.type === 'view').n, 5);
+  assert.deepEqual(await f.bootstrap(), expectedAuthoritySchema);
   await f.db.prepare("INSERT INTO accounts(id) VALUES('retained')").run();
   await f.restart();
   assert.deepEqual(await f.db.withSession('first-primary').prepare("SELECT id FROM accounts WHERE id='retained'").first(), { id: 'retained' });
