@@ -2,6 +2,7 @@ import type { IdentityDatabase, SqlValue } from '../identity.ts';
 import type { Database, Result, Statement } from './types.ts';
 import { bootstrapStatements, type BootstrapScope } from './seoul-projection-bootstrap-capture.ts';
 import { workspaceStatements, type WorkspaceCaptureScope } from './seoul-projection-workspace-capture.ts';
+import { providerStatements, type ProviderPrimitive } from './seoul-projection-provider-capture.ts';
 
 const ISSUER = 'https://auth-api.allen.company';
 const TRUSTED_CONSTRUCTION = Symbol('trusted seoul capture composition');
@@ -84,6 +85,10 @@ export class SeoulProjectionCapture {
   issueKeyStatements(database: Database, scope: KeyScope, commands: Statement[]): Statement[] {
     this.assertDatabase(database);
     return this.plan('scoped-key',scope,commands).statements;
+  }
+  providerStatements(database: Database, primitives: ProviderPrimitive[]): Statement[] {
+    this.assertDatabase(database);
+    return providerStatements(this.database,primitives);
   }
   async workspaceBootstrap(database: IdentityDatabase, scope: BootstrapScope, sql: string, values: SqlValue[]): Promise<Result> {
     this.assertDatabase(database);

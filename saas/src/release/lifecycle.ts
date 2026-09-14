@@ -1,4 +1,5 @@
 import type { Database } from './types.ts';
+import type { SeoulProjectionCapture } from './seoul-projection-capture.ts';
 import { canonicalEmail } from '../identity.ts';
 import { sqlNow } from '../sql-clock.ts';
 import { batch, digest, exact, fail, id, integer, json, one, requestObject, stmt, str } from './util.ts';
@@ -19,7 +20,8 @@ function lifecycleEvent(event: Record<string, unknown>, timestamp: number) {
 
 /** Only the application callback after RS256 issuer/audience verification may
  * call this. All bounded heads commit together before sign-in creates claims. */
-export async function applyVerifiedLifecycle(db: Database, clock: () => number, principal: unknown): Promise<void> {
+export async function applyVerifiedLifecycle(db: Database, clock: () => number, principal: unknown, capture?: SeoulProjectionCapture): Promise<void> {
+    capture?.assertDatabase(db);
     if (!principal || typeof principal !== 'object' || !('identityLifecycle' in principal)) return;
     const proof = principal as { issuer: string; subject: string; issuedAt: number; expiresAt: number; email?: string; emailVerified?: boolean; identityLifecycle: unknown };
     if (proof.issuer !== 'https://auth-api.allen.company' || typeof proof.subject !== 'string'
@@ -42,7 +44,7 @@ export async function applyVerifiedLifecycle(db: Database, clock: () => number, 
     const at = clock();
     if (proof.issuedAt > at || proof.expiresAt <= at) fail(401, 'invalid_identity_lifecycle');
     if (!heads.length) return;
-    await batch(db, heads.flatMap(value => [
+    const primitives = heads.map(value => ({event:value, commands:[
         stmt(db, `INSERT INTO release_identity_lifecycle_jwt_proofs(event_id,body_hash,issued_at,expires_at)
             SELECT ?,?,?,? WHERE ?<=${sqlNow()} AND ?>${sqlNow()}
               AND NOT EXISTS(SELECT 1 FROM release_webhook_events WHERE provider='identity' AND event_id=?)`,
@@ -55,7 +57,8 @@ export async function applyVerifiedLifecycle(db: Database, clock: () => number, 
             SELECT ?,?,?,?,?,?,?,${sqlNow()},?,? WHERE EXISTS(SELECT 1 FROM release_identity_lifecycle_jwt_proofs WHERE event_id=? AND body_hash=?)
               AND NOT EXISTS(SELECT 1 FROM release_identity_lifecycle_events WHERE id=?)`,
             [value.eventId, value.issuer, value.subject, value.sequence, value.kind, value.address, value.occurredAt, at, proof.issuedAt, value.hash, value.eventId, value.hash, value.eventId]),
-    ]));
+    ]}));
+    await batch(db, capture ? capture.providerStatements(db,primitives) : primitives.flatMap(p => p.commands));
     const accepted = await one<{ count: number }>(db, `SELECT count(*) AS count FROM json_each(?) head
         JOIN release_webhook_events w ON w.provider='identity' AND w.event_id=json_extract(head.value,'$.eventId')
             AND w.body_hash=json_extract(head.value,'$.hash')`, [JSON.stringify(heads)]);
@@ -63,7 +66,8 @@ export async function applyVerifiedLifecycle(db: Database, clock: () => number, 
 }
 
 /** Called only after Admin verifies the original request's HMAC signature. */
-export async function receiveLifecycle(db: Database, clock: () => number, event: Record<string, unknown>, raw: string, timestamp: number): Promise<Response> {
+export async function receiveLifecycle(db: Database, clock: () => number, event: Record<string, unknown>, raw: string, timestamp: number, capture?: SeoulProjectionCapture): Promise<Response> {
+    capture?.assertDatabase(db);
     const { eventId, subject, kind, sequence, occurredAt, address, issuer } = lifecycleEvent(event, timestamp);
     const hash = await digest(raw);
     const accepted = () => one<{ hash: string }>(db, "SELECT body_hash AS hash FROM release_webhook_events WHERE provider='identity' AND event_id=?", [eventId]);
@@ -75,13 +79,14 @@ export async function receiveLifecycle(db: Database, clock: () => number, event:
     const at = clock();
     if (Math.abs(at - timestamp) > 300000) fail(401, 'invalid_signature');
     try {
-        await batch(db, [
+        const commands = [
             stmt(db, `INSERT INTO release_webhook_events(provider,event_id,body_hash,created_at)
                 SELECT 'identity',?,?,${sqlNow()} WHERE ${sqlNow()} BETWEEN ? AND ?`, [eventId, hash, at, at, timestamp - 300000, timestamp + 300000]),
             stmt(db, `INSERT INTO release_identity_lifecycle_events(id,issuer,subject,sequence,kind,address,occurred_at,received_at,signed_at,body_hash)
                 SELECT ?,?,?,?,?,?,?,${sqlNow()},?,? WHERE EXISTS(SELECT 1 FROM release_webhook_events WHERE provider='identity' AND event_id=? AND body_hash=?)`,
                 [eventId, issuer, subject, sequence, kind, address, occurredAt, at, timestamp, hash, eventId, hash]),
-        ]);
+        ];
+        await batch(db, capture ? capture.providerStatements(db,[{event:{eventId,issuer,subject,kind,sequence,occurredAt,address,hash},commands}]) : commands);
     } catch (error) {
         const receipt = await accepted();
         if (receipt) {

@@ -139,9 +139,52 @@ test('reserved contracts and absent normal descriptors fail with fixed unsupport
   unsupported(() => encodeSeoulAuthoritySource({ ...source(), streamKind: 'target', streamKey: 'target:one' }));
   for (const b of Object.values(bodies).filter(b => b.origin)) {
     const missing = copy(b); delete missing.origin; delete missing.effect; unsupported(() => encodeSeoulAuthoritySource(source(missing)));
-    for (const kind of ['provider-v1', 'provider-v2', 'backfill']) unsupported(() => encodeSeoulAuthoritySource(source({ ...b, origin: { kind } })));
+    for (const kind of ['provider-v1', 'backfill']) unsupported(() => encodeSeoulAuthoritySource(source({ ...b, origin: { kind } })));
+    invalid(() => encodeSeoulAuthoritySource(source({ ...b, origin: { kind:'provider-v2' } })));
     unsupported(() => encodeSeoulAuthoritySource(source({ ...b, origin: origin('unsupported-command') })));
   }
+});
+
+const providerOrigin=eventType=>({kind:'provider-v2',eventId:'publisher:one',eventType,sequence:9,occurredAtMs:7});
+function providerBody(eventType){
+ const email=eventType.startsWith('email.'),b=copy(bodies[email?'email':'subject']),o=providerOrigin(eventType);
+ b.origin=o;b.lifecycle={state:'event',eventId:o.eventId,sequence:o.sequence,kind:eventType,occurredAtMs:o.occurredAtMs};
+ if(email){b.liveClaim=null;b.changedClaim=null;}
+ if(eventType==='account.deleted')b.accountDisabledAtMs=99;
+ b.effect={type:email?'email-lifecycle':'subject-lifecycle',subject:b.subject,...(email?{address:b.address}:{}),state:eventType.split('.')[1],occurredAtMs:7};return b;
+}
+for(const kind of ['account.suspended','account.resumed','account.deleted','email.revoked','email.verified'])test('provider-v2 exact direct and minimal '+kind+' preserve publisher time',async()=>{
+ const b=providerBody(kind),s=source(b);assert.deepEqual(parseSeoulAuthoritySourceRow(row(s)),s);assert.deepEqual(decodeSeoulHeadEvent((await prepareSeoulHeadCandidate(row(s))).eventBytes).effect,b.effect);
+ const minimal={version:3,kind:'identity-transition-source',issuer:ISSUER,subject:b.subject,address:b.address??null,origin:b.origin,effect:b.effect};
+ const m={...s,body:minimal};assert.deepEqual(parseSeoulAuthoritySourceRow(row(m)),m);
+ for(const patch of [{effect:{...b.effect,occurredAtMs:99}},{origin:{...b.origin,sequence:0}},{origin:{...b.origin,subject:'invented'}},{effect:head('changed')},{lifecycle:{...b.lifecycle,eventId:'different'}}])invalid(()=>encodeSeoulAuthoritySource({...s,body:{...b,...patch}}));
+ invalid(()=>encodeSeoulAuthoritySource({...m,body:{...minimal,accountId:'account:one'}}));
+ invalid(()=>encodeSeoulAuthoritySource({...m,body:{...minimal,origin:origin('workspace-sign-in')}}));
+});
+
+test('provider-v2 derived member/PAT negatives bind database revocation time independently of publisher time',()=>{
+ for(const type of ['account.suspended','account.resumed','account.deleted','email.revoked','email.verified']){
+  for(const kind of ['credential','membership']){
+   const b=copy(bodies[kind]);b.origin=providerOrigin(type);b.revokedAtMs=99;b.effect=negative(kind);
+   if(kind==='credential'&&type.startsWith('email.'))Object.assign(b,{credentialKind:'api_key',membershipId:'membership:one',emailId:'email:one'});
+   assert.deepEqual(parseSeoulAuthoritySourceRow(row(source(b))),source(b));
+   invalid(()=>encodeSeoulAuthoritySource(source({...b,effect:{...b.effect,occurredAtMs:7}})));
+   if(kind==='credential'&&type.startsWith('email.'))invalid(()=>encodeSeoulAuthoritySource(source({...b,credentialKind:'personal_key',membershipId:null,emailId:null})));
+  }
+ }
+});
+
+test('provider-v2 derived alias email/account changes never invent explicit lifecycle',()=>{
+ const email={...copy(bodies.email),liveClaim:null,changedClaim:{id:'email:one',verifiedAtMs:1,revokedAtMs:99},origin:providerOrigin('account.resumed'),effect:head('changed')};assert.deepEqual(parseSeoulAuthoritySourceRow(row(source(email))),source(email));
+ const otherEmail={...email,origin:providerOrigin('email.revoked')};assert.deepEqual(parseSeoulAuthoritySourceRow(row(source(otherEmail))),source(otherEmail));
+ invalid(()=>encodeSeoulAuthoritySource(source({...otherEmail,changedClaim:null})));
+ const alias={...copy(bodies.subject),accountDisabledAtMs:99,origin:providerOrigin('account.deleted'),effect:head('changed')};assert.deepEqual(parseSeoulAuthoritySourceRow(row(source(alias))),source(alias));
+ for(const patch of [{accountDisabledAtMs:null},{origin:providerOrigin('account.resumed')},{effect:{type:'subject-lifecycle',subject:alias.subject,state:'deleted',occurredAtMs:7}}])invalid(()=>encodeSeoulAuthoritySource(source({...alias,...patch})));
+ for(const base of [bodies.organization,bodies.space])invalid(()=>encodeSeoulAuthoritySource(source({...copy(base),origin:providerOrigin('account.deleted')})));
+});
+
+test('normal direct account deletion must retain the actual permanent account disable',()=>{
+ const b=providerBody('account.deleted');invalid(()=>encodeSeoulAuthoritySource(source({...b,accountDisabledAtMs:null})));
 });
 
 test('complete supplied identity vector: UTF-16 sort, exact account/self, opaque subjects', () => {
