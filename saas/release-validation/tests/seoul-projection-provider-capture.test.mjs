@@ -15,6 +15,11 @@ import {hmac} from '../../src/release/util.ts';
 
 const issuer='https://auth-api.allen.company',secret='synthetic-provider-capture-only-123456789';
 const kinds=['account.suspended','account.resumed','account.deleted','email.revoked','email.verified'];
+for(const recursive of ['ON','OFF'])for(const mode of ['webhook','verified-pair'])test('captured dirty revision survives later V2 '+mode+'; '+recursive,async t=>{
+ const f=await setup(t,recursive),prior=f.raw.prepare('SELECT max(revision) n FROM release_seoul_authority_changes').get().n;for(const space of ['s1','so'])f.raw.prepare('INSERT INTO release_seoul_dirty_spaces(space_id,dirty_revision,captured_revision) VALUES(?,?,?)').run(space,prior,prior);
+ if(mode==='webhook')await f.deliver(f.event(1,'account.resumed'));else await f.verified([f.event(1,'account.resumed'),f.event(2,'email.verified')]);
+ const latest=Math.max(...sources(f).map(r=>r.revision));assert.ok(latest>prior);for(const space of ['s1','so']){const actual=f.raw.prepare('SELECT * FROM release_seoul_dirty_spaces WHERE space_id=?').get(space);assert.equal(actual.dirty_revision,latest);assert.equal(actual.captured_revision,prior);}clean(f);
+});
 const rows=(f,table)=>f.raw.prepare('SELECT * FROM '+table+' ORDER BY rowid').all();
 const sources=f=>rows(f,'release_seoul_authority_changes').filter(r=>r.source_command_id!=='setup-target');
 const bodies=f=>sources(f).map(r=>parseSeoulAuthoritySourceRow(r).body);

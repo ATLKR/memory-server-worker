@@ -82,21 +82,24 @@ test('deterministic replay and input/output ownership before first await', async
   assert.deepEqual(decoded, source());
 });
 
-const commands = ['scoped-key-issue', 'self-email-unlink', 'workspace-sign-in', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke'];
-const allowed = { credential: ['scoped-key-issue', 'self-email-unlink', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke'], membership: ['self-email-unlink', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke'], email: ['self-email-unlink', 'workspace-sign-in'], subject: ['workspace-sign-in'], organization: ['organization-create', 'organization-child-create'], space: ['workspace-sign-in', 'organization-create', 'organization-child-create'] };
+const commands = ['scoped-key-issue', 'self-email-unlink', 'workspace-sign-in', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke', 'email-link', 'domain-email-revoke', 'scim-deactivate', 'scim-delete', 'space-create'];
+const allowed = { credential: ['scoped-key-issue', 'self-email-unlink', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke', 'domain-email-revoke', 'scim-deactivate', 'scim-delete'], membership: ['self-email-unlink', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke', 'domain-email-revoke', 'scim-deactivate', 'scim-delete'], email: ['self-email-unlink', 'workspace-sign-in', 'email-link', 'domain-email-revoke'], subject: ['workspace-sign-in'], organization: ['organization-create', 'organization-child-create'], space: ['workspace-sign-in', 'organization-create', 'organization-child-create', 'space-create'] };
 function commandBody(kind, command) {
-  const b = copy(bodies[kind]); b.origin = origin(command, command === 'scoped-key-issue' ? null : 'receipt:one');
-  if (command === 'self-email-unlink') {
+  const b = copy(bodies[kind]); b.origin = origin(command, ['scoped-key-issue','scim-deactivate','scim-delete','space-create'].includes(command) ? null : 'receipt:one');
+  if (command === 'self-email-unlink' || command === 'domain-email-revoke') {
     if (kind === 'credential') Object.assign(b, { credentialKind: 'api_key', membershipId: 'membership:one', emailId: 'email:one' });
     if (kind === 'credential' || kind === 'membership') { b.revokedAtMs = 99; b.effect = negative(kind); }
     if (kind === 'email') { b.liveClaim = null; b.changedClaim = { id: 'email:one', verifiedAtMs: 1, revokedAtMs: 99 }; }
   }
-  if (command === 'membership-revoke' || command === 'workspace-key-revoke') {
-    if (kind === 'credential' && command === 'membership-revoke') Object.assign(b, { credentialKind: 'api_key', membershipId: 'membership:one', emailId: 'email:one' });
+  if (['membership-revoke','workspace-key-revoke','scim-deactivate','scim-delete'].includes(command)) {
+    if (kind === 'credential' && command !== 'workspace-key-revoke') Object.assign(b, { credentialKind: 'api_key', membershipId: 'membership:one', emailId: 'email:one' });
     if (kind === 'credential' || kind === 'membership') { b.revokedAtMs = 99; b.effect = negative(kind); }
   }
   if (command === 'invite-accept' || command === 'workspace-key-issue') b.origin.receiptId = b.id;
   if (kind === 'space' && command === 'workspace-sign-in') { b.accountId = 'account:one'; b.organizationId = null; }
+  if (command === 'domain-email-revoke' && kind === 'email') b.addressBlocked = true;
+  if (command === 'space-create') b.effect = head('changed');
+  if (command === 'email-link') b.origin.receiptId = b.liveClaim?.id ?? 'email:one';
   return b;
 }
 
@@ -111,6 +114,13 @@ test('Workspace issuance/acceptance bind actual candidate receipt and only the a
   }
   const member=commandBody('membership','invite-accept');invalid(()=>encodeSeoulAuthoritySource(source({...member,origin:origin('invite-accept','different-receipt')})));
   const personal=commandBody('credential','membership-revoke');Object.assign(personal,{credentialKind:'personal_key',membershipId:null,emailId:null});invalid(()=>encodeSeoulAuthoritySource(source(personal)));
+});
+test('five ordinary command origins bind receipt, domain block and Space ownership',()=>{
+ const email=commandBody('email','email-link');invalid(()=>encodeSeoulAuthoritySource(source({...email,origin:origin('email-link','different:receipt')})));
+ const domain=commandBody('email','domain-email-revoke');invalid(()=>encodeSeoulAuthoritySource(source({...domain,addressBlocked:false})));
+ for(const command of ['scim-deactivate','scim-delete']){const c=commandBody('credential',command);invalid(()=>encodeSeoulAuthoritySource(source({...c,credentialKind:'personal_key',membershipId:null,emailId:null})));}
+ const space=commandBody('space','space-create');for(const patch of [{accountId:null,organizationId:null},{accountId:'account:one',organizationId:'organization:one'}])invalid(()=>encodeSeoulAuthoritySource(source({...space,...patch})));
+ assert.doesNotThrow(()=>encodeSeoulAuthoritySource(source({...space,accountId:'account:one',organizationId:null})));
 });
 for (const [kind, accepted] of Object.entries(allowed)) {
   test(`${kind}: complete command/effect matrix`, async () => {

@@ -3,6 +3,7 @@ import type { Database, Result, Statement } from './types.ts';
 import { bootstrapStatements, type BootstrapScope } from './seoul-projection-bootstrap-capture.ts';
 import { workspaceStatements, type WorkspaceCaptureScope } from './seoul-projection-workspace-capture.ts';
 import { providerStatements, type ProviderPrimitive } from './seoul-projection-provider-capture.ts';
+import { commandStatements, type CommandCaptureScope } from './seoul-projection-command-capture.ts';
 
 const ISSUER = 'https://auth-api.allen.company';
 const TRUSTED_CONSTRUCTION = Symbol('trusted seoul capture composition');
@@ -104,6 +105,17 @@ export class SeoulProjectionCapture {
     if (result.length !== plan.statements.length || result.some(row => !row.success)) throw new Error('seoul_capture_batch_failed');
     return result[plan.commandIndex]!;
   }
+  ordinaryStatements(database: Database, scope: CommandCaptureScope, command: Statement): Statement[] {
+    this.assertDatabase(database);
+    return commandStatements(this.database,scope,command).statements;
+  }
+  async ordinaryCommand(database: IdentityDatabase, scope: CommandCaptureScope, sql: string, values: SqlValue[]): Promise<Result> {
+    this.assertDatabase(database);
+    const plan = commandStatements(this.database,scope,this.database.prepare(sql).bind(...values));
+    const result = await this.database.batch(plan.statements);
+    if (result.length !== plan.statements.length || result.some(row => !row.success)) throw new Error('seoul_capture_batch_failed');
+    return result[plan.commandIndex]!;
+  }
   async unlinkEmail(database: IdentityDatabase, scope: UnlinkScope, sql: string, values: SqlValue[]): Promise<Result> {
     this.assertDatabase(database);
     const plan = this.plan('self-email-unlink',scope,[this.database.prepare(sql).bind(...values)]);
@@ -199,8 +211,8 @@ export class SeoulProjectionCapture {
      FROM release_seoul_capture_scope k JOIN release_seoul_capture_attempts a ON a.id=k.attempt_id
      WHERE a.id=? AND a.accepted=1 AND a.exclusion_reason IS NULL AND k.after_bytes IS NOT NULL AND k.before_bytes IS NOT k.after_bytes
      ORDER BY k.stream_kind COLLATE BINARY,k.stream_key COLLATE BINARY`);
-    add(`INSERT INTO release_seoul_dirty_spaces(space_id,dirty_revision)
-     SELECT s.space_id,(SELECT max(revision) FROM release_seoul_authority_changes WHERE source_command_id=s.attempt_id)
+    add(`INSERT INTO release_seoul_dirty_spaces(space_id,dirty_revision,captured_revision)
+     SELECT s.space_id,(SELECT max(revision) FROM release_seoul_authority_changes WHERE source_command_id=s.attempt_id),coalesce((SELECT d.captured_revision FROM release_seoul_dirty_spaces d WHERE d.space_id=s.space_id),0)
      FROM release_seoul_capture_spaces s JOIN release_seoul_capture_attempts a ON a.id=s.attempt_id
      WHERE s.attempt_id=? AND a.exclusion_reason IS NULL AND EXISTS(SELECT 1 FROM release_seoul_authority_changes WHERE source_command_id=s.attempt_id)
      ON CONFLICT(space_id) DO UPDATE SET dirty_revision=max(release_seoul_dirty_spaces.dirty_revision,excluded.dirty_revision)`);

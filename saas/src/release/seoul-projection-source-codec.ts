@@ -12,7 +12,7 @@ const typedArrayPrototype = Object.getPrototypeOf(Uint8Array.prototype);
 const byteLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteLength')!.get!;
 const byteBrand = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag)!.get!;
 const INVALID = Symbol(), UNSUPPORTED = Symbol();
-const commands = ['scoped-key-issue', 'self-email-unlink', 'workspace-sign-in', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke'] as const;
+const commands = ['scoped-key-issue', 'self-email-unlink', 'workspace-sign-in', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke', 'email-link', 'domain-email-revoke', 'scim-deactivate', 'scim-delete', 'space-create'] as const;
 const streamKinds = ['subject', 'email', 'credential', 'membership', 'organization', 'space'] as const;
 type StreamKind = typeof streamKinds[number];
 type Command = typeof commands[number];
@@ -181,7 +181,7 @@ function origin(value: unknown): Origin {
   const x = record(value, ['kind', 'commandType', 'receiptId']);
   if (!commands.includes(x.commandType as Command)) unsupported();
   const commandType = x.commandType as Command, receiptId = nullable(x.receiptId, identifier);
-  if ((commandType === 'scoped-key-issue') !== (receiptId === null)) invalid();
+  if ((['scoped-key-issue','scim-deactivate','scim-delete','space-create'].includes(commandType)) !== (receiptId === null)) invalid();
   return { kind: 'command', commandType, receiptId };
 }
 function directProviderEffect(value:unknown, identity:string, mailbox:string|null, captured:ProviderV2):SeoulHeadEffect {
@@ -208,13 +208,13 @@ function providerEffect(x:Record<string,unknown>, kind:StreamKind, key:string, c
   const e=record(x.effect,['type','disposition']);return {type:literal(e.type,'entity-head'),disposition:literal(e.disposition,'changed')};
 }
 function effect(value: unknown, kind: StreamKind, key: string, command: Command, revokedAtMs: number | null): SeoulHeadEffect {
-  if (['self-email-unlink', 'membership-revoke', 'workspace-key-revoke'].includes(command) && (kind === 'credential' || kind === 'membership')) {
+  if (['self-email-unlink', 'membership-revoke', 'workspace-key-revoke', 'domain-email-revoke', 'scim-deactivate', 'scim-delete'].includes(command) && (kind === 'credential' || kind === 'membership')) {
     const x = record(value, ['type', 'entityKind', 'entityId', 'state', 'occurredAtMs']);
     if (revokedAtMs === null || x.occurredAtMs !== revokedAtMs) invalid();
     return { type: literal(x.type, 'entity-negative'), entityKind: literal(x.entityKind, kind), entityId: literal(x.entityId, key), state: literal(x.state, 'revoked'), occurredAtMs: integer(x.occurredAtMs) };
   }
   const x = record(value, ['type', 'disposition']);
-  return { type: literal(x.type, 'entity-head'), disposition: literal(x.disposition, kind === 'subject' || kind === 'email' ? 'changed' : 'present') };
+  return { type: literal(x.type, 'entity-head'), disposition: literal(x.disposition, kind === 'subject' || kind === 'email' || command === 'space-create' ? 'changed' : 'present') };
 }
 
 function body(value: unknown, kind: StreamKind, key: string, commandId: string): SeoulAuthoritySourceBody {
@@ -240,9 +240,9 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
   if (x.kind !== kind + '-source') invalid();
   const capturedOrigin = origin(x.origin), command = capturedOrigin.kind==='command'?capturedOrigin.commandType:null;
   const matrix: Record<StreamKind, readonly Command[]> = {
-    credential: ['scoped-key-issue', 'self-email-unlink', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke'], membership: ['self-email-unlink', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke'],
-    subject: ['workspace-sign-in'], email: ['workspace-sign-in', 'self-email-unlink'], organization: ['organization-create', 'organization-child-create'],
-    space: ['workspace-sign-in', 'organization-create', 'organization-child-create'],
+    credential: ['scoped-key-issue', 'self-email-unlink', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke', 'domain-email-revoke', 'scim-deactivate', 'scim-delete'], membership: ['self-email-unlink', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke', 'domain-email-revoke', 'scim-deactivate', 'scim-delete'],
+    subject: ['workspace-sign-in'], email: ['workspace-sign-in', 'self-email-unlink', 'email-link', 'domain-email-revoke'], organization: ['organization-create', 'organization-child-create'],
+    space: ['workspace-sign-in', 'organization-create', 'organization-child-create', 'space-create'],
   };
   if (command!==null?!matrix[kind].includes(command):!['subject','email','membership','credential'].includes(kind)) invalid();
   const descriptors = (revokedAtMs: number | null = null): Descriptors => ({ origin: capturedOrigin, effect: capturedOrigin.kind==='provider-v2'?providerEffect(x,kind,key,capturedOrigin,revokedAtMs):effect(x.effect, kind, key, capturedOrigin.commandType, revokedAtMs) });
@@ -265,7 +265,7 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
     }
     case 'membership': {
       record(x, ['version', 'kind', 'id', 'organizationId', 'accountId', 'emailId', 'role', 'expiresAtMs', 'revokedAtMs', 'origin', 'effect']);
-      const revokedAtMs = nullable(x.revokedAtMs, integer); if ((command===null||command === 'self-email-unlink' || command === 'membership-revoke') !== (revokedAtMs !== null)) invalid();
+      const revokedAtMs = nullable(x.revokedAtMs, integer); if ((command===null||['self-email-unlink','membership-revoke','domain-email-revoke','scim-deactivate','scim-delete'].includes(command)) !== (revokedAtMs !== null)) invalid();
       if (command === 'invite-accept' && (capturedOrigin.kind!=='command'||capturedOrigin.receiptId !== x.id)) invalid();
       return { version: 3, kind: 'membership-source', id: id(), organizationId: identifier(x.organizationId), accountId: identifier(x.accountId), emailId: identifier(x.emailId),
         role: choice(x.role, ['owner', 'admin', 'member']), expiresAtMs: integer(x.expiresAtMs), revokedAtMs, ...descriptors(revokedAtMs) };
@@ -275,7 +275,9 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
       const identity = subject(x.subject), mailbox = address(x.address); if (key !== ISSUER + '\n' + identity + '\n' + mailbox) invalid();
       const liveClaim = nullable(x.liveClaim, value => { const c = record(value, ['id', 'verifiedAtMs']); return { id: identifier(c.id), verifiedAtMs: integer(c.verifiedAtMs) }; });
       const changedClaim = nullable(x.changedClaim, value => { const c = record(value, ['id', 'verifiedAtMs', 'revokedAtMs']); return { id: identifier(c.id), verifiedAtMs: integer(c.verifiedAtMs), revokedAtMs: integer(c.revokedAtMs) }; });
-      if (command===null?liveClaim!==null:command === 'self-email-unlink' ? liveClaim !== null || changedClaim === null : liveClaim === null || changedClaim !== null) invalid();
+      if (command===null?liveClaim!==null:['self-email-unlink','domain-email-revoke'].includes(command) ? liveClaim !== null || changedClaim === null : liveClaim === null || changedClaim !== null) invalid();
+      if (command === 'email-link' && (capturedOrigin.kind !== 'command' || capturedOrigin.receiptId !== liveClaim?.id)) invalid();
+      if (command === 'domain-email-revoke' && x.addressBlocked !== true) invalid();
       return { version: 3, kind: 'email-source', issuer: literal(x.issuer, ISSUER), subject: identity, address: mailbox, accountId: identifier(x.accountId), liveClaim, changedClaim,
         addressBlocked: bool(x.addressBlocked), legacyRevoked: bool(x.legacyRevoked), lifecycle: lifecycle(x.lifecycle, true), ...descriptors() };
     }
@@ -299,7 +301,7 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
     case 'space': {
       record(x, ['version', 'kind', 'id', 'accountId', 'organizationId', 'securityMode', 'createdAtMs', 'origin', 'effect']);
       const accountId = nullable(x.accountId, identifier), organizationId = nullable(x.organizationId, identifier);
-      if (command === 'workspace-sign-in' ? accountId === null || organizationId !== null : accountId !== null || organizationId === null) invalid();
+      if (command === 'space-create' ? (accountId === null) === (organizationId === null) : command === 'workspace-sign-in' ? accountId === null || organizationId !== null : accountId !== null || organizationId === null) invalid();
       return { version: 3, kind: 'space-source', id: id(), accountId, organizationId, securityMode: literal(x.securityMode, 'managed'), createdAtMs: integer(x.createdAtMs), ...descriptors() };
     }
   }

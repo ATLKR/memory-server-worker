@@ -11,6 +11,12 @@ const implementation=await import('../../src/release/seoul-projection-capture.ts
 const issuer='https://auth-api.allen.company';
 const uuid=n=>`00000000-0000-4000-8000-${String(n).padStart(12,'0')}`;
 const source=new URL('../../seoul-projection-capture-schema.sql',import.meta.url);
+for(const recursive of ['ON','OFF'])for(const command of ['issue','unlink'])test('captured dirty revision survives later first-capture '+command+'; '+recursive,async t=>{
+ const f=await setup(t,{recursive}),space=command==='issue'?'s1':'so',prior=f.raw.prepare('SELECT max(revision) n FROM release_seoul_authority_changes').get().n;
+ f.raw.prepare('INSERT INTO release_seoul_dirty_spaces(space_id,dirty_revision,captured_revision) VALUES(?,?,?)').run(space,prior,prior);
+ if(command==='issue')await f.admin.issueKey(f.token,{label:'After capture',capabilities:['read'],expiresInDays:1});else await f.identity.unlinkEmail(f.token,'e1');
+ const actual=f.raw.prepare('SELECT * FROM release_seoul_dirty_spaces WHERE space_id=?').get(space),latest=Math.max(...captured(f).map(r=>r.revision));assert.ok(latest>prior);assert.equal(actual.dirty_revision,latest);assert.equal(actual.captured_revision,prior);clean(f);
+});
 const list=(f,table)=>f.raw.prepare('SELECT * FROM '+table+' ORDER BY rowid').all();
 const captured=f=>list(f,'release_seoul_authority_changes').filter(r=>!r.source_command_id.startsWith('target:'));
 const bodies=f=>captured(f).map(r=>JSON.parse(r.record_bytes));

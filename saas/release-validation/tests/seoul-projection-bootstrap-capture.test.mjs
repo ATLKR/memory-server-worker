@@ -10,6 +10,12 @@ import {encodeSeoulAuthoritySnapshot} from '../../src/release/seoul-projection-s
 
 const issuer='https://auth-api.allen.company';
 const schema=new URL('../../seoul-projection-bootstrap-schema.sql',import.meta.url);
+for(const recursive of ['ON','OFF'])test('captured dirty revision survives later bootstrap claim creation; '+recursive,async t=>{
+ const f=await setup(t,recursive);f.raw.prepare("INSERT INTO account_emails VALUES('captured:email','alice','after-capture@example.com','example.com',?,NULL)").run(at-2);f.raw.prepare("INSERT INTO memberships VALUES('captured:member','org','alice','captured:email','member',?,?)").run(at+10000,at-1);f.raw.prepare("UPDATE account_emails SET revoked_at=? WHERE id='captured:email'").run(at-1);
+ f.raw.prepare("INSERT INTO release_seoul_authority_changes(source_command_id,stream_kind,stream_key,event_id,record_bytes,created_at) VALUES('captured:seed','target','so',?,'{}',?)").run(crypto.randomUUID(),at);const prior=f.raw.prepare('SELECT max(revision) n FROM release_seoul_authority_changes').get().n;
+ f.raw.prepare('INSERT INTO release_seoul_dirty_spaces(space_id,dirty_revision,captured_revision) VALUES(?,?,?)').run('so',prior,prior);
+ const result=await f.workspace.signIn(principal('alice',{emailVerified:true,email:'after-capture@example.com'}));assert.equal(result.accountId,'alice');const actual=f.raw.prepare("SELECT * FROM release_seoul_dirty_spaces WHERE space_id='so'").get(),latest=Math.max(...sources(f).map(r=>r.revision));assert.ok(latest>prior);assert.equal(actual.dirty_revision,latest);assert.equal(actual.captured_revision,prior);clean(f);
+});
 const rows=(f,table)=>f.raw.prepare('SELECT * FROM '+table+' ORDER BY rowid').all();
 const sources=f=>rows(f,'release_seoul_authority_changes');
 const bodies=f=>sources(f).map(r=>JSON.parse(r.record_bytes));

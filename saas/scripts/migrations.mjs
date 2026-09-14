@@ -17,6 +17,7 @@ const sources = ['schema.sql', 'memory-schema.sql', 'product-schema.sql', 'auth-
 sources.push('seoul-projection-preparation-schema.sql');
 sources.push('seoul-projection-workspace-schema.sql');
 sources.push('seoul-projection-provider-schema.sql');
+sources.push('seoul-projection-command-schema.sql');
 const out = new URL('../migrations/', import.meta.url);
 await mkdir(out, { recursive: true });
 for (const [index, source] of sources.entries()) {

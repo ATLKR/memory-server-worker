@@ -173,13 +173,17 @@ export class IdentityService {
     const proofHash = await digestToken(proofToken);
     const id = crypto.randomUUID();
     const at = this.now();
-    await this.write(`INSERT INTO email_consumptions(id,challenge_id,actor_credential_id,created_at)
+    const sql = `INSERT INTO email_consumptions(id,challenge_id,actor_credential_id,created_at)
       SELECT ?,p.id,c.id,? FROM email_challenges p JOIN active_credentials c ON c.account_id=p.account_id
       WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${RECENT_SESSION}
         AND p.id=? AND p.token_digest=? AND p.expires_at>${sqlNow()} AND p.used_at IS NULL AND p.invalidated_at IS NULL
         AND NOT EXISTS (SELECT 1 FROM email_blocks b WHERE b.address=p.address)
-        AND NOT EXISTS (SELECT 1 FROM account_emails e WHERE e.address=p.address AND e.revoked_at IS NULL)`,
-      [id, at, hash, at, at - REAUTH_WINDOW_MS, at, identifier(challengeId), proofHash, at]);
+        AND NOT EXISTS (SELECT 1 FROM account_emails e WHERE e.address=p.address AND e.revoked_at IS NULL)`;
+    const values = [id, at, hash, at, at - REAUTH_WINDOW_MS, at, identifier(challengeId), proofHash, at];
+    if (this.capture) {
+      const result = await this.capture.ordinaryCommand(this.db, { commandType: 'email-link', entityId: id, receiptId: id, actorDigest: hash, commandAt: at, challengeId }, sql, values);
+      if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new IdentityDenied();
+    } else await this.write(sql, values);
     return id;
   }
 
@@ -208,14 +212,19 @@ export class IdentityService {
     const hash = await digestToken(token);
     const { address, domain } = canonicalEmail(email);
     const at = this.now();
-    await this.write(`INSERT INTO revocations(id,kind,actor_credential_id,domain_id,address,created_at)
+    const revocationId = crypto.randomUUID();
+    const sql = `INSERT INTO revocations(id,kind,actor_credential_id,domain_id,address,created_at)
       SELECT ?,'domain',c.id,d.id,?,? FROM active_credentials c
       JOIN active_memberships m ON m.account_id=c.account_id
       JOIN domain_managers g ON g.membership_id=m.id AND g.revoked_at IS NULL
       JOIN domains d ON d.id=g.domain_id AND d.organization_id=m.organization_id
       WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND d.id=? AND d.name=?
         AND d.revoked_at IS NULL AND d.verified_until>${sqlNow()}
-        AND m.expires_at>${sqlNow()} AND m.role IN ('owner','admin') AND ${RECENT_SESSION}`,
-      [crypto.randomUUID(), address, at, hash, at, identifier(domainId), domain, at, at, at - REAUTH_WINDOW_MS, at]);
+        AND m.expires_at>${sqlNow()} AND m.role IN ('owner','admin') AND ${RECENT_SESSION}`;
+    const values = [revocationId, address, at, hash, at, identifier(domainId), domain, at, at, at - REAUTH_WINDOW_MS, at];
+    if (this.capture) {
+      const result = await this.capture.ordinaryCommand(this.db, { commandType: 'domain-email-revoke', entityId: revocationId, receiptId: revocationId, actorDigest: hash, commandAt: at, domainId, address }, sql, values);
+      if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new IdentityDenied();
+    } else await this.write(sql, values);
   }
 }

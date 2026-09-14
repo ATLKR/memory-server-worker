@@ -1,4 +1,5 @@
 import { sqlNow } from './sql-clock.ts';
+import type { SeoulProjectionCapture } from './release/seoul-projection-capture.ts';
 import { digestToken } from './identity.ts';
 import type { IdentityDatabase, SqlValue } from './identity.ts';
 import type { ToolAuthority } from './mcp-auth.ts';
@@ -102,7 +103,10 @@ function checked<T>(row: T & ExpiryFacts, at: number): T {
 export class MemoryService {
   readonly db: IdentityDatabase;
   readonly clock: () => number;
-  constructor(db: IdentityDatabase, clock: () => number = Date.now) {
+  private readonly capture?: SeoulProjectionCapture;
+  constructor(db: IdentityDatabase, clock: () => number = Date.now, capture?: SeoulProjectionCapture) {
+    capture?.assertDatabase(db);
+    this.capture = capture;
     this.db = db;
     this.clock = clock;
   }
@@ -146,15 +150,22 @@ export class MemoryService {
     const at = this.now();
     const id = crypto.randomUUID();
     const organizationId = input.organizationId ?? null;
-    const inserted = await this.write(`
+    const sql = `
       INSERT INTO spaces(id,name,account_id,organization_id,security_mode,created_at,actor_credential_id)
       SELECT ?,?,s.account_id,s.organization_id,s.security_mode,?,c.id
       FROM active_credentials c CROSS JOIN (
         SELECT CASE WHEN ? IS NULL THEN account_id ELSE NULL END AS account_id,
           ? AS organization_id,'managed' AS security_mode
         FROM active_credentials WHERE token_digest=?
-      ) s WHERE ${authority(true)} AND c.kind='session' AND c.id NOT LIKE 'oauth:%'`,
-      [id, input.name, at, organizationId, organizationId, hash, hash, at, at, at]);
+      ) s WHERE ${authority(true)} AND c.kind='session' AND c.id NOT LIKE 'oauth:%'`;
+    const values = [id, input.name, at, organizationId, organizationId, hash, hash, at, at, at];
+    let inserted: boolean;
+    if (this.capture) {
+      const result = await this.capture.ordinaryCommand(this.db, { commandType: 'space-create', entityId: id, receiptId: null, actorDigest: hash, commandAt: at, organizationId }, sql, values);
+      const changes = result.meta.changes;
+      if (!result.success || typeof changes !== 'number' || !Number.isSafeInteger(changes) || changes < 0) throw new MemoryDenied();
+      inserted = changes > 0;
+    } else inserted = await this.write(sql, values);
     if (!inserted) throw new MemoryDenied();
     const fresh = this.now();
     const row = await this.db.withSession('first-primary').prepare(`

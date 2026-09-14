@@ -485,7 +485,7 @@ export class Admin {
     async scimDeactivate(token: string, org: string, membershipId: string): Promise<ScimUser> {
         await this.scimAuthority(token, org);
         const hash = await tokenHash(token), at = this.clock();
-        const result = await this.db.prepare(`UPDATE memberships SET revoked_at=? WHERE id=? AND organization_id=? AND revoked_at IS NULL
+        const sql = `UPDATE memberships SET revoked_at=? WHERE id=? AND organization_id=? AND revoked_at IS NULL
             AND ${scimVisible('memberships')}
             AND EXISTS(SELECT 1 FROM release_scim_keys k JOIN credentials issuer ON issuer.id=k.creator_credential_id
                 JOIN active_memberships admin ON admin.id=k.creator_membership_id AND admin.account_id=issuer.account_id
@@ -495,8 +495,11 @@ export class Admin {
                     AND (memberships.role<>'owner' OR (admin.role='owner' AND EXISTS(
                         SELECT 1 FROM active_memberships other WHERE other.organization_id=memberships.organization_id
                             AND other.role='owner' AND other.expires_at>${sqlNow()} AND other.id<>memberships.id))))
-            RETURNING id,(SELECT address FROM account_emails WHERE id=memberships.email_id) AS userName,0 AS active`)
-            .bind(at, id(membershipId), id(org), hash, at, at, at).first<ScimUser>();
+            RETURNING id,(SELECT address FROM account_emails WHERE id=memberships.email_id) AS userName,0 AS active`;
+        const values = [at, id(membershipId), id(org), hash, at, at, at];
+        const result = this.capture
+            ? ((await this.capture.ordinaryCommand(this.db, { commandType: 'scim-deactivate', entityId: membershipId, receiptId: null, actorDigest: hash, commandAt: at, organizationId: org }, sql, values)).results[0] as ScimUser | undefined) ?? null
+            : await this.db.prepare(sql).bind(...values).first<ScimUser>();
         if (result) return result;
         {
             // A repeated deactivation of the same already-revoked member is
@@ -522,11 +525,13 @@ export class Admin {
         const at = this.clock();
         // The tombstone trigger rechecks the exact key, current administrator and
         // owner rule, then revokes the membership in this same transaction.
-        await batch(this.db, [stmt(this.db, `INSERT INTO release_scim_deletions(membership_id,scim_key_id,deleted_at)
+        const sql = `INSERT INTO release_scim_deletions(membership_id,scim_key_id,deleted_at)
             SELECT target.id,k.id,? FROM memberships target JOIN release_scim_keys k ON k.organization_id=target.organization_id
             WHERE target.id=? AND target.organization_id=? AND k.token_digest=?
-              AND ${scimVisible('target')}`,
-            [at, membershipId, org, hash])]);
+              AND ${scimVisible('target')}`;
+        const values = [at, membershipId, org, hash];
+        const command = stmt(this.db, sql, values);
+        await batch(this.db, this.capture ? this.capture.ordinaryStatements(this.db, { commandType: 'scim-delete', entityId: membershipId, receiptId: null, actorDigest: hash, commandAt: at, organizationId: org }, command) : [command]);
         if (!await one(this.db, 'SELECT membership_id FROM release_scim_deletions WHERE membership_id=?', [membershipId]))
             fail(403, 'membership_deletion_denied');
     }

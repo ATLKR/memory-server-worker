@@ -9,6 +9,12 @@ import {createDurableDatabase} from '../../src/durable-sql/client.ts';
 import {SqlDatabaseEngine} from '../../src/durable-sql/engine.ts';
 
 const issuer='https://auth-api.allen.company';
+for(const recursive of ['ON','OFF'])for(const command of ['invite','member','issue','revoke'])test('captured dirty revision survives later Workspace '+command+'; '+recursive,async t=>{
+ const f=await setup(t,recursive);api(f,'api:after-capture');const invite=command==='invite'?await invitation(f):null,space=command==='issue'?'s1':'so',prior=f.raw.prepare('SELECT max(revision) n FROM release_seoul_authority_changes').get().n;
+ f.raw.prepare('INSERT INTO release_seoul_dirty_spaces(space_id,dirty_revision,captured_revision) VALUES(?,?,?)').run(space,prior,prior);
+ if(command==='invite')await f.workspace.acceptInvite(f.other,invite.token);else if(command==='member')await f.workspace.revokeMembership(f.token,'org','m2');else if(command==='issue')await f.workspace.issueKey(f.token,{label:'After capture',permission:'read',expiresInDays:1});else await f.workspace.revokeKey(f.token,'api:after-capture');
+ const actual=f.raw.prepare('SELECT * FROM release_seoul_dirty_spaces WHERE space_id=?').get(space),latest=Math.max(...sources(f).map(r=>r.revision));assert.ok(latest>prior);assert.equal(actual.dirty_revision,latest);assert.equal(actual.captured_revision,prior);clean(f);
+});
 const rows=(f,table)=>f.raw.prepare('SELECT * FROM '+table+' ORDER BY rowid').all();
 const sources=f=>rows(f,'release_seoul_authority_changes').filter(r=>r.source_command_id!=='setup-target');
 const bodies=f=>sources(f).map(r=>parseSeoulAuthoritySourceRow(r).body);

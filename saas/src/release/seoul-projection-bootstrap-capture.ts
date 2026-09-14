@@ -141,8 +141,8 @@ export function bootstrapStatements(database:Database, scope:BootstrapScope, com
     AND k.after_bytes IS NOT NULL AND k.before_bytes IS NOT k.after_bytes AND (k.stream_kind<>'email' OR a.email_created=1) AND (k.stream_kind<>'space' OR a.space_created=1)
    ORDER BY k.stream_kind COLLATE BINARY,k.subject_sort_key COLLATE BINARY,k.stream_key COLLATE BINARY`);
   add(`INSERT INTO release_seoul_bootstrap_spaces(attempt_id,space_id,dependency) SELECT id,space_id,'new' FROM release_seoul_bootstrap_attempts WHERE id=? AND accepted=1 AND exclusion_reason IS NULL AND space_created=1`);
-  add(`INSERT INTO release_seoul_dirty_spaces(space_id,dirty_revision)
-   SELECT DISTINCT s.space_id,(SELECT max(revision) FROM release_seoul_authority_changes WHERE source_command_id=a.id) FROM release_seoul_bootstrap_spaces s JOIN release_seoul_bootstrap_attempts a ON a.id=s.attempt_id
+  add(`INSERT INTO release_seoul_dirty_spaces(space_id,dirty_revision,captured_revision)
+   SELECT DISTINCT s.space_id,(SELECT max(revision) FROM release_seoul_authority_changes WHERE source_command_id=a.id),coalesce((SELECT d.captured_revision FROM release_seoul_dirty_spaces d WHERE d.space_id=s.space_id),0) FROM release_seoul_bootstrap_spaces s JOIN release_seoul_bootstrap_attempts a ON a.id=s.attempt_id
    WHERE a.id=? AND a.exclusion_reason IS NULL AND EXISTS(SELECT 1 FROM release_seoul_authority_changes WHERE source_command_id=a.id)
     AND (s.dependency='new' OR (s.dependency='mapping' AND a.mapping_created=1) OR (s.dependency='claim' AND a.email_created=1))
    ON CONFLICT(space_id) DO UPDATE SET dirty_revision=max(release_seoul_dirty_spaces.dirty_revision,excluded.dirty_revision)`);
