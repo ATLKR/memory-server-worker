@@ -87,7 +87,7 @@ CREATE TRIGGER target_manifest_pages_occupied BEFORE INSERT ON release_seoul_tar
 CREATE TRIGGER target_manifest_pages_immutable BEFORE UPDATE ON release_seoul_target_manifest_pages BEGIN SELECT RAISE(ABORT,'manifest durable row immutable'); END;
 CREATE TRIGGER target_manifest_pages_retained BEFORE DELETE ON release_seoul_target_manifest_pages BEGIN SELECT RAISE(ABORT,'manifest durable row retained'); END;
 
-CREATE TRIGGER target_manifest_steps_occupied BEFORE INSERT ON release_seoul_target_manifest_steps WHEN EXISTS(SELECT 1 FROM release_seoul_target_manifest_steps WHERE generation=NEW.generation AND space_id=NEW.space_id OR command_id=NEW.command_id) BEGIN SELECT RAISE(ABORT,'manifest durable identity occupied'); END;
+CREATE TRIGGER target_manifest_steps_occupied BEFORE INSERT ON release_seoul_target_manifest_steps WHEN EXISTS(SELECT 1 FROM release_seoul_target_manifest_steps WHERE (generation=NEW.generation AND space_id=NEW.space_id) OR command_id=NEW.command_id) BEGIN SELECT RAISE(ABORT,'manifest durable identity occupied'); END;
 CREATE TRIGGER target_manifest_steps_immutable BEFORE UPDATE ON release_seoul_target_manifest_steps BEGIN SELECT RAISE(ABORT,'manifest durable row immutable'); END;
 CREATE TRIGGER target_manifest_steps_retained BEFORE DELETE ON release_seoul_target_manifest_steps BEGIN SELECT RAISE(ABORT,'manifest durable row retained'); END;
 
