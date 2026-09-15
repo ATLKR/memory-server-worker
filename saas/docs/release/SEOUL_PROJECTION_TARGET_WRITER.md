@@ -2,7 +2,7 @@
 
 `createSeoulProjectionTargetWriter(database, adapter)` creates one trusted same-database primitive. It has no runtime factory, public route, operator authentication, selected Space list or background execution. The adapter is the fixed `native-d1` / `durable-sql` caller assertion used by the other inactive projection modules. It is not a cryptographic provenance or authorization proof.
 
-Apply the complete forward migration chain through `0034_seoul-projection-target-schema.sql` before using this writer or the updated preparer. The new schema preserves every historical source/generated migration. It adds the target-operation witness, immutable target-command receipts, receipt indexes and a separate target preparation witness. Projection state remains `backfill-required`.
+Apply the complete forward migration chain through `0035_seoul-projection-target-manifest-schema.sql` before using this updated writer. Its current-manifest observation has no missing-table fallback. The preparer retains its existing 0034 contract. The new schema preserves every historical source/generated migration. It adds the target-operation witness, immutable target-command receipts, receipt indexes and a separate target preparation witness. Projection state remains `backfill-required`.
 
 ## Command and receipt
 
@@ -22,11 +22,11 @@ Historical command proof uses indexed immutable source/receipt joins and exact c
 
 Planning a fresh current mutation separately owns and hashes the complete current source. A non-null head digest must match that actual computed source digest and the exact prepared source, transport digest/text, event metadata and delivery. A NULL-to-exact prepared finalization during the read/batch interval is permitted; unchanged leaves it intact, while changed creates a higher pending head. The writer never supplies a SQL digest or clears permanent identity negatives.
 
-Retained target-operation staging has precedence over every historical replay. A coherent first-primary observation returns `staging_retained` without writes if any operation row remains. There is no automatic stage cleanup. The two preparation tables have their own both-direction retained-stage rule.
+Retained manifest or target-operation staging has precedence over every historical replay. A coherent first-primary observation returns `staging_retained` without writes if any operation row remains. There is no automatic stage cleanup. The two preparation tables have their own both-direction retained-stage rule.
 
 ## One atomic attempt
 
-The writer performs no durable write outside one ten-statement batch. Other writers may run between first-primary reads and that batch. The batch uses an unconditional fresh witness, records actual decision-time receipt/target/head/source/dirty observations, and compares its owned prior tuple inside the transaction. Eligibility is a column; an ineligible operation cannot reuse a retained witness.
+Before the first manifest publication, direct setTarget performs no durable write outside one ten-statement batch. Other writers may run between first-primary reads and that batch. The batch uses an unconditional fresh witness, records actual decision-time receipt/target/head/source/dirty observations, and compares its owned prior tuple inside the transaction. Eligibility is a column; an ineligible operation cannot reuse a retained witness.
 
 The fixed sequence is witness insertion, changed source insertion, accepted receipt insertion, initial-target INSERT, existing-target CAS UPDATE, changed dirty INSERT/UPDATE, consumed completion SELECT, bounded result SELECT, own-token cleanup, and consumed no-leftover SELECT. Separate target INSERT and UPDATE make absence and present-state CAS explicit. Source revision is obtained only through the exact inserted source identity.
 
@@ -36,7 +36,7 @@ Both final assertions are SELECT scalars consumed before the actual Durable engi
 
 ## Results and unknown acknowledgements
 
-Results are `committed` / `already_committed` with the exact nine-field receipt, or a fixed no-payload `invalid_command`, `command_conflict`, `target_missing`, `target_state_invalid`, `stale_revision`, `staging_retained`, `request_limit`, or `uncertain` status. No SQL error, source body, operator authentication claim or regional readiness result is returned.
+Direct results before manifest control are `committed` / `already_committed` with the exact nine-field receipt, or a fixed no-payload `invalid_command`, `command_conflict`, `target_missing`, `target_state_invalid`, `stale_revision`, `staging_retained`, `request_limit`, or `uncertain` status. No SQL error, source body, operator authentication claim or regional readiness result is returned.
 
 After a thrown batch or malformed response, make exactly one fresh first-primary historical observation. Only a complete matching receipt proof with no operation residue returns `already_committed`; absence, residue, contradiction or read failure returns `uncertain`. Never repeat a mutation, regenerate IDs, infer rollback from a missing receipt, or borrow the preparer's `preparation_absent` semantics. A future operator transport must resolve an earlier potentially running uncertain invocation before another intentional mutation.
 
@@ -50,4 +50,12 @@ The writer uses at most 100 statements, 100 values per statement, 100,000 SQL by
 
 Local tests cover actual Durable and D1-shaped execution, recursion ON/OFF, schema preservation, strict ownership, CAS/replay/lineage, digest finalization, skipped writes and rollback, unknown ACK, indexed bounds, and persisted source/preparer/HMAC/actual PostgreSQL head receipt composition. These tests do not constitute a live-provider deployment or physical COMMIT-time deadline guarantee.
 
-Complete finite-manifest identity/digest, additions and omitted-ID removals, obsolete-manifest exclusion, partial progress/recovery and exact runtime configuration agreement remain separate mandatory work. This primitive selects no operational target and does not complete backfill, positive snapshot materialization/admission, cost acceptance or GA.
+## Manifest-controlled application through0035
+
+The [inactive finite manifest coordinator](SEOUL_PROJECTION_TARGET_MANIFEST.md) now supplies immutable full-set identity, exact desired/actual-omitted inventory, current-generation exclusion, paged verification and configuration agreement. Once a manifest is current, a fresh direct setTarget returns manifest_controlled; an exact old receipt returns historical_commit with independently observed control metadata. The SQL guards also fence a preflight already loaded by an old ten-statement caller.
+
+setManifestStep owns exactly manifestId, generation and spaceId, then reads that generation's exact stored five-field command. One manifest witness wraps the original ten statements, its own cleanup and a final consumed exact-current assertion, for thirteen statements. Every intermediate result is checked; both old and new staging must be empty before commit. A late supersession or cancellation may abort the unconditional old target stage. Exactly one fresh historical proof read follows; absent/invalid proof stays uncertain without mutation retry. Historical receipt proof does not establish current readiness.
+
+The private fixed helper owns current and historical proofs for both APIs and manifest page verification. SQL narrows source/prepared proof strings to4096 bytes and receipts to2048 before page aggregation. Each current digest is canonical64-byte text or NULL with an explicit invalid-current marker; ordinary SQLite TEXT checks alone can admit NUL suffixes. Malformed newer metadata cannot suppress valid unrelated historical receipt recovery. Current mutation and completion separately reject malformed metadata even beneath a pending head. The closed target grammar itself has maximum587-byte record,988-byte source-row JSON and740-byte transport representation.
+
+The complete manifest contract and its tests remain inactive. This primitive selects no operational target and does not complete backfill, positive snapshot materialization/admission, routing/configuration adoption, cost acceptance or GA.
