@@ -21,6 +21,7 @@ sources.push('seoul-projection-command-schema.sql');
 sources.push('seoul-projection-provider-v1-schema.sql');
 sources.push('seoul-projection-target-schema.sql');
 sources.push('seoul-projection-target-manifest-schema.sql');
+sources.push('seoul-projection-publication-schema.sql');
 const out = new URL('../migrations/', import.meta.url);
 await mkdir(out, { recursive: true });
 for (const [index, source] of sources.entries()) {
