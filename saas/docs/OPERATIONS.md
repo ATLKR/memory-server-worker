@@ -9,20 +9,27 @@ documents as the source of truth for release behavior.
 ## Current source and environments
 
 The candidate is **0.5.0-rc.1, central schema 25 and HOT schema 1**. Production
-remains rc.3 with central migrations 1–7. Staging at
-`https://memory-staging.allenlabs.org` runs the earlier `1a93820` revision with
-central migrations 1–23 and HOT 1; 24–25 are not deployed. All remaining migrations
-are mandatory before the current Worker is deployed. Historical rc.4 test counts
-do not describe this candidate.
+at the 2026-09-10 15:20 UTC checkpoint serves rc.3 with central migrations 1–25
+and both HOT schemas 1; the new Worker rollout is pending. Staging at
+`https://memory-staging.allenlabs.org` has central migrations 1–25 and HOT 1,
+with a one-minute cron. See the [dated rollout record](release/INTEGRATION.md#migration-record--2026-09-10-1520-utc)
+for the observed runtime revision. Apply only migrations missing from the verified
+target ledger before deploying compatible code. Historical rc.4 test counts do
+not describe this candidate.
 
 The selected GA is invite-only and metered, including AI retrieval and reviewed
 extraction, with paid billing disabled. Earlier staging live evidence covers SSO,
 scoped PATs, the official MCP SDK, AI, ten-level independent organization ACLs,
-CRUD/restore/erasure and metering. Mail receiver deployment/proof consumption,
-central lifecycle rollout and final-revision acceptance remain pending. Current
-Authentication35 finished with zero actionable findings; Storage36 reported
-three findings now assigned for correction. Affected domains will be reviewed
-again after fixes, and a fresh console review follows these corrections.
+CRUD/restore/erasure and metering. Final staging source `f1cb578` passed 16 fresh
+core/console checks, three physical-storage checks and a bounded 48-request read
+sample. Two reviewed-ingestion checks are explicitly inherited from `2741623`
+after verifying the CSP-only difference. Actual mail receipt, same-session proof
+consumption and wrong-session/replay rejection passed; separate teardown evidence
+confirmed the temporary resources absent. The central publisher is active for
+staging and a synthetic live run verified six ordered events; production
+activation and final-source human SSO remain pending. Review findings and fixes apply to their recorded
+source and scope; see the [review loop](release/REVIEW_LOOP.md) for subsequent
+corrections and reviews. Complete GA acceptance remains pending.
 
 ## Maintenance and diagnosis
 
@@ -33,8 +40,8 @@ past-day mail budgets. Consumed DNS proofs and immutable verification receipts
 are retained.
 Expiry is checked by request authorization independently of the sweep, so a
 backlog does not extend a credential or challenge lifetime. Immutable identity
-and audit records are retained. Migrations 1–7 are applied in the recorded
-production environment and byte-frozen. This PR additionally requires forward
+and audit records are retained. Applied migrations remain byte-frozen. The
+candidate requires forward
 migrations `0008_checkout-schema.sql`, `0009_job-progress-schema.sql`,
 `0010_protocol-schema.sql`, `0011_pagination-schema.sql`,
 `0012_lookup-schema.sql`, `0013_key-lookup-schema.sql`,
@@ -44,10 +51,10 @@ migrations `0008_checkout-schema.sql`, `0009_job-progress-schema.sql`,
 `0020_domain-verification-schema.sql`, `0021_domain-retention-schema.sql`,
 `0022_payload-schema.sql`, `0023_operational-schema.sql`,
 `0024_lifecycle-schema.sql` and `0025_queue-episode-schema.sql`.
-None of migrations 8–25 has been applied to production. New environments apply
+Production migrations 8–25 were confirmed at the dated 15:20 UTC checkpoint. New environments apply
 central migrations 1–25 and `shard-migrations/0001_payloads.sql` to every HOT DB.
-Readiness requires central 25/HOT 1. The final full validation is to be rerun;
-the [integration record](release/INTEGRATION.md) scopes earlier native/local
+Readiness requires central 25/HOT 1. The
+[integration record](release/INTEGRATION.md) scopes final-source and earlier native/local
 evidence and remaining live acceptance.
 
 Migration 22 adds immutable payload pointers, logical byte accounting, durable
@@ -393,11 +400,11 @@ central DB migrations. `deploy` requires a clean source and runs check/preflight
 it does not apply migrations or run native/live acceptance. Stop on any failure
 and inspect which databases and versions were applied before retrying.
 
-Production has only migrations 1–7 applied; staging has 1–23. Current source requires all central migrations through 25 and HOT 1. `migrations:check` verifies their frozen SHA-256 hashes, and `.gitattributes` pins SQL files to LF. To add a forward migration, register its source in `scripts/migrations.mjs`; `migrations:sync` can create the missing new file but refuses to rewrite an existing migration. Never edit an applied file to change production schema. Apply a required migration before deploying code that queries its new tables. Never roll back to a writer that ignores release capability policies. Revoke temporary maintenance tokens after use and verify cleanup.
+At the 15:20 UTC checkpoint, production and staging both have central migrations 1–25 and HOT 1; production Worker rollout remains pending. Confirm the target ledger and [dated deployment record](release/INTEGRATION.md#migration-record--2026-09-10-1520-utc) before a subsequent rollout. Current source requires all central migrations through 25 and HOT 1. `migrations:check` verifies their frozen SHA-256 hashes, and `.gitattributes` pins SQL files to LF. To add a forward migration, register its source in `scripts/migrations.mjs`; `migrations:sync` can create the missing new file but refuses to rewrite an existing migration. Never edit an applied file to change production schema. Apply a required migration before deploying code that queries its new tables. Never roll back to a writer that ignores release capability policies. Revoke temporary maintenance tokens after use and verify cleanup.
 
 Real-account sign-in passed after the Workers redirect fix, including approval, callback and authenticated Space loading. No security protections were disabled. If login fails again, collect only the fixed failure stage and time, never real callback codes.
 
-For each rollout record the deployment version, migration state, test time and observed results. Validate public liveness, authentication/discovery and affected authenticated workflows. Earlier staging has live PAT/official SDK, AI and organizational workflow evidence. Actual mail proof, central lifecycle rollout, load/recovery and final-revision acceptance remain separate gates. Do not infer those outcomes from consent, local tests or liveness alone.
+For each rollout record the deployment version, migration state, test time and observed results. Validate public liveness, authentication/discovery and affected authenticated workflows. Final staging has bounded protocol, mail-proof, physical-storage and load evidence, with explicitly inherited ingestion checks; the central publisher has actual staging delivery evidence. Production rollout/delivery, human SSO, capacity, cost/alert response and isolated recovery still require their own confirmation. Do not infer those outcomes from consent, local tests or liveness alone.
 
 ## Daily operation and security
 
@@ -466,13 +473,18 @@ Invite enrollment and provider reservations are separate from user quotas.
 Production AI reservation cap is $20/month and staging $0.20/month. Memory's
 overall $50/month Cloudflare target needs separate actual billing, capacity and
 alert response; this AI cap cannot enforce every infrastructure charge. Paid
-billing stays excluded. Mail proof, lifecycle live rollout, load, alerts and
-isolated provider recovery remain acceptance work.
+billing stays excluded. Bounded staging mail, lifecycle and load evidence is
+recorded; sustained capacity, complete costs, alert response and isolated provider
+recovery remain acceptance work.
 
 The public/private lifecycle implementation and native two-Worker test cover
 9 immutable events and 11 delivery attempts, including false/lost acknowledgments
-and resume. The central publisher is not deployed. Its eventual-delivery target
-is under two minutes and must be measured with oldest pending age. Account
+and resume. The central publisher now runs private source `5590836`, version
+`bbb66ddb-73bb-4cd2-8fe4-297f44627791`, migration 0010 and a one-minute schedule,
+with staging as its configured destination at the recorded checkpoint. Its
+synthetic live run includes six ordered events and delayed/retried delivery;
+production delivery is pending. Its under-two-minute eventual-delivery target
+still requires ongoing oldest-pending-age monitoring. Account
 suspension revokes old authority; resume requires fresh SSO and does not restore
 old credentials or organization memberships. Exact-email re-verification permits
 a new verified claim, not old ACL revival. Verified signed lifecycle heads apply

@@ -1,12 +1,15 @@
 # Memory by Allen Labs — hosted pilot
 
-**0.4.0-rc.3** is deployed at [memory.allenlabs.org](https://memory.allenlabs.org).
+At the **2026-09-10 15:20 UTC** checkpoint, **0.4.0-rc.3** is deployed at [memory.allenlabs.org](https://memory.allenlabs.org).
 The PR source is **0.5.0-rc.1**, requiring central migrations **1–25** and HOT
-schema **1**. Staging currently runs the earlier schema-23 candidate; production
-still has migrations 1–7. Apply all remaining migrations before deploying the
-current source. These environments are pilots, not completed GA releases.
+schema **1**. Staging has central migrations 1–25 and HOT schema 1; production
+now has central migrations 1–25 and both HOT schemas 1; the new Worker rollout is pending.
+Apply only the migrations missing from the verified
+target ledger before deploying compatible code. These environments are pilots,
+not completed GA releases. Deployed revisions and observation times are recorded
+in the [dated rollout record](docs/release/INTEGRATION.md#migration-record--2026-09-10-1520-utc).
 Verification and remaining acceptance gates are scoped in the integration record.
-Real-account SSO now reaches the authenticated management console. See the
+The earlier rc.3 real-account SSO acceptance reached the authenticated management console. See the
 [rc.3 corrections](docs/release/RC3_FIXES.md) for account-switching, retry,
 revocation and SCIM fixes. The maintained
 [release integration record](docs/release/INTEGRATION.md) records the current
@@ -27,7 +30,8 @@ MCP clients/plugins can connect with PAT or central Better Auth SSO; see
 [connection instructions](docs/CONNECTING.md). Email proofs use native Cloudflare
 Email Service. Actual staging AI extraction/hybrid search, scoped PATs and the
 official MCP client have passed bounded live probes. Native identity lifecycle
-delivery is implemented; its central publisher still needs live rollout.
+delivery is deployed from private source `5590836` to staging; a synthetic live
+run verified six ordered events. Production activation is pending.
 The selected GA is invite-only and metered, with paid billing disabled. A
 one-minute cron performs bounded maintenance and enabled provider jobs in
 staging. `AUTO_ERASURE_ENABLED=false` preserves retained memories.
@@ -57,13 +61,16 @@ The `saas/` module provides a Korean browser console, central sign-in, personal/
 
 Product origin: [memory.allenlabs.org](https://memory.allenlabs.org). Central authentication intentionally remains at [auth.allen.company](https://auth.allen.company), with OAuth issuer/API [auth-api.allen.company](https://auth-api.allen.company).
 
-The dedicated D1 database is `a186c3b4-9092-4619-97b0-cda5b99d9b5d`, with migrations 1–7 applied. The central SSO origin/resource allowlists are configured on the existing authentication platform. Operational credentials are restricted to the approved personal Cloudflare account. Never copy credentials into this repository or logs.
+The dedicated D1 database is `a186c3b4-9092-4619-97b0-cda5b99d9b5d`, with central migrations 1–25 applied at the dated 15:20 UTC checkpoint. The central SSO origin/resource allowlists are configured on the existing authentication platform. Operational credentials are restricted to the approved personal Cloudflare account. Never copy credentials into this repository or logs.
 
 Real-account SSO was verified on 2026-09-09 after the rc.2 fix: approval returned
 to Memory and loaded the authenticated personal Space and verified email. Earlier
 controlled-browser failures are superseded by this result. No browser or provider
-security protection was disabled. Live email receipt and PAT issuance after email
-proof remain to be verified.
+security protection was disabled. Actual email receipt and proof consumption
+later passed on staging revision `1a93820`. On final staging source `f1cb578`,
+actual mail receipt, same-session proof consumption, wrong-session rejection and
+replay rejection passed; separately recorded cleanup confirmed all temporary
+mail resources removed. These synthetic checks do not prove human SSO on that source.
 
 ## Run and verify
 
@@ -108,7 +115,7 @@ REST accepts browser session cookies or authorized Bearer credentials. JSON writ
 | Method | Path | Purpose |
 | --- | --- | --- |
 | GET | `/`, `/manage`, `/assets/*` | Editor, management console and local assets; strict CSP |
-| GET | `/health` | Version/liveness only, not database or SSO readiness |
+| GET | `/health` | Version/liveness and compiled source/config identity, not database or SSO readiness |
 | GET | `/auth/login`, `/auth/callback` | Central sign-in and one-use callback |
 | POST | `/auth/logout` | Revoke browser session and redirect |
 | GET | `/.well-known/oauth-protected-resource` | Resource/audience metadata; `/mcp` suffix also supported |
@@ -138,7 +145,7 @@ Standard stores service-readable plaintext. `zero_access` is rejected; no simula
 
 Conditional SQL writes enforce live permissions and preserve prior versions plus identifier-only audit atomically. Normal deletion is a tombstone: normal reads/search hide the record, but content/history remain. A separate recently reauthenticated erasure removes the memory payload and prior versions; identifier/audit records and backups are outside that operation. Automatic retention erasure remains disabled in the deployed pilot. Post-write reads check authority again; a write may commit before a concurrent revocation prevents its response.
 
-The production `DB` binding targets the dedicated `allenlabs-memory-production` database, separate from the legacy personal database. Production has migrations 1–7; staging has 1–23 and HOT schema 1. The current source requires every central migration through `0025_queue-episode-schema.sql`, plus `shard-migrations/0001_payloads.sql` on each HOT DB. Use the [deployment procedure](docs/release/DEPLOYMENT.ko.md) and the explicit environment config. `db:remote` applies HOT migrations before central migrations; deployment does not migrate automatically. Applied migrations remain immutable, and Git attributes pin SQL files to LF. Future schema changes require forward migrations before compatible code deployment.
+The production `DB` binding targets the dedicated `allenlabs-memory-production` database, separate from the legacy personal database. At the dated 15:20 UTC checkpoint, production and staging both have central migrations 1–25 and HOT schema 1; production Worker rollout is pending. The current source requires every central migration through `0025_queue-episode-schema.sql`, plus `shard-migrations/0001_payloads.sql` on each HOT DB. Use the [deployment procedure](docs/release/DEPLOYMENT.ko.md) and the explicit environment config. `db:remote` applies HOT migrations before central migrations; deployment does not migrate automatically. Applied migrations remain immutable, and Git attributes pin SQL files to LF. Future schema changes require forward migrations before compatible code deployment.
 
 With `STORAGE_MODE=sharded`, central D1 retains authority, current revision pointers,
 receipts and metering. Private R2 stores canonical payloads; separate HOT D1 databases
@@ -180,6 +187,6 @@ Brand text is escaped and control characters are rejected. Keep `SERVICE_ID`, is
 
 ## Following milestones
 
-Remaining GA work includes actual email receipt/consumption, central lifecycle rollout, measured load and costs, operational alert response, and an isolated provider recovery drill. Physical D1 sharding and private R2 payloads are implemented and exercised on staging. Every D1 still has its own size limit, including the central metadata DB. Scoped PATs, official MCP client calls, AI retrieval/extraction, ten-level organization isolation, metering, sharing, export and memory deletion/restoration have live staging evidence; they must be checked against the final release revision. Complete account-deletion and backup-erasure operations still require a documented, verified process. Zero-Access is outside this release. Paid billing is excluded from the selected invite-only GA. See the [15 acceptance gates](docs/release/GA_ACCEPTANCE.md).
+Remaining GA work includes final-source human SSO, production rollout and identity activation, complete cost coverage, operational alert response and policy acceptance, and an isolated provider recovery drill. Final staging source `f1cb578` has 16 fresh core/console checks, three physical-storage checks and a bounded 48-request read sample; two reviewed-ingestion checks are explicitly inherited from the verified CSP-only predecessor `2741623`, not fresh AI calls. Actual mail proof and its separate teardown are confirmed. Physical D1 sharding and private R2 payloads are implemented and exercised on staging. Every D1 still has its own size limit, including the central metadata DB. These bounded results do not establish sustained capacity or complete GA acceptance. Complete account-deletion and backup-erasure operations still require a documented, verified process. Zero-Access is outside this release. Paid billing is excluded from the selected invite-only GA. See the [15 acceptance gates](docs/release/GA_ACCEPTANCE.md).
 
 See the [product design](../docs/superpowers/specs/2026-09-08-productization-design.md), [implementation plan](../docs/superpowers/plans/2026-09-08-productization.md), [operations runbook](docs/OPERATIONS.md), and [verification record](docs/VERIFICATION.md).

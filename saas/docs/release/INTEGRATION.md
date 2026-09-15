@@ -1,6 +1,111 @@
 # Current candidate: 0.5.0-rc.1
 
-## Source and deployment checkpoint — 2026-09-10
+## Migration record — 2026-09-10 15:20 UTC
+
+Production central schema 25 and both HOT schemas 1 were confirmed at
+15:20:12.568 UTC. HOT02 convergence was confirmed at 15:18:37.785 UTC; its
+original uncertain operation remains intact, and the new receipt explicitly
+records a supplemental attempt with unknown original-versus-supplemental
+attribution. The exact schemas and unchanged unrelated resources were observed
+before continuing central migrations.
+
+The active production Worker at this checkpoint remains
+`4454c391-5587-4835-a15c-c73926644724` (0.4.0-rc.3). The new Worker rollout and
+production identity-publisher activation are still pending. Migration success
+alone does not establish deployed code, runtime guards or live acceptance.
+
+## Rollout checkpoint — 2026-09-10 15:18 UTC
+
+The staging and issuer evidence in the 15:07 record below is confirmed. At this
+checkpoint, production still serves Worker version
+`4454c391-5587-4835-a15c-c73926644724` (0.4.0-rc.3), with central migrations 1–7.
+HOT01 migration 0001 is confirmed. HOT02 has an unresolved original attempt;
+a separately journaled, guarded convergence attempt is in progress. An unchanged
+read-only observation does not prove the original request was never dispatched.
+Neither the new production Worker nor production identity delivery is confirmed.
+Later receipts must establish the resulting schema, exact Worker source/version,
+permanent guards, schedule and actual protocol checks before this status changes.
+
+The default support contact remains `allenlim@allenlabs.org`; routing a different
+support address is separate from the temporary synthetic mailbox test. Human
+browser SSO on the final source, complete cost coverage, alert-response and
+operational-policy acceptance remain open. This checkpoint grants no GA approval.
+
+## Validation record — 2026-09-10 15:07 UTC
+
+Staging remains source `f1cb578642e79059731f9249ecdec261e53e8e64`,
+Worker version `7efa79bf-9fb4-4e67-9c0a-f6ef6ba9a28b`, central schema 25
+and both HOT schemas 1. Its fresh bounded acceptance run completed 14 core
+checks plus two actual console CSP/asset checks, three physical-storage checks
+and 48 authenticated read requests with zero errors (p95 774 ms, max 1,261 ms).
+The two reviewed-ingestion checks are explicitly inherited from `2741623`;
+the exact two-file CSP-only difference was checked. They are not new AI calls
+on `f1cb578`. The additional provider reservation was $0.0024.
+
+The actual central identity publisher now runs private source
+`55908368f5191881f6b0c0125ef5af63fcdbf971`, Worker version
+`bbb66ddb-73bb-4cd2-8fe4-297f44627791`, with migration 0010 and a one-minute
+schedule. Its configured destination at this checkpoint is staging. A fresh
+synthetic live run `42ec5d080186254b07f8523e` covered signed JWT/JWKS admission, the real OAuth consent
+and callback protocol, six ordered identity events, delayed/retried delivery,
+revocation/resume and terminal cleanup. Both synthetic subjects and their
+authority were removed. This proves the issuer protocol, not a human browser
+sign-in. Native final-source tests separately recorded nine events and eleven
+deliveries across two Worker/D1 instances.
+
+The synthetic mail run `d9ad0b006010bb5e6004d42a3ad0cd3c` received an actual
+email for the final staging revision and consumed its proof using
+the session that requested it. Another session and a repeated consumption
+both returned 403. The first cleanup observation was incomplete; a separate
+read-only reconciliation and bounded cleanup subsequently confirmed the exact
+temporary receiver, route, encrypted receipt and private bucket absent, the
+fixture authority disabled, and all temporary API tokens revoked. The private
+composite proof retains the original incomplete result and hashes the later
+cleanup evidence instead of rewriting the first result. The composite is
+`independent-proof-and-teardown.json`: proof checks and final teardown passed,
+the original completion remains false, and `realHumanSso` remains false. A previous attempt
+failed with `routing_unknown_address` and remains recorded as a failure.
+
+Production rollout, isolated recovery, operational alert response and complete
+cost/policy acceptance remain separate work. No GA approval is claimed by
+these synthetic checks. Later deployment records must identify their actual
+versions and confirmation times.
+
+## Deployment record — 2026-09-10 14:09 UTC
+
+This dated record identifies the observed runtime. A later documentation commit
+does not change that deployed source or extend its acceptance evidence. Private
+deployment receipts retain the source, module/configuration checks and provider
+observations; verify a fresh receipt before another rollout.
+
+| Scope | Confirmed state at this checkpoint |
+| --- | --- |
+| Staging source | `f1cb578642e79059731f9249ecdec261e53e8e64` |
+| Staging Worker version | `7efa79bf-9fb4-4e67-9c0a-f6ef6ba9a28b`; update confirmed by read-only reconciliation at 14:09 UTC |
+| Staging schema and schedule | Central migrations 1–25; both HOT databases on schema 1; one-minute cron |
+| Production | Recorded deployment remains 0.4.0-rc.3 with central migrations 1–7; candidate rollout pending |
+| Central identity publisher | Actual rollout and end-to-end acceptance remain pending in this record |
+| Final acceptance | The new staging source's live validation is in progress; no completed GA acceptance is claimed |
+
+On the previous source `2741623e633407756902547e9d57c50507b00326`,
+16 functional checks and three physical-storage checks passed, together with a
+bounded 48-request load sample. These results belong to that source and are
+historical evidence, not final acceptance of `f1cb578`. The new source changes
+the `/manage` content security policy; its deployment confirmation alone does
+not complete the [15 acceptance gates](GA_ACCEPTANCE.md).
+
+Actual mail receipt and proof consumption on `1a93820`, and the separate
+`141f65f` observations below, likewise retain their original scope. Issuer and
+production rollout results must be recorded after their actual verification.
+Final-source cost, alert-response, policy and isolated-recovery evidence remain
+required before GA promotion. Review conclusions apply only to their recorded
+source and scope; see [REVIEW_LOOP.md](REVIEW_LOOP.md).
+
+## Historical source and deployment checkpoint — 2026-09-10 handoff
+
+The following checkpoint is preserved as recorded at handoff. Its references to
+current source, undeployed changes, pending reviews and verification describe
+that checkpoint, not the later deployment record above.
 
 | Scope | Recorded state |
 | --- | --- |

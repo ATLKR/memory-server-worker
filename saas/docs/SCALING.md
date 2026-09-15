@@ -1,6 +1,6 @@
 # Memory의 물리 D1 샤딩과 R2 저장
 
-2026-09-10 현재 소스는 **0.5.0-rc.1, 중앙 schema 25, HOT schema 1**이다. 물리 샤딩과 비공개 R2 payload 분리는 구현되어 있다. Staging의 이전 후보 `1a93820`은 중앙 1–23/HOT 1에서 같은 Space의 실제 쓰기를 두 HOT DB에 분산하고 R2 읽기를 검증했다. Production은 rc.3/중앙 1–7 그대로다. 중앙 24–25와 최신 수정은 아직 배포하지 않았다. 이 기록은 최종 후보의 GA 수락 완료가 아니다.
+2026-09-10 후보 소스는 **0.5.0-rc.1, 중앙 schema 25, HOT schema 1**이다. 물리 샤딩과 비공개 R2 payload 분리는 구현되어 있다. Staging의 이전 후보 `1a93820`은 중앙 1–23/HOT 1에서 같은 Space의 실제 쓰기를 두 HOT DB에 분산하고 R2 읽기를 검증했다. 최종 staging `f1cb578`/`7efa79bf`는 중앙 1–25/HOT 1과 1분 cron을 사용하며 새 물리 저장 검사 3개와 제한된 읽기 부하 48건을 통과했다. Production은 15:20 UTC 기록에서 중앙 1–25/HOT 1 이관을 확인했으며 rc.3 Worker의 교체는 대기 중이었다. 이후 상태는 [날짜별 배포 기록](release/INTEGRATION.md#migration-record--2026-09-10-1520-utc)에서 확인한다. 이 기록은 최종 후보의 GA 수락 완료가 아니다.
 
 ## 현재 저장 구조
 
@@ -44,6 +44,6 @@ D1 `batch()`는 한 DB의 SQL 트랜잭션이다. 중앙 D1, 다른 HOT D1, R2�
 
 ## 복구 검증
 
-중앙 snapshot 하나만 복구해서는 외부 payload와 권한 상태를 복구할 수 없다. 중앙 pointer와 R2 object hash, HOT schema/재구축 자료, snapshot 이후의 회수·제거 기록을 함께 보존하고 격리 환경에서 검증한다. 실제 provider의 전체 D1 export는 FTS virtual table 때문에 거절되었다. 명시적인 일반 테이블 export와 별도 DDL/파생 FTS 재구축 절차를 사용하며, 해당 exporter의 native 검증은 진행 중이다. 이를 이미 성공한 원격 복구 훈련으로 기록하지 않는다. [D1 import/export 제약](https://developers.cloudflare.com/d1/best-practices/import-export-data/), [다중 저장소 복구](release/MULTI_STORE_RECOVERY.md)
+중앙 snapshot 하나만 복구해서는 외부 payload와 권한 상태를 복구할 수 없다. 중앙 pointer와 R2 object hash, HOT schema/재구축 자료, snapshot 이후의 회수·제거 기록을 함께 보존하고 격리 환경에서 검증한다. 실제 provider의 전체 D1 export는 FTS virtual table 때문에 거절되었다. 명시적인 일반 테이블 export와 별도 DDL/파생 FTS 재구축 절차를 사용한다. 실제 staging 중앙/HOT D1에서 캡처한 SQL을 독립 native D1로 복원해 보존 테이블의 내용·DDL/FTS·외래 키를 대조하는 검증은 통과했다. 쓰기를 중지하지 않은 관찰이며 일관된 백업이나 원격 격리 복구 훈련의 완료를 의미하지 않는다. [D1 import/export 제약](https://developers.cloudflare.com/d1/best-practices/import-export-data/), [다중 저장소 복구](release/MULTI_STORE_RECOVERY.md)
 
-최종 revision의 부하·비용·격리 복구 및 수락 서명은 아직 별도 gate다. [배포 절차](release/DEPLOYMENT.ko.md)와 [현재 통합 기록](release/INTEGRATION.md)을 따른다.
+최종 staging의 48건 읽기 표본은 최대 용량이나 지속 처리량을 보장하지 않는다. 완전한 비용·용량·격리 복구 및 수락 서명은 별도 gate다. [배포 절차](release/DEPLOYMENT.ko.md)와 [현재 통합 기록](release/INTEGRATION.md)을 따른다.
