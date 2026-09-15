@@ -442,7 +442,8 @@ export class Admin {
             );
         }
         try {
-            await batch(this.db, statements);
+            await batch(this.db, this.capture ? this.capture.providerV1Statements(this.db,
+                { eventId, issuer: ISSUER, subject, address: revokedAddress, kind, hash }, statements) : statements);
         }
         catch (error) {
             const accepted = await one<{

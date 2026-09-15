@@ -18,7 +18,8 @@ type StreamKind = typeof streamKinds[number];
 type Command = typeof commands[number];
 const providerEvents = ['account.suspended','account.resumed','account.deleted','email.revoked','email.verified'] as const;
 type ProviderV2 = { kind:'provider-v2'; eventId:string; eventType:typeof providerEvents[number]; sequence:number; occurredAtMs:number };
-type Origin = { kind: 'command'; commandType: Command; receiptId: string | null } | ProviderV2;
+type ProviderV1 = { kind:'provider-v1'; eventId:string; eventType:'account.disabled'|'email.revoked'; storedRevocationAtMs:number };
+type Origin = { kind: 'command'; commandType: Command; receiptId: string | null } | ProviderV2 | ProviderV1;
 type Lifecycle = { state: 'absent' } | { state: 'event'; eventId: string; sequence: number; kind: 'account.suspended' | 'account.resumed' | 'account.deleted' | 'email.verified' | 'email.revoked'; occurredAtMs: number };
 type Descriptors = { origin: Origin; effect: SeoulHeadEffect };
 type ProviderIdentity = { issuer: typeof ISSUER; subject: string; accountId: string; createdAtMs: number };
@@ -30,7 +31,7 @@ type Subject = { version: 3; kind: 'subject-source'; issuer: typeof ISSUER; subj
 type Organization = { version: 3; kind: 'organization-source'; id: string; disabledAtMs: number | null } & Descriptors;
 type Space = { version: 3; kind: 'space-source'; id: string; accountId: string | null; organizationId: string | null; securityMode: 'managed'; createdAtMs: number } & Descriptors;
 type Marker = { version: 3; kind: 'subject-source-unrepresentable'; issuer: typeof ISSUER; subject: string; accountId: string; reason: 'unmapped' | 'unsupported-mapping' | 'identity-count' | 'identity-bytes' | 'fanout-count' | 'source-bytes' | 'unsupported-state'; countLowerBound: number; byteEstimate: number; captureAttemptId: string };
-type IdentityTransition = { version:3; kind:'identity-transition-source'; issuer:typeof ISSUER; subject:string; address:string|null; origin:ProviderV2; effect:SeoulHeadEffect };
+type IdentityTransition = { version:3; kind:'identity-transition-source'; issuer:typeof ISSUER; subject:string; address:string|null; origin:ProviderV2|ProviderV1; effect:SeoulHeadEffect };
 export type SeoulAuthoritySourceBody = Credential | Membership | Email | Subject | Organization | Space | Marker | IdentityTransition;
 export type SeoulAuthoritySource = {
   version: 3; kind: 'seoul-authority-source'; revision: number; sourceCommandId: string;
@@ -173,6 +174,10 @@ function lifecycle(value: unknown, email: boolean): Lifecycle {
 }
 function origin(value: unknown): Origin {
   const input = value as Record<string, unknown>;
+  if (input?.kind === 'provider-v1') {
+    const x=record(value,['kind','eventId','eventType','storedRevocationAtMs']);
+    return {kind:'provider-v1',eventId:identifier(x.eventId),eventType:choice(x.eventType,['account.disabled','email.revoked']),storedRevocationAtMs:integer(x.storedRevocationAtMs)};
+  }
   if (input?.kind === 'provider-v2') {
     const x=record(value,['kind','eventId','eventType','sequence','occurredAtMs']);
     return {kind:'provider-v2',eventId:identifier(x.eventId),eventType:choice(x.eventType,providerEvents),sequence:integer(x.sequence,1),occurredAtMs:integer(x.occurredAtMs)};
@@ -207,6 +212,31 @@ function providerEffect(x:Record<string,unknown>, kind:StreamKind, key:string, c
   if(kind==='subject'?(captured.eventType!=='account.deleted'||x.accountDisabledAtMs===null):kind!=='email'||x.liveClaim!==null||x.changedClaim===null)invalid();
   const e=record(x.effect,['type','disposition']);return {type:literal(e.type,'entity-head'),disposition:literal(e.disposition,'changed')};
 }
+function directV1Effect(value:unknown, identity:string, mailbox:string|null, captured:ProviderV1):SeoulHeadEffect {
+  if(utf8.encode(identity).length>512)invalid();
+  if(captured.eventType==='account.disabled'){
+    if(mailbox!==null)invalid();const x=record(value,['type','subject','state','occurredAtMs']);
+    return {type:literal(x.type,'subject-lifecycle'),subject:literal(x.subject,identity),state:literal(x.state,'deleted'),occurredAtMs:literal(x.occurredAtMs,captured.storedRevocationAtMs)};
+  }
+  if(mailbox===null)invalid();const x=record(value,['type','subject','address','state','occurredAtMs']);
+  return {type:literal(x.type,'email-lifecycle'),subject:literal(x.subject,identity),address:literal(x.address,mailbox),state:literal(x.state,'revoked'),occurredAtMs:literal(x.occurredAtMs,captured.storedRevocationAtMs)};
+}
+function v1Effect(x:Record<string,unknown>,kind:StreamKind,key:string,captured:ProviderV1,revokedAtMs:number|null):SeoulHeadEffect {
+  if(captured.eventType==='account.disabled'?kind!=='subject':!['email','membership','credential'].includes(kind))invalid();
+  if(kind==='credential'||kind==='membership'){
+    const e=record(x.effect,['type','entityKind','entityId','state','occurredAtMs']);if(revokedAtMs===null||e.occurredAtMs!==revokedAtMs)invalid();
+    return {type:literal(e.type,'entity-negative'),entityKind:literal(e.entityKind,kind),entityId:literal(e.entityId,key),state:literal(e.state,'revoked'),occurredAtMs:integer(e.occurredAtMs)};
+  }
+  if(kind==='subject'?x.accountDisabledAtMs===null:x.liveClaim!==null||x.addressBlocked!==true)invalid();
+  // Capture proves actual input provenance and a changed fact. A legacy flag
+  // or copied V2 event cannot establish that history at this pure boundary.
+  const e=x.effect as Record<string,unknown>;
+  if(e?.type==='subject-lifecycle'||e?.type==='email-lifecycle'){
+    if(kind==='subject'?x.legacyDisabled!==true:x.legacyRevoked!==true)invalid();
+    return directV1Effect(x.effect,subject(x.subject),kind==='email'?address(x.address):null,captured);
+  }
+  const generic=record(x.effect,['type','disposition']);return {type:literal(generic.type,'entity-head'),disposition:literal(generic.disposition,'changed')};
+}
 function effect(value: unknown, kind: StreamKind, key: string, command: Command, revokedAtMs: number | null): SeoulHeadEffect {
   if (['self-email-unlink', 'membership-revoke', 'workspace-key-revoke', 'domain-email-revoke', 'scim-deactivate', 'scim-delete'].includes(command) && (kind === 'credential' || kind === 'membership')) {
     const x = record(value, ['type', 'entityKind', 'entityId', 'state', 'occurredAtMs']);
@@ -223,9 +253,9 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
   literal(x.version, 3);
   if(x.kind==='identity-transition-source'){
     if(!Object.hasOwn(x,'origin')||!Object.hasOwn(x,'effect'))unsupported();
-    record(x,['version','kind','issuer','subject','address','origin','effect']);const captured=origin(x.origin);if(captured.kind!=='provider-v2')invalid();
+    record(x,['version','kind','issuer','subject','address','origin','effect']);const captured=origin(x.origin);if(captured.kind==='command')invalid();
     const identity=subject(x.subject),mailbox=nullable(x.address,address);if(kind!==(mailbox===null?'subject':'email')||key!==ISSUER+'\n'+identity+(mailbox===null?'':'\n'+mailbox))invalid();
-    return {version:3,kind:'identity-transition-source',issuer:literal(x.issuer,ISSUER),subject:identity,address:mailbox,origin:captured,effect:directProviderEffect(x.effect,identity,mailbox,captured)};
+    return {version:3,kind:'identity-transition-source',issuer:literal(x.issuer,ISSUER),subject:identity,address:mailbox,origin:captured,effect:captured.kind==='provider-v1'?directV1Effect(x.effect,identity,mailbox,captured):directProviderEffect(x.effect,identity,mailbox,captured)};
   }
   if (x.kind === 'subject-source-unrepresentable') {
     record(x, ['version', 'kind', 'issuer', 'subject', 'accountId', 'reason', 'countLowerBound', 'byteEstimate', 'captureAttemptId']);
@@ -245,7 +275,7 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
     space: ['workspace-sign-in', 'organization-create', 'organization-child-create', 'space-create'],
   };
   if (command!==null?!matrix[kind].includes(command):!['subject','email','membership','credential'].includes(kind)) invalid();
-  const descriptors = (revokedAtMs: number | null = null): Descriptors => ({ origin: capturedOrigin, effect: capturedOrigin.kind==='provider-v2'?providerEffect(x,kind,key,capturedOrigin,revokedAtMs):effect(x.effect, kind, key, capturedOrigin.commandType, revokedAtMs) });
+  const descriptors = (revokedAtMs: number | null = null): Descriptors => ({ origin: capturedOrigin, effect: capturedOrigin.kind==='provider-v2'?providerEffect(x,kind,key,capturedOrigin,revokedAtMs):capturedOrigin.kind==='provider-v1'?v1Effect(x,kind,key,capturedOrigin,revokedAtMs):effect(x.effect, kind, key, capturedOrigin.commandType, revokedAtMs) });
   const id = () => { const result = identifier(x.id, kind === 'space' ? 128 : 256); if (result !== key) invalid(); return result; };
   switch (kind) {
     case 'credential': {
@@ -253,7 +283,7 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
       const credentialKind = choice(x.credentialKind, ['personal_key', 'api_key']), membershipId = nullable(x.membershipId, identifier), emailId = nullable(x.emailId, identifier), revokedAtMs = nullable(x.revokedAtMs, integer);
       if (credentialKind === 'personal_key' ? membershipId !== null || emailId !== null : membershipId === null || emailId === null) invalid();
       if (command === 'scoped-key-issue' || command === 'workspace-key-issue') { if (revokedAtMs !== null) invalid(); }
-      else if (revokedAtMs === null || (command!==null&&command !== 'workspace-key-revoke' && credentialKind !== 'api_key') || (capturedOrigin.kind==='provider-v2'&&capturedOrigin.eventType.startsWith('email.')&&credentialKind!=='api_key')) invalid();
+      else if (revokedAtMs === null || (command!==null&&command !== 'workspace-key-revoke' && credentialKind !== 'api_key') || (capturedOrigin.kind==='provider-v2'&&capturedOrigin.eventType.startsWith('email.')&&credentialKind!=='api_key') || (capturedOrigin.kind==='provider-v1'&&credentialKind!=='api_key')) invalid();
       if (command === 'workspace-key-issue' && (capturedOrigin.kind!=='command'||capturedOrigin.receiptId !== x.id || x.policy !== null)) invalid();
       const policy = nullable(x.policy, value => {
         const p = record(value, ['capabilities', 'spaceIds']);

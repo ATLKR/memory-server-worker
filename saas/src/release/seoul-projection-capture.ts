@@ -4,6 +4,7 @@ import { bootstrapStatements, type BootstrapScope } from './seoul-projection-boo
 import { workspaceStatements, type WorkspaceCaptureScope } from './seoul-projection-workspace-capture.ts';
 import { providerStatements, type ProviderPrimitive } from './seoul-projection-provider-capture.ts';
 import { commandStatements, type CommandCaptureScope } from './seoul-projection-command-capture.ts';
+import { providerV1Statements, type ProviderV1Event } from './seoul-projection-provider-v1-capture.ts';
 
 const ISSUER = 'https://auth-api.allen.company';
 const TRUSTED_CONSTRUCTION = Symbol('trusted seoul capture composition');
@@ -90,6 +91,10 @@ export class SeoulProjectionCapture {
   providerStatements(database: Database, primitives: ProviderPrimitive[]): Statement[] {
     this.assertDatabase(database);
     return providerStatements(this.database,primitives);
+  }
+  providerV1Statements(database: Database, event: ProviderV1Event, commands: Statement[]): Statement[] {
+    this.assertDatabase(database);
+    return providerV1Statements(this.database,event,commands);
   }
   async workspaceBootstrap(database: IdentityDatabase, scope: BootstrapScope, sql: string, values: SqlValue[]): Promise<Result> {
     this.assertDatabase(database);

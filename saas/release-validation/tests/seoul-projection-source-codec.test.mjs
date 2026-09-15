@@ -149,7 +149,7 @@ test('reserved contracts and absent normal descriptors fail with fixed unsupport
   unsupported(() => encodeSeoulAuthoritySource({ ...source(), streamKind: 'target', streamKey: 'target:one' }));
   for (const b of Object.values(bodies).filter(b => b.origin)) {
     const missing = copy(b); delete missing.origin; delete missing.effect; unsupported(() => encodeSeoulAuthoritySource(source(missing)));
-    for (const kind of ['provider-v1', 'backfill']) unsupported(() => encodeSeoulAuthoritySource(source({ ...b, origin: { kind } })));
+    for (const kind of ['backfill']) unsupported(() => encodeSeoulAuthoritySource(source({ ...b, origin: { kind } })));
     invalid(() => encodeSeoulAuthoritySource(source({ ...b, origin: { kind:'provider-v2' } })));
     unsupported(() => encodeSeoulAuthoritySource(source({ ...b, origin: origin('unsupported-command') })));
   }
@@ -346,6 +346,33 @@ test('bounded metadata and all nested timestamps reject invalid values through r
   for (const record_bytes of [utf8.encode(BODY), null, {}, '"not a body"']) await assert.rejects(prepareSeoulHeadCandidate({ ...row(), record_bytes }), { message: 'seoul_authority_source_invalid' });
   const reserved = { ...row(), record_bytes: JSON.stringify({ version: 3, kind: 'identity-transition-source' }) };
   await assert.rejects(prepareSeoulHeadCandidate(reserved), { message: 'seoul_authority_source_contract_unsupported' });
+});
+
+const v1Origin=eventType=>({kind:'provider-v1',eventId:'current:receipt',eventType,storedRevocationAtMs:51});
+function v1Body(kind,direct=true){
+ const b=copy(bodies[kind]);b.origin=v1Origin(kind==='subject'?'account.disabled':'email.revoked');
+ if(kind==='subject'){b.accountDisabledAtMs=99;b.legacyDisabled=true;b.effect=direct?{type:'subject-lifecycle',subject:b.subject,state:'deleted',occurredAtMs:51}:head('changed');}
+ if(kind==='email'){b.liveClaim=null;b.changedClaim=null;b.addressBlocked=true;b.legacyRevoked=direct;b.effect=direct?{type:'email-lifecycle',subject:b.subject,address:b.address,state:'revoked',occurredAtMs:51}:head('changed');}
+ if(kind==='credential'){b.credentialKind='api_key';b.membershipId='membership:one';b.emailId='email:one';b.revokedAtMs=99;b.effect=negative('credential');}
+ if(kind==='membership'){b.revokedAtMs=99;b.effect=negative('membership');}return b;
+}
+test('V1 exact stored-time direct effects, block-only aliases and child negatives round trip',async()=>{
+ for(const kind of ['subject','email','credential','membership'])for(const direct of [true,false]){const b=v1Body(kind,direct),s=source(b);assert.deepEqual(parseSeoulAuthoritySourceRow(row(s)),s);assert.deepEqual(decodeSeoulAuthoritySource(encodeSeoulAuthoritySource(s)),s);assert.equal((await prepareSeoulHeadCandidate(row(s))).eventText.includes('current:receipt'),false);}
+ for(const kind of ['subject','email']){const full=v1Body(kind),b={version:3,kind:'identity-transition-source',issuer:ISSUER,subject:full.subject,address:kind==='subject'?null:full.address,origin:full.origin,effect:full.effect},s={...source(full),body:b};assert.deepEqual(decodeSeoulAuthoritySource(encodeSeoulAuthoritySource(s)),s);}
+});
+test('V1 source matrix and retained time are closed independently from V2',()=>{
+ for(const kind of ['subject','email','credential','membership']){
+  const base=v1Body(kind);for(const value of [-0,-1,1.5,Number.MAX_SAFE_INTEGER+1,null]){const b=copy(base);b.origin.storedRevocationAtMs=value;invalid(()=>encodeSeoulAuthoritySource(source(b)));}
+  for(const field of ['sequence','occurredAtMs','oldEventId']){const b=copy(base);b.origin[field]=1;invalid(()=>encodeSeoulAuthoritySource(source(b)));}
+  for(const eventType of ['account.suspended','email.verified']){const b=copy(base);b.origin.eventType=eventType;invalid(()=>encodeSeoulAuthoritySource(source(b)));}
+  const missing=copy(base);delete missing.origin.storedRevocationAtMs;invalid(()=>encodeSeoulAuthoritySource(source(missing)));
+ }
+ for(const kind of ['email','credential','membership']){const b=v1Body(kind);b.origin.eventType='account.disabled';invalid(()=>encodeSeoulAuthoritySource(source(b)));}
+ for(const kind of ['subject','email']){const b=v1Body(kind);b.effect.occurredAtMs=99;invalid(()=>encodeSeoulAuthoritySource(source(b)));b.effect.occurredAtMs=51;b[kind==='subject'?'legacyDisabled':'legacyRevoked']=false;invalid(()=>encodeSeoulAuthoritySource(source(b)));}
+ const email=v1Body('email',false);email.addressBlocked=false;invalid(()=>encodeSeoulAuthoritySource(source(email)));const personal=v1Body('credential');personal.credentialKind='personal_key';personal.emailId=null;personal.membershipId=null;invalid(()=>encodeSeoulAuthoritySource(source(personal)));
+});
+test('V1 direct public subject bytes differ from valid stored alias UTF-16 domain',()=>{
+ for(const kind of ['subject','email'])for(const direct of [true,false]){const b=v1Body(kind,direct);b.subject='가'.repeat(200);if(kind==='subject')b.providerIdentities=[identity(b.subject)];if(direct)b.effect.subject=b.subject;if(direct)invalid(()=>encodeSeoulAuthoritySource(source(b)));else assert.doesNotThrow(()=>encodeSeoulAuthoritySource(source(b)));}
 });
 
 function sqliteJSON(value, parameters) {
