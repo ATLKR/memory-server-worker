@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { parse } from 'jsonc-parser';
 import { WorkspaceService } from '../src/workspace.ts';
+import { MemoryService } from '../src/memory.ts';
+import { applySql } from './apply-sql.mjs';
 
 const config = parse(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'));
 const mf = new Miniflare(convertV4MiniflareOptions({
@@ -38,6 +40,13 @@ try {
   assert.equal((await workspace.snapshot(guest.token)).organizations.find(org => org.id === child.id).parentId, organization.id);
   assert.ok((await workspace.snapshot(owner.token)).organizations.every(org => org.id !== child.id));
   const childKey = await workspace.issueKey(guest.token, { label: 'Independent child key', organizationId: child.id, permission: 'write', expiresInDays: 1 });
+  const original = new MemoryService(db);
+  const historical = await original.create(key.token, organization.spaceId, { body: 'Before release migration' });
+  await original.update(key.token, organization.spaceId, historical.id, { body: 'Preserved populated revision', expectedRevision: 1 });
+  await applySql(parser, db, readFileSync(new URL('../migrations/0006_release-schema.sql', import.meta.url), 'utf8'));
+  assert.equal((await db.prepare('SELECT body FROM memories WHERE id=?').bind(historical.id).first()).body, 'Preserved populated revision');
+  assert.equal((await db.prepare('SELECT body FROM memory_versions WHERE memory_id=? AND revision=1').bind(historical.id).first()).body, 'Before release migration');
+  assert.equal((await db.prepare('SELECT count(*) AS n FROM release_fts WHERE memory_id=?').bind(historical.id).first()).n, 1);
   const origin = config.vars.PUBLIC_ORIGIN;
   async function request(path, { method = 'GET', data, token = key.token, headers = {} } = {}) {
     return mf.dispatchFetch(origin + path, { method, redirect: 'manual', headers: { authorization: `Bearer ${token}`, ...(data ? { 'content-type': 'application/json' } : {}), ...headers }, ...(data ? { body: JSON.stringify(data) } : {}) });
@@ -54,6 +63,19 @@ try {
   const updated = await request(`${base}/${memory.id}`, { method: 'PATCH', data: { body: 'D1 updated', expectedRevision: 1 } });
   assert.equal(updated.status, 200); assert.equal((await updated.json()).revision, 2);
   assert.equal((await request(`${base}/${memory.id}`, { method: 'PATCH', data: { body: 'stale', expectedRevision: 1 } })).status, 409);
+  const retryData = { body: 'Idempotent native D1', operationId: 'native-create-1' };
+  const first = await (await request(base, { method: 'POST', data: retryData })).json();
+  const replay = await (await request(base, { method: 'POST', data: retryData })).json();
+  assert.equal(first.id, replay.id); assert.equal(replay.replayed, true);
+  assert.equal((await request(base, { method: 'POST', data: { ...retryData, body: 'Changed retry' } })).status, 409);
+  const search = await request(`${base}?query=Idempotent`);
+  assert.equal(search.status, 200); assert.match(await search.text(), /Idempotent native D1/);
+  const removed = await request(`${base}/${first.id}`, { method: 'DELETE', data: { expectedRevision: 1, operationId: 'native-delete-1' } });
+  assert.equal(removed.status, 204);
+  const restored = await request(`${base}/${first.id}/restore`, { method: 'POST', data: { expectedRevision: 2, operationId: 'native-restore-1' } });
+  assert.equal(restored.status, 200); assert.equal((await restored.json()).revision, 3);
+  assert.equal((await request('/manage')).status, 200);
+  const readiness = await request('/ready'); assert.equal(readiness.status, 503); assert.equal((await readiness.json()).checks.schema, true);
   const mcp = await request('/mcp', { method: 'POST', data: { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, headers: { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' } });
   assert.equal(mcp.status, 200); assert.match(await mcp.text(), /memory_search/);
   const members = await workspace.listMembers(owner.token, organization.id);
@@ -61,8 +83,9 @@ try {
   assert.equal((await request(base)).status, 401);
   assert.equal((await request(childBase, { token: childKey.token })).status, 200);
   assert.equal((await workspace.snapshot(guest.token)).organizations.find(org => org.id === child.id).parentId, null);
-  assert.equal((await db.prepare('SELECT count(*) AS n FROM memory_versions').first()).n, 1);
+  assert.equal((await db.prepare('SELECT count(*) AS n FROM memory_versions').first()).n, 4);
+  assert.equal((await db.prepare('PRAGMA foreign_key_check').all()).results.length, 0);
   const authStart = await request('/auth/login'); assert.equal(authStart.status, 302);
   assert.equal(new URL(authStart.headers.get('location')).origin, 'https://auth-api.allen.company');
-  console.log('PASS bundled Worker on local workerd/D1: populated forward migration, independent nested organizations, SSO bootstrap, invitation, key issuance, REST revisions, MCP, exact-organization offboarding, OAuth redirect.');
+  console.log('PASS bundled Worker on local workerd/D1: populated migrations 5 and 6, FTS backfill/search, atomic idempotency, revisions, trash/restore, independent nested organizations, SSO bootstrap, invitations, keys, MCP, offboarding, readiness and integrity.');
 } finally { parser.close(); await mf.dispose(); }

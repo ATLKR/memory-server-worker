@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "allenlabs-memory": {
+      "type": "http",
+      "url": "https://memory.allenlabs.org/mcp"
+    }
+  }
+}

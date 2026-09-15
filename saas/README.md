@@ -1,5 +1,21 @@
 # Memory by Allen Labs — hosted pilot
 
+The source is now **0.4.0-rc.1**, integrating the supplied release kit after
+security, compatibility and real-schema fixes. See the maintained
+[release integration record](docs/release/INTEGRATION.md) for current features,
+verification, activation defaults and remaining work. The sections below record
+the deployed 0.3.0 baseline; the integration record supersedes its feature limits.
+
+The candidate adds atomic retry receipts, capability/Space-scoped PATs, FTS5,
+trash/restore, exports, explicit sharing, pooled quotas and a `/manage` console.
+MCP clients/plugins can connect with PAT or central Better Auth SSO; see
+[connection instructions](docs/CONNECTING.md). Email proofs use native Cloudflare
+Email Service. AI extraction/hybrid search, Stripe and signed deprovisioning have
+adapters and tests but require live provider configuration. No cron is configured;
+automatic erasure is explicitly disabled. Run `npm run check`, `npm run test:d1`
+and `npm run eval:lexical` to verify the candidate. All six actual schema sources
+are used by the release tests; deployed migrations 1–5 retain their exact bytes.
+
 The `saas/` module provides a Korean browser console, central sign-in, personal/team Spaces, versioned memory, organization administration, REST, and MCP on a Cloudflare Worker with dedicated D1 storage. The display name is provisional and configurable. The existing personal Worker, UI, plugins, and database remain separate.
 
 Product origin: [memory.allenlabs.org](https://memory.allenlabs.org). Central authentication intentionally remains at [auth.allen.company](https://auth.allen.company), with OAuth issuer/API [auth-api.allen.company](https://auth-api.allen.company).

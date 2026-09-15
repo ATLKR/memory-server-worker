@@ -9,6 +9,10 @@
   "preview_urls": false,
   "routes": [{ "pattern": "memory.allenlabs.org", "custom_domain": true }],
   "vars": {
+    "RELEASE_MODE": "pilot",
+    "AUTO_ERASURE_ENABLED": "false",
+    "MAIL_FROM": "memory@allenlabs.org",
+    "LIVE_ACCEPTANCE_ID": "",
     "PUBLIC_ORIGIN": "https://memory.allenlabs.org",
     "SSO_CLIENT_ID": "M5w1jhX2WjRD3PyJDwS_QosyAaHm4TWSyVCkzebqNrA",
     "PRODUCT_NAME": "Memory by Allen Labs",
@@ -25,7 +29,8 @@
     "migrations_dir": "migrations"
   }],
   "ratelimits": [{ "name": "REQUEST_LIMITER", "namespace_id": "2086090801", "simple": { "limit": 120, "period": 60 } }],
+  "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["memory@allenlabs.org"] }],
   // Auth callback URLs contain codes: invocation/request logs stay disabled.
   "observability": { "enabled": false },
-  "limits": { "cpu_ms": 50 }
+  "limits": { "cpu_ms": 1000 }
 }

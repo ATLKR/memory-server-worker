@@ -1,0 +1,7 @@
+{
+  "label": "Team project assistant",
+  "capabilities": ["read", "create", "update"],
+  "spaceIds": ["REPLACE_WITH_TEAM_SPACE_ID"],
+  "organizationId": "REPLACE_WITH_ORGANIZATION_ID",
+  "expiresInDays": 30
+}

@@ -1,0 +1,4 @@
+# Alternative to codex.pat.toml; configure this server once.
+# Then run: codex mcp login allenlabs-memory
+[mcp_servers.allenlabs-memory]
+url = "https://memory.allenlabs.org/mcp"

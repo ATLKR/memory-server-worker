@@ -1,0 +1,13 @@
+{"id": "eval-retry", "body": "저장 요청은 operationId를 고정해서 재시도한다. 동일 키와 다른 내용은 충돌이다.", "spaceId": "eval-public", "kind": "fact"}
+{"id": "eval-report", "body": "합성 팀은 금요일 17시에 진행상황을 보고한다.", "spaceId": "eval-public", "kind": "fact"}
+{"id": "eval-backup", "body": "합성 프로젝트의 복구 훈련은 매월 첫째 월요일에 한다.", "spaceId": "eval-public", "kind": "fact"}
+{"id": "eval-key", "body": "수집 에이전트 키에는 create만 부여하고 read와 delete는 주지 않는다.", "spaceId": "eval-public", "kind": "fact"}
+{"id": "eval-handoff", "body": "합성 프로젝트 A의 현재 담당자는 지수이다.", "spaceId": "eval-public", "kind": "fact"}
+{"id": "eval-meeting", "body": "합성 프로젝트 설계 검토 회의는 화요일 10시이다.", "spaceId": "eval-public", "kind": "fact"}
+{"id": "eval-source", "body": "작업 완료 기록의 근거는 에이전트의 약속이 아니라 병합된 변경과 검증 결과여야 한다.", "spaceId": "eval-public", "kind": "fact"}
+{"id": "eval-quota", "body": "사용량은 조직 안에서 공동으로 소모하고 개인 키의 수와 좌석 수로 나누지 않는다.", "spaceId": "eval-public", "kind": "fact"}
+{"id": "eval-erase", "body": "영구 제거 요청은 본문과 이력을 삭제하고 검색 인덱스 정리를 추적한다. 백업 만료는 별도 정책이다.", "spaceId": "eval-public", "kind": "fact"}
+{"id": "eval-residence", "body": "합성 사무실의 와이파이 이용 안내는 총무가 관리한다. 비밀번호는 메모리에 저장하지 않는다.", "spaceId": "eval-public", "kind": "fact"}
+{"id": "eval-old-handoff", "body": "A 프로젝트 담당자는 민수였다. 현재는 변경되었다.", "spaceId": "eval-public", "supersededBy": "eval-handoff"}
+{"id": "eval-private-secret", "body": "다른 Space의 비공개 평가용 비밀 문서.", "spaceId": "eval-private"}
+{"id": "eval-deleted-note", "body": "삭제된 평가용 기억", "spaceId": "eval-public", "deleted": true}

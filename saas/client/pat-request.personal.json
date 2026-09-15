@@ -1,0 +1,6 @@
+{
+  "label": "Personal project assistant",
+  "capabilities": ["read", "create", "update"],
+  "spaceIds": ["REPLACE_WITH_PERSONAL_SPACE_ID"],
+  "expiresInDays": 30
+}

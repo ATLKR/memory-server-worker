@@ -1,5 +1,11 @@
 # Product verification — 2026-09-08
 
+This is the historical **0.3.0** deployment record. The current **0.4.0-rc.1**
+source has additional release suites and a populated sixth-migration workerd/D1
+test. Current evidence and activation limits are in
+[release/INTEGRATION.md](release/INTEGRATION.md). Local tests do not establish live
+provider or real-user SSO acceptance.
+
 ## Current productization result
 
 The standalone module now contains real central OAuth authentication, account provisioning, organization invitations/offboarding, personal and organization API keys, a responsive Korean console, REST and an SDK 2 MCP server. The dedicated product origin is `https://memory.allenlabs.org`; central authentication stays under `allen.company`.
