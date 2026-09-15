@@ -41,7 +41,8 @@ const RECONCILE_SQL = `WITH v(${candidateColumns}) AS (VALUES(?,?,?,?,?,?,?,?,?,
  EXISTS(SELECT 1 FROM release_seoul_authority_heads h WHERE ${headKey('h', 'v')} AND ${currentComplete('h', 'v')} LIMIT 1) head_complete,
  EXISTS(SELECT 1 FROM release_seoul_authority_heads h WHERE ${headKey('h', 'v')} AND h.revision>v.revision LIMIT 1) head_newer,
  EXISTS(SELECT 1 FROM release_seoul_authority_heads h WHERE ${headKey('h', 'v')} AND h.revision=v.revision AND h.event_id=v.event_id AND h.payload_sha256 IS NULL LIMIT 1) head_pending,
- EXISTS(SELECT 1 FROM release_seoul_preparation_stage LIMIT 1) stage_present FROM v LIMIT 1`;
+ (EXISTS(SELECT 1 FROM release_seoul_preparation_stage LIMIT 1)
+  OR EXISTS(SELECT 1 FROM release_seoul_target_preparation_stage LIMIT 1)) stage_present FROM v LIMIT 1`;
 
 function values(c: SeoulHeadCandidate): Value[] {
   const r = c.rowGuard; return [r.revision, r.source_command_id, r.stream_kind, r.stream_key, r.event_id, r.record_bytes, r.created_at,
@@ -49,31 +50,34 @@ function values(c: SeoulHeadCandidate): Value[] {
 }
 function plans(c: SeoulHeadCandidate): Plan[] {
   const token = crypto.randomUUID();
+  // Only the codec-owned stream kind chooses between these two fixed names.
+  // All streams require the full additive schema through 0034 for observation.
+  const table = c.rowGuard.stream_kind === 'target' ? 'release_seoul_target_preparation_stage' : 'release_seoul_preparation_stage';
   const result: Plan[] = [];
   const add = (sql: string, parameters: Value[] = [token]) => result.push({ sql, values: parameters, mode: 'all' });
   // The SELECT below ALWAYS has one row; eligibility is a column, never an
   // INSERT filter. A retained witness must reach the BEFORE INSERT guard.
-  add(`INSERT INTO release_seoul_preparation_stage(token,${candidateColumns},eligible)
+  add(`INSERT INTO ${table}(token,${candidateColumns},eligible)
  SELECT v.*,CASE WHEN EXISTS(SELECT 1 FROM release_seoul_authority_changes c WHERE ${sourceExact('c', 'v')})
   AND NOT EXISTS(SELECT 1 FROM release_seoul_prepared_sources p WHERE p.revision=v.revision OR p.event_id=v.event_id)
   AND NOT EXISTS(SELECT 1 FROM release_seoul_projection_events e WHERE e.event_id=v.event_id)
   AND NOT EXISTS(SELECT 1 FROM release_seoul_projection_deliveries d WHERE d.event_id=v.event_id) THEN 1 ELSE 0 END
  FROM (SELECT ? token,? revision,? source_command_id,? stream_kind,? stream_key,? event_id,? record_bytes,? created_at,? source_sha256,? transport_sha256,? payload_bytes) v`, [token, ...values(c)]);
   add(`INSERT INTO release_seoul_prepared_sources(revision,event_id,source_sha256,transport_sha256)
- SELECT s.revision,s.event_id,s.source_sha256,s.transport_sha256 FROM release_seoul_preparation_stage s WHERE s.token=? AND s.eligible=1`);
+ SELECT s.revision,s.event_id,s.source_sha256,s.transport_sha256 FROM ${table} s WHERE s.token=? AND s.eligible=1`);
   add(`INSERT INTO release_seoul_projection_events(event_id,source_revision,event_kind,stream_kind,stream_key,source_sha256,space_id,snapshot_seq,issued_at,expires_at,payload_bytes,payload_sha256)
  SELECT s.event_id,s.revision,'head',s.stream_kind,s.stream_key,s.source_sha256,NULL,NULL,NULL,NULL,s.payload_bytes,s.transport_sha256
- FROM release_seoul_preparation_stage s JOIN release_seoul_prepared_sources p ON ${preparedExact('p', 's')} WHERE s.token=? AND s.eligible=1`);
+ FROM ${table} s JOIN release_seoul_prepared_sources p ON ${preparedExact('p', 's')} WHERE s.token=? AND s.eligible=1`);
   add(`INSERT INTO release_seoul_projection_deliveries(event_id)
- SELECT s.event_id FROM release_seoul_preparation_stage s ${pairJoin('s')} WHERE s.token=? AND s.eligible=1`);
-  add(`UPDATE release_seoul_authority_heads AS h SET payload_sha256=(SELECT s.source_sha256 FROM release_seoul_preparation_stage s WHERE s.token=? AND s.eligible=1)
- WHERE h.payload_sha256 IS NULL AND EXISTS(SELECT 1 FROM release_seoul_preparation_stage s ${pairJoin('s')} ${deliveryJoin('s')}
+ SELECT s.event_id FROM ${table} s ${pairJoin('s')} WHERE s.token=? AND s.eligible=1`);
+  add(`UPDATE release_seoul_authority_heads AS h SET payload_sha256=(SELECT s.source_sha256 FROM ${table} s WHERE s.token=? AND s.eligible=1)
+ WHERE h.payload_sha256 IS NULL AND EXISTS(SELECT 1 FROM ${table} s ${pairJoin('s')} ${deliveryJoin('s')}
   WHERE s.token=? AND s.eligible=1 AND ${headKey('h', 's')} AND h.revision=s.revision AND h.event_id=s.event_id)`, [token, token]);
-  add(`UPDATE release_seoul_preparation_stage AS s SET complete_guard=CASE WHEN s.eligible=0 THEN 1
+  add(`UPDATE ${table} AS s SET complete_guard=CASE WHEN s.eligible=0 THEN 1
  WHEN EXISTS(SELECT 1 FROM release_seoul_authority_changes c ${pairJoin('s')} ${deliveryJoin('s')}
   WHERE ${sourceExact('c', 's')} AND EXISTS(SELECT 1 FROM release_seoul_authority_heads h WHERE ${headKey('h', 's')}
    AND ((${currentComplete('h', 's')}) OR h.revision>s.revision))) THEN 1 ELSE 0 END WHERE s.token=?`);
-  add('DELETE FROM release_seoul_preparation_stage WHERE token=?');
+  add(`DELETE FROM ${table} WHERE token=?`);
   return result;
 }
 function bounded(request: Plan[]): boolean {

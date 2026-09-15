@@ -12,23 +12,37 @@ const schema = new URL('../../seoul-projection-preparation-schema.sql', import.m
 const migration = new URL('../../migrations/0029_seoul-projection-preparation-schema.sql', import.meta.url);
 const uuid = n => '00000000-0000-4000-8000-' + String(n).padStart(12, '0');
 const copy = value => structuredClone(value);
-const tables = ['release_seoul_authority_changes', 'release_seoul_prepared_sources', 'release_seoul_projection_events', 'release_seoul_projection_deliveries', 'release_seoul_authority_heads', 'release_seoul_preparation_stage'];
+const targetStage = 'release_seoul_target_preparation_stage', oldStage = 'release_seoul_preparation_stage';
+const tables = ['release_seoul_authority_changes', 'release_seoul_prepared_sources', 'release_seoul_projection_events', 'release_seoul_projection_deliveries', 'release_seoul_authority_heads', oldStage, targetStage];
 const rows = (f, table) => f.raw.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all().map(r => ({ ...r }));
-const snapshot = f => Object.fromEntries(tables.map(table => [table, rows(f, table)]));
+const snapshot = f => Object.fromEntries(tables.filter(table => table !== targetStage || f.targetStageInstalled).map(table => [table, rows(f, table)]));
+function installTargetSchema(f) {
+ assert.equal(f.raw.prepare('SELECT version FROM release_meta').get().version, 29);
+ for (const name of ['0030_seoul-projection-workspace-schema.sql', '0031_seoul-projection-provider-schema.sql', '0032_seoul-projection-command-schema.sql', '0033_seoul-projection-provider-v1-schema.sql', '0034_seoul-projection-target-schema.sql'])
+  f.raw.exec(readFileSync(new URL('../../migrations/' + name, import.meta.url), 'utf8'));
+ f.targetStageInstalled = true; assert.equal(f.raw.prepare('SELECT version FROM release_meta').get().version, 34);
+ assert.deepEqual(f.raw.prepare('PRAGMA foreign_key_check').all(), []);
+}
+function target(number = 1, selected = true) {
+ return { version: 3, kind: 'target-source', spaceId: 's1', selected, changedAtMs: at,
+  origin: { kind: 'command', commandType: 'target-reconcile', receiptId: uuid(1000 + number) },
+  effect: selected ? { type: 'entity-head', disposition: 'changed' }
+   : { type: 'entity-negative', entityKind: 'target', entityId: 's1', state: 'removed', occurredAtMs: at } };
+}
 function credential(id = 'credential:one', negative = false) {
  return { version: 3, kind: 'credential-source', id, accountId: 'alice', credentialKind: negative ? 'api_key' : 'personal_key', tokenDigest: 'a'.repeat(64), membershipId: negative ? 'm1' : null, emailId: negative ? 'e1' : null, permission: 'write', expiresAtMs: at + 10000, revokedAtMs: negative ? at : null, policy: null,
   origin: { kind: 'command', commandType: negative ? 'self-email-unlink' : 'scoped-key-issue', receiptId: negative ? 'receipt:unlink' : null },
   effect: negative ? { type: 'entity-negative', entityKind: 'credential', entityId: id, state: 'revoked', occurredAtMs: at } : { type: 'entity-head', disposition: 'present' } };
 }
 function insertSource(f, number = 1, body = credential()) {
- const streamKind = body.kind.startsWith('subject') ? 'subject' : body.kind.replace('-source', ''), streamKey = streamKind === 'subject' ? 'https://auth-api.allen.company\n' + body.subject : body.id;
+ const streamKind = body.kind.startsWith('subject') ? 'subject' : body.kind.replace('-source', ''), streamKey = streamKind === 'subject' ? 'https://auth-api.allen.company\n' + body.subject : streamKind === 'target' ? body.spaceId : body.id;
  f.raw.prepare('INSERT INTO release_seoul_authority_changes(source_command_id,stream_kind,stream_key,event_id,record_bytes,created_at) VALUES(?,?,?,?,?,?)').run(uuid(1000 + number), streamKind, streamKey, uuid(number), JSON.stringify(body), at);
  return { ...f.raw.prepare('SELECT revision,source_command_id,stream_kind,stream_key,event_id,record_bytes,created_at FROM release_seoul_authority_changes WHERE event_id=?').get(uuid(number)) };
 }
-async function setup(t, recursive = 'ON', mode = 'durable-sql', install = true) {
+async function setup(t, recursive = 'ON', mode = 'durable-sql', install = true, throughTarget = true) {
  const f = await fixture(); t.after(() => f.db.close()); f.raw = f.db.raw; f.calls = []; f.attempts = 0; f.hooks = {}; f.sessions = [];
  for (const name of ['0026_seoul-projection-schema.sql', '0027_seoul-projection-capture-schema.sql', '0028_seoul-projection-bootstrap-schema.sql']) f.raw.exec(readFileSync(new URL('../../migrations/' + name, import.meta.url), 'utf8'));
- if (install) { assert.ok(existsSync(schema), 'new preparation source schema exists'); f.raw.exec(readFileSync(migration, 'utf8')); }
+ if (install) { assert.ok(existsSync(schema), 'new preparation source schema exists'); f.raw.exec(readFileSync(migration, 'utf8')); if (throughTarget) installTargetSchema(f); }
  f.raw.exec('PRAGMA recursive_triggers=' + recursive);
  const storage = { sql: { exec(sql, ...values) { const statement = f.raw.prepare(sql), result = statement.all(...values), readonly = statement.columns().length > 0 && /^(SELECT|WITH|PRAGMA)\b/i.test(sql.trim()); return { rowsWritten: readonly ? 0 : Number(f.raw.prepare('SELECT changes() n').get().n), toArray: () => result, [Symbol.iterator]: () => result[Symbol.iterator]() }; } }, transactionSync(fn) { f.raw.exec('BEGIN IMMEDIATE'); try { const result = fn(); f.raw.exec('COMMIT'); return result; } catch (error) { f.raw.exec('ROLLBACK'); throw error; } } };
  f.engine = new SqlDatabaseEngine(storage, { objectName: 'sql:staging:control:1' }); f.engine.initialize(); f.raw.prepare('INSERT INTO durable_sql_state VALUES(1,?,?,?,?,?,?,?)').run('staging', 'control', 'control', 1, 'ready', 'a'.repeat(64), 'b'.repeat(64));
@@ -57,7 +71,7 @@ async function setup(t, recursive = 'ON', mode = 'durable-sql', install = true) 
 }
 function expected(candidate, status) { return { status, revision: candidate.rowGuard.revision, eventId: candidate.rowGuard.event_id, sourceChangeSha256: candidate.sourceChangeSha256, transportPayloadSha256: candidate.transportPayloadSha256 }; }
 function batch(f) { return f.calls.find(request => request.statements.length === 7); }
-function assertClean(f) { assert.deepEqual(rows(f, 'release_seoul_preparation_stage'), []); assert.deepEqual(f.raw.prepare('PRAGMA foreign_key_check').all(), []); }
+function assertClean(f) { assert.deepEqual(rows(f, oldStage), []); if (f.targetStageInstalled) assert.deepEqual(rows(f, targetStage), []); assert.deepEqual(f.raw.prepare('PRAGMA foreign_key_check').all(), []); }
 function persistedPair(f, c, { delivery = true, finalize = true, badHash = false, badTransport = false, badText = false } = {}) {
  const r = c.rowGuard, sourceHash = badHash ? 'f'.repeat(64) : c.sourceChangeSha256, transportHash = badTransport ? 'e'.repeat(64) : c.transportPayloadSha256;
  f.raw.exec('BEGIN IMMEDIATE'); try {
@@ -119,7 +133,7 @@ test('missing/invalid/unsupported sources and forged adapter rows stay unready w
  f.hooks.afterRead = undefined;
  f.raw.prepare('INSERT INTO release_seoul_authority_changes(source_command_id,stream_kind,stream_key,event_id,record_bytes,created_at) VALUES(?,?,?,?,?,?)').run(uuid(1002), 'credential', 'bad', uuid(2), '{}', at);
  assert.deepEqual(await f.preparer.prepare(2), { status: 'source_invalid' });
- f.raw.prepare('INSERT INTO release_seoul_authority_changes(source_command_id,stream_kind,stream_key,event_id,record_bytes,created_at) VALUES(?,?,?,?,?,?)').run(uuid(1003), 'target', 'target:one', uuid(3), '{"version":3,"kind":"target-source"}', at);
+ f.raw.prepare('INSERT INTO release_seoul_authority_changes(source_command_id,stream_kind,stream_key,event_id,record_bytes,created_at) VALUES(?,?,?,?,?,?)').run(uuid(1003), 'target', 'target:one', uuid(3), '{"version":3,"kind":"future-target-source"}', at);
  assert.deepEqual(await f.preparer.prepare(3), { status: 'source_contract_unsupported' });
  assert.deepEqual(rows(f, 'release_seoul_authority_changes')[0], actual); assert.equal(f.attempts, 0); assert.equal(rows(f, 'release_seoul_prepared_sources').length, 0); assertClean(f);
 });
@@ -232,4 +246,54 @@ test('source/history/transport immutable guards remain active after preparation'
  const f = await setup(t), r = insertSource(f); await f.preparer.prepare(r.revision); const before = snapshot(f);
  for (const sql of ["UPDATE release_seoul_authority_changes SET created_at=created_at+1", "DELETE FROM release_seoul_authority_changes", "UPDATE release_seoul_prepared_sources SET source_sha256='" + 'f'.repeat(64) + "'", "UPDATE release_seoul_projection_events SET payload_bytes='{}'", "DELETE FROM release_seoul_projection_events", "DELETE FROM release_seoul_projection_deliveries"]) assert.throws(() => f.raw.exec(sql), /immutable|retained/);
  assert.deepEqual(snapshot(f), before); assertClean(f);
+});
+
+test('target preparation retains the 0029 target CHECK and needs the full additive chain', async t => {
+ const f = await setup(t, 'ON', 'durable-sql', true, false), r = insertSource(f, 1, target()), c = await prepareSeoulHeadCandidate(r);
+ const oldDefinition = f.raw.prepare('SELECT sql FROM sqlite_master WHERE name=?').get(oldStage).sql;
+ const witnessSql = `INSERT INTO ${oldStage}(token,revision,source_command_id,stream_kind,stream_key,event_id,record_bytes,created_at,source_sha256,transport_sha256,payload_bytes,eligible) VALUES(?,?,?,?,?,?,?,?,?,?,?,1)`;
+ assert.throws(() => f.raw.prepare(witnessSql).run(uuid(9000), r.revision, r.source_command_id, r.stream_kind, r.stream_key, r.event_id, r.record_bytes, r.created_at, c.sourceChangeSha256, c.transportPayloadSha256, c.eventText), /CHECK/);
+ installTargetSchema(f); assert.equal(f.raw.prepare('SELECT sql FROM sqlite_master WHERE name=?').get(oldStage).sql, oldDefinition);
+ assert.deepEqual(await f.preparer.prepare(r.revision), expected(c, 'prepared')); assertClean(f);
+ const request = batch(f); assert.equal(request.statements.length, 7);
+ assert.ok(request.statements.every(s => !s.sql.includes(oldStage))); assert.ok(request.statements.every(s => s.sql.includes(targetStage)));
+});
+
+for (const recursive of ['ON', 'OFF']) for (const mode of ['native-d1', 'durable-sql']) test(`target preparation persists exact negative under newer positive head; ${mode}, ${recursive}`, async t => {
+ const f = await setup(t, recursive, mode), r = insertSource(f, 1, target(1, false)), newer = insertSource(f, 2, target(2, true));
+ const c = await prepareSeoulHeadCandidate(r), before = rows(f, 'release_seoul_authority_heads');
+ assert.deepEqual(await f.preparer.prepare(r.revision), expected(c, 'prepared'));
+ assert.deepEqual(rows(f, 'release_seoul_authority_heads'), before); assert.equal(before[0].revision, newer.revision); assert.equal(before[0].payload_sha256, null);
+ const e = rows(f, 'release_seoul_projection_events')[0]; assert.equal(e.payload_bytes, c.eventText); assert.equal(e.payload_sha256, c.transportPayloadSha256);
+ assert.deepEqual(decodeSeoulHeadEvent(new TextEncoder().encode(e.payload_bytes)).effect, target(1, false).effect);
+ const complete = snapshot(f); assert.deepEqual(await f.preparer.prepare(r.revision), expected(c, 'already_prepared')); assert.deepEqual(snapshot(f), complete);
+ assert.equal(f.attempts, 1); assertClean(f);
+});
+
+for (const recursive of ['ON', 'OFF']) for (const retainedTable of [oldStage, targetStage]) test(`target preparation both-stage retention precedes already-complete and rejects replacements; ${retainedTable}, ${recursive}`, async t => {
+ const f = await setup(t, recursive), old = insertSource(f), tr = insertSource(f, 2, target(2));
+ assert.equal((await f.preparer.prepare(old.revision)).status, 'prepared'); assert.equal((await f.preparer.prepare(tr.revision)).status, 'prepared');
+ const requests = f.calls.filter(r => r.statements.length === 7), own = requests.find(r => r.statements[0].sql.startsWith('INSERT INTO ' + retainedTable + '('));
+ const first = copy(own.statements[0]); f.engine.execute({ ...own, statements: [first] }); assert.equal(rows(f, retainedTable)[0].eligible, 0);
+ const retained = snapshot(f), attempts = f.attempts;
+ for (const revision of [old.revision, tr.revision]) assert.deepEqual(await f.preparer.prepare(revision), { status: 'staging_retained' });
+ assert.equal(f.attempts, attempts); assert.deepEqual(snapshot(f), retained);
+ for (const request of requests) for (const replace of [false, true]) for (const foreignToken of [false, true]) {
+  const changed = copy(request); if (replace) changed.statements[0].sql = changed.statements[0].sql.replace('INSERT INTO', 'INSERT OR REPLACE INTO');
+  if (foreignToken) changed.statements[0].values[0] = uuid(9999);
+  assert.throws(() => f.engine.execute(changed), /staging/); assert.deepEqual(snapshot(f), retained);
+ }
+});
+
+for (const recursive of ['ON', 'OFF']) for (const preparingTarget of [false, true]) test(`target preparation cross-stage race aborts an eligible batch; target=${preparingTarget}, ${recursive}`, async t => {
+ const f = await setup(t, recursive), old = insertSource(f), tr = insertSource(f, 2, target(2)), retainedSource = preparingTarget ? old : tr, candidate = preparingTarget ? tr : old;
+ assert.equal((await f.preparer.prepare(retainedSource.revision)).status, 'prepared'); const prior = batch(f); let retained;
+ f.hooks.beforeBatch = () => { f.hooks.beforeBatch = undefined; f.engine.execute({ ...prior, statements: [copy(prior.statements[0])] }); retained = snapshot(f); };
+ assert.deepEqual(await f.preparer.prepare(candidate.revision), { status: 'staging_retained' }); assert.equal(f.attempts, 2); assert.deepEqual(snapshot(f), retained);
+});
+
+test('target preparation unknown ACK retains the existing completion observation contract', async t => {
+ const f = await setup(t), r = insertSource(f, 1, target(1, false)), c = await prepareSeoulHeadCandidate(r);
+ f.hooks.afterCommit = () => { throw Error('target preparation lost acknowledgement'); };
+ assert.deepEqual(await f.preparer.prepare(r.revision), expected(c, 'prepared')); assert.equal(f.attempts, 1); assertClean(f);
 });

@@ -38,6 +38,61 @@ const CORE = '{"version":3,"kind":"seoul-authority-source","revision":7,"sourceC
 const SOURCE_SHA = 'cbed48e096c63324fa51d1452e1e57f72156f14168606838b61716e58cd6045d';
 const TRANSPORT_SHA = 'db87cb55e91e44a5d4eacdb7f2549641cb0247d9b651bd9fa6d2ce3d097e8352';
 
+function targetSource(selected = true) {
+  const body = { version: 3, kind: 'target-source', spaceId: 'space:one', selected, changedAtMs: 100,
+    origin: { kind: 'command', commandType: 'target-reconcile', receiptId: COMMAND },
+    effect: selected ? { type: 'entity-head', disposition: 'changed' }
+      : { type: 'entity-negative', entityKind: 'target', entityId: 'space:one', state: 'removed', occurredAtMs: 100 } };
+  return { version: 3, kind: 'seoul-authority-source', revision: 7, sourceCommandId: COMMAND,
+    streamKind: 'target', streamKey: 'space:one', eventId: EVENT, createdAtMs: 100, body };
+}
+
+test('target source exact true/false canonical rows and independent head digest domains', async () => {
+  for (const selected of [true, false]) {
+    const s = targetSource(selected), expectedBody = '{"version":3,"kind":"target-source","spaceId":"space:one","selected":' + selected + ',"changedAtMs":100,"origin":{"kind":"command","commandType":"target-reconcile","receiptId":"' + COMMAND + '"},"effect":'
+      + (selected ? '{"type":"entity-head","disposition":"changed"}' : '{"type":"entity-negative","entityKind":"target","entityId":"space:one","state":"removed","occurredAtMs":100}') + '}';
+    assert.equal(row(s).record_bytes, expectedBody);
+    assert.deepEqual(parseSeoulAuthoritySourceRow(row(s)), s);
+    assert.equal(text(encodeSeoulAuthoritySource(s)), JSON.stringify(s));
+    assert.deepEqual(decodeSeoulAuthoritySource(utf8.encode(JSON.stringify(s))), s);
+    const c = await prepareSeoulHeadCandidate(row(s)), h = decodeSeoulHeadEvent(c.eventBytes);
+    assert.deepEqual(c.rowGuard, row(s)); assert.equal(c.sourceChangeSha256, sha(JSON.stringify(s)));
+    assert.equal(c.transportPayloadSha256, sha(c.eventBytes)); assert.notEqual(c.sourceChangeSha256, c.transportPayloadSha256);
+    assert.deepEqual(h.effect, s.body.effect); assert.equal(h.head.kind, 'target'); assert.equal(h.head.key, s.streamKey);
+    assert.equal(h.head.payloadSha256, c.sourceChangeSha256);
+  }
+  const max = targetSource(false); max.body.spaceId = max.streamKey = 's'.repeat(128); max.body.effect.entityId = max.streamKey;
+  max.body.changedAtMs = max.createdAtMs = max.body.effect.occurredAtMs = Number.MAX_SAFE_INTEGER;
+  assert.deepEqual(parseSeoulAuthoritySourceRow(row(max)), max);
+});
+
+test('target source closed command/effect/time/key matrix rejects every incompatible binding', () => {
+  const mutations = [s => s.body.extra = true, s => delete s.body.changedAtMs, s => s.body.changedAtMs++, s => s.createdAtMs++,
+    s => s.body.origin.receiptId = EVENT, s => s.sourceCommandId = EVENT, s => s.body.origin.receiptId = null,
+    s => s.body.origin.receiptId = 'receipt:one', s => s.body.origin.commandType = 'space-create', s => s.body.origin.extra = true,
+    s => s.body.origin = { kind: 'provider-v1', eventId: 'provider:one', eventType: 'account.disabled', storedRevocationAtMs: 100 },
+    s => s.body.origin = { kind: 'provider-v2', eventId: 'provider:one', eventType: 'account.deleted', sequence: 1, occurredAtMs: 100 },
+    s => s.body.selected = 1, s => s.body.spaceId = 'space:other', s => s.streamKey = 'space:other', s => s.streamKind = 'space',
+    s => s.body.spaceId = s.streamKey = 's'.repeat(129), s => s.body.changedAtMs = s.createdAtMs = -0,
+    s => s.body.changedAtMs = s.createdAtMs = Number.MAX_SAFE_INTEGER + 1,
+    s => s.body.effect.disposition = 'present', s => s.body.effect = { type: 'entity-created', entityKind: 'target', entityId: s.streamKey },
+    s => s.body.effect = targetSource(false).body.effect];
+  for (const mutate of mutations) { const s = targetSource(); mutate(s); invalid(() => encodeSeoulAuthoritySource(s)); }
+  for (const mutate of [s => s.body.effect = head('changed'), s => s.body.effect.entityKind = 'space',
+    s => s.body.effect.entityId = 'space:other', s => s.body.effect.state = 'revoked', s => s.body.effect.occurredAtMs++,
+    s => s.body.effect.extra = true]) { const s = targetSource(false); mutate(s); invalid(() => encodeSeoulAuthoritySource(s)); }
+  for (const missing of ['origin', 'effect']) { const s = targetSource(); delete s.body[missing]; invalid(() => encodeSeoulAuthoritySource(s)); }
+});
+
+test('target source row spelling is canonical and unknown future bodies stay unsupported', () => {
+  const r = row(targetSource(false));
+  for (const record_bytes of [' ' + r.record_bytes, r.record_bytes + '\n', r.record_bytes.replace('"version":3', '"version":3,"version":3'),
+    r.record_bytes.replace('"changedAtMs":100', '"changedAtMs":1e2'), r.record_bytes.replace('space:one', '\\u0073pace:one')])
+    invalid(() => parseSeoulAuthoritySourceRow({ ...r, record_bytes }));
+  unsupported(() => encodeSeoulAuthoritySource({ ...targetSource(), body: { version: 3, kind: 'future-target-source' } }));
+  invalid(() => encodeSeoulAuthoritySource({ ...targetSource(), body: { version: 3, kind: 'target-source' } }));
+});
+
 test('literal canonical body/core/head and independent SHA domains, same event identity', async () => {
   assert.equal(row().record_bytes, BODY);
   assert.equal(text(encodeSeoulAuthoritySource(source())), CORE);
@@ -145,8 +200,8 @@ test('marker is the sole descriptor-free exception and binds capture attempt', a
 });
 
 test('reserved contracts and absent normal descriptors fail with fixed unsupported reason', () => {
-  for (const kind of ['target-source', 'identity-transition-source', 'backfill-source']) unsupported(() => encodeSeoulAuthoritySource({ ...source(), body: { version: 3, kind } }));
-  unsupported(() => encodeSeoulAuthoritySource({ ...source(), streamKind: 'target', streamKey: 'target:one' }));
+  for (const kind of ['future-target-source', 'identity-transition-source', 'backfill-source']) unsupported(() => encodeSeoulAuthoritySource({ ...source(), body: { version: 3, kind } }));
+  invalid(() => encodeSeoulAuthoritySource({ ...source(), streamKind: 'target', streamKey: 'target:one' }));
   for (const b of Object.values(bodies).filter(b => b.origin)) {
     const missing = copy(b); delete missing.origin; delete missing.effect; unsupported(() => encodeSeoulAuthoritySource(source(missing)));
     for (const kind of ['backfill']) unsupported(() => encodeSeoulAuthoritySource(source({ ...b, origin: { kind } })));

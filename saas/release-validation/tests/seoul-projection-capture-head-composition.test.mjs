@@ -23,8 +23,10 @@ const rows = (raw, table) => raw.prepare('SELECT * FROM ' + table + ' ORDER BY r
 
 async function central(t, recursive) {
   const f = await fixture(); t.after(() => f.db.close()); const raw = f.db.raw;
-  for (const name of ['0026_seoul-projection-schema.sql', '0027_seoul-projection-capture-schema.sql', '0028_seoul-projection-bootstrap-schema.sql', '0029_seoul-projection-preparation-schema.sql'])
+  for (const name of ['0026_seoul-projection-schema.sql', '0027_seoul-projection-capture-schema.sql', '0028_seoul-projection-bootstrap-schema.sql', '0029_seoul-projection-preparation-schema.sql',
+    '0030_seoul-projection-workspace-schema.sql', '0031_seoul-projection-provider-schema.sql', '0032_seoul-projection-command-schema.sql', '0033_seoul-projection-provider-v1-schema.sql', '0034_seoul-projection-target-schema.sql'])
     raw.exec(readFileSync(new URL('../../migrations/' + name, import.meta.url), 'utf8'));
+  assert.equal(raw.prepare('SELECT version FROM release_meta').get().version, 34); assert.deepEqual(raw.prepare('PRAGMA foreign_key_check').all(), []);
   raw.exec('PRAGMA recursive_triggers=' + recursive);
   const requests = [];
   const storage = { sql: { exec(sql, ...values) {

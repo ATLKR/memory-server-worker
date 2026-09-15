@@ -13,7 +13,7 @@ const byteLength = Object.getOwnPropertyDescriptor(typedArrayPrototype, 'byteLen
 const byteBrand = Object.getOwnPropertyDescriptor(typedArrayPrototype, Symbol.toStringTag)!.get!;
 const INVALID = Symbol(), UNSUPPORTED = Symbol();
 const commands = ['scoped-key-issue', 'self-email-unlink', 'workspace-sign-in', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke', 'email-link', 'domain-email-revoke', 'scim-deactivate', 'scim-delete', 'space-create'] as const;
-const streamKinds = ['subject', 'email', 'credential', 'membership', 'organization', 'space'] as const;
+const streamKinds = ['subject', 'email', 'credential', 'membership', 'organization', 'space', 'target'] as const;
 type StreamKind = typeof streamKinds[number];
 type Command = typeof commands[number];
 const providerEvents = ['account.suspended','account.resumed','account.deleted','email.revoked','email.verified'] as const;
@@ -32,7 +32,9 @@ type Organization = { version: 3; kind: 'organization-source'; id: string; disab
 type Space = { version: 3; kind: 'space-source'; id: string; accountId: string | null; organizationId: string | null; securityMode: 'managed'; createdAtMs: number } & Descriptors;
 type Marker = { version: 3; kind: 'subject-source-unrepresentable'; issuer: typeof ISSUER; subject: string; accountId: string; reason: 'unmapped' | 'unsupported-mapping' | 'identity-count' | 'identity-bytes' | 'fanout-count' | 'source-bytes' | 'unsupported-state'; countLowerBound: number; byteEstimate: number; captureAttemptId: string };
 type IdentityTransition = { version:3; kind:'identity-transition-source'; issuer:typeof ISSUER; subject:string; address:string|null; origin:ProviderV2|ProviderV1; effect:SeoulHeadEffect };
-export type SeoulAuthoritySourceBody = Credential | Membership | Email | Subject | Organization | Space | Marker | IdentityTransition;
+type Target = { version: 3; kind: 'target-source'; spaceId: string; selected: boolean; changedAtMs: number;
+  origin: { kind: 'command'; commandType: 'target-reconcile'; receiptId: string }; effect: SeoulHeadEffect };
+export type SeoulAuthoritySourceBody = Credential | Membership | Email | Subject | Organization | Space | Marker | IdentityTransition | Target;
 export type SeoulAuthoritySource = {
   version: 3; kind: 'seoul-authority-source'; revision: number; sourceCommandId: string;
   streamKind: StreamKind; streamKey: string; eventId: string; createdAtMs: number; body: SeoulAuthoritySourceBody;
@@ -88,7 +90,7 @@ function address(value: unknown): string {
 }
 function streamKey(kind: StreamKind, value: unknown): string {
   if (typeof value !== 'string' || value.length > 2048 || utf8.encode(value).length > 2048) invalid();
-  if (kind !== 'subject' && kind !== 'email') return identifier(value, kind === 'space' ? 128 : 256);
+  if (kind !== 'subject' && kind !== 'email') return identifier(value, kind === 'space' || kind === 'target' ? 128 : 256);
   const prefix = ISSUER + '\n'; if (!value.startsWith(prefix)) invalid();
   const remainder = value.slice(prefix.length);
   if (kind === 'subject') subject(remainder);
@@ -251,6 +253,24 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
   const x = value as Record<string, unknown>;
   if (!x || typeof x !== 'object' || Array.isArray(x)) invalid();
   literal(x.version, 3);
+  if (x.kind === 'target-source') {
+    record(x, ['version', 'kind', 'spaceId', 'selected', 'changedAtMs', 'origin', 'effect']);
+    const spaceId = identifier(x.spaceId, 128), selected = bool(x.selected), changedAtMs = integer(x.changedAtMs);
+    if (kind !== 'target' || key !== spaceId) invalid();
+    const o = record(x.origin, ['kind', 'commandType', 'receiptId']), receiptId = uuid(o.receiptId);
+    if (receiptId !== commandId) invalid();
+    const capturedOrigin: Target['origin'] = { kind: literal(o.kind, 'command'), commandType: literal(o.commandType, 'target-reconcile'), receiptId };
+    let targetEffect: SeoulHeadEffect;
+    if (selected) {
+      const e = record(x.effect, ['type', 'disposition']);
+      targetEffect = { type: literal(e.type, 'entity-head'), disposition: literal(e.disposition, 'changed') };
+    } else {
+      const e = record(x.effect, ['type', 'entityKind', 'entityId', 'state', 'occurredAtMs']);
+      targetEffect = { type: literal(e.type, 'entity-negative'), entityKind: literal(e.entityKind, 'target'),
+        entityId: literal(e.entityId, spaceId), state: literal(e.state, 'removed'), occurredAtMs: literal(e.occurredAtMs, changedAtMs) };
+    }
+    return { version: 3, kind: 'target-source', spaceId, selected, changedAtMs, origin: capturedOrigin, effect: targetEffect };
+  }
   if(x.kind==='identity-transition-source'){
     if(!Object.hasOwn(x,'origin')||!Object.hasOwn(x,'effect'))unsupported();
     record(x,['version','kind','issuer','subject','address','origin','effect']);const captured=origin(x.origin);if(captured.kind==='command')invalid();
@@ -268,8 +288,9 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
   if (!['credential-source', 'membership-source', 'email-source', 'subject-source', 'organization-source', 'space-source'].includes(x.kind as string)) unsupported();
   if (!Object.hasOwn(x, 'origin') || !Object.hasOwn(x, 'effect')) unsupported();
   if (x.kind !== kind + '-source') invalid();
+  if (kind === 'target') invalid();
   const capturedOrigin = origin(x.origin), command = capturedOrigin.kind==='command'?capturedOrigin.commandType:null;
-  const matrix: Record<StreamKind, readonly Command[]> = {
+  const matrix: Record<Exclude<StreamKind, 'target'>, readonly Command[]> = {
     credential: ['scoped-key-issue', 'self-email-unlink', 'membership-revoke', 'workspace-key-issue', 'workspace-key-revoke', 'domain-email-revoke', 'scim-deactivate', 'scim-delete'], membership: ['self-email-unlink', 'organization-create', 'organization-child-create', 'invite-accept', 'membership-revoke', 'domain-email-revoke', 'scim-deactivate', 'scim-delete'],
     subject: ['workspace-sign-in'], email: ['workspace-sign-in', 'self-email-unlink', 'email-link', 'domain-email-revoke'], organization: ['organization-create', 'organization-child-create'],
     space: ['workspace-sign-in', 'organization-create', 'organization-child-create', 'space-create'],
@@ -338,13 +359,14 @@ function body(value: unknown, kind: StreamKind, key: string, commandId: string):
 }
 function parse(value: unknown): SeoulAuthoritySource {
   const x = record(ownData(value), ['version', 'kind', 'revision', 'sourceCommandId', 'streamKind', 'streamKey', 'eventId', 'createdAtMs', 'body']);
-  if (x.streamKind === 'target') unsupported();
   const streamKind = choice(x.streamKind, streamKinds), key = streamKey(streamKind, x.streamKey), sourceCommandId = uuid(x.sourceCommandId);
   const parsedBody = body(x.body, streamKind, key, sourceCommandId);
+  const createdAtMs = integer(x.createdAtMs);
+  if (parsedBody.kind === 'target-source' && parsedBody.changedAtMs !== createdAtMs) invalid();
   // Enforce body independently of the larger core domain before stringify.
   ownData(parsedBody, { remaining: BODY_BYTES, nodes: 16000 });
   return { version: literal(x.version, 3), kind: literal(x.kind, 'seoul-authority-source'), revision: integer(x.revision, 1), sourceCommandId,
-    streamKind, streamKey: key, eventId: uuid(x.eventId), createdAtMs: integer(x.createdAtMs), body: parsedBody };
+    streamKind, streamKey: key, eventId: uuid(x.eventId), createdAtMs, body: parsedBody };
 }
 function bytes(value: Uint8Array, maximum: number): Uint8Array<ArrayBuffer> {
   // Intrinsic storage supports cross-realm Uint8Array, Buffer and subclasses.
