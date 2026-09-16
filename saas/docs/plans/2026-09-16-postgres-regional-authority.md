@@ -1,11 +1,17 @@
 # PostgreSQL regional authority — re-platform design
 
-**Status:** design draft, 2026-09-16. Supersedes the D1-authority → Seoul
-projection direction for the residency problem. User decision 2026-09-16: all
-durable storage is PostgreSQL; no immediate multi-region requirement, but the
-design must admit region-specific placement (Seoul today; US/EU later) that the
-customer declares per Space. GA schedule is not tight — correctness of design
-is the goal.
+**Status:** design draft, 2026-09-16, amended 2026-09-17. Supersedes the
+D1-authority → Seoul projection direction for the residency problem. User
+decision 2026-09-16: all durable storage is PostgreSQL; no immediate
+multi-region requirement, but the design must admit region-specific
+placement (Seoul today; US/EU later) that the customer declares per Space.
+GA schedule is not tight — correctness of design is the goal.
+
+Amendment 2026-09-16: the identity model is decided — **central SSO
+subject + explicit per-region enrollment** (replaces the bounded-mirror
+sketch below; open decisions 2 and 3 resolved). Identity rows are owned by
+regions; the control plane holds only subject bindings, the canonical id
+registry, the enrollment directory, and the global-disable journal.
 
 ## Goal
 
@@ -58,15 +64,21 @@ Two Postgres tiers. No D1, no durable-SQL authority, no projection pipeline.
 
 Holds globally-unique, low-sensitivity data:
 
-- Global identity: accounts, organizations, account_emails, memberships,
-  provider_identities, domains, email challenges/consumptions, revocations,
-  workspace/SSO command records — the D1 `GLOBAL` set (≈80 tables).
+- **Central identity minimum:** SSO subject bindings
+  (provider/issuer/subject → canonical account id), the canonical
+  account/organization id registry, the **enrollment directory** (which
+  regions each account/organization is enrolled in), and the
+  global-disable flag per account. No emails, memberships, credentials,
+  grants or lifecycle rows exist centrally — a residency declaration then
+  covers a strict customer's identity state completely.
 - **Placement directory:** `spaces` skeleton rows — `id`, owner/org
   references, `home_region`, `data_policy`, `placement_epoch`, status.
   This is the only global copy of Space identity; every Space-scoped row
   lives in the region it names.
-- Deployments catalog, global billing/checkout, global audit of identity
-  mutations, mail budgets, heartbeats, `release_meta`-equivalent ledger.
+- Deployments catalog, global billing/checkout catalog, the central
+  lifecycle journal (account disable / SSO-subject unlink / enrollment
+  removal events, ordered per region), audit of control-plane mutations,
+  `release_meta`-equivalent ledger.
 
 The control plane is itself a PostgreSQL deployment in a chosen default
 region (provider-neutral, e.g. `sg` until a first customer demands
@@ -82,11 +94,13 @@ everything Space-scoped for the Spaces homed there:
 - Space content and history (`memory_content`), payloads and archive
   references, lexical/vector search state (`memory_search`), jobs/queues/
   outbox (`memory_jobs`), usage/metering/audit/erasure ledger (`memory_ops`).
+- **Regional identity ownership:** for accounts/organizations enrolled in
+  the region — account, organization, email, membership, credential/PAT,
+  grant and lifecycle rows in `memory_identity`, born authoritative in the
+  region (never a copy of a central original).
 - **Regional authority ledger:** the PAT digests, `pat_space_grants`,
   lifecycle receipts and per-Space usage needed to authorize operations in
   that region — the `memory_identity` tables already designed for this.
-- The minimal identity mirror rows (account/membership/email records
-  referenced by grants in that region) — see "identity distribution" below.
 - `memory_control.deployment_identity` declares the cluster's own
   `storage_region` and `processing_policy_id`; `memory_control.spaces`
   carries each homed Space's immutable `deployment_id` + `data_policy`.
@@ -134,27 +148,53 @@ authorizer treats its own row as authoritative for admission.
   rule: no inference from IP/email/names, no cross-region fallback, no
   silent downgrade.
 
-## Identity distribution
+## Identity model — central subject + explicit regional enrollment
 
-Accounts/organizations/memberships/emails are written on the control
-plane. A region needs those rows only when a grant in that region
-references them.
+Decided 2026-09-16. Identity is **not** replicated: the control plane
+holds the minimum needed to authenticate and route, and each region *owns*
+the identity rows for the accounts and organizations enrolled there.
+Rejected alternatives: region-locked identities (breaks mixed-residency
+customers and cross-region orgs), global identity + regional mirror
+(stores strict customers' identity metadata outside their declared
+region), signed cross-region attestation (still needs online revocation
+checks; highest complexity).
 
-- **Bounded identity sync:** a central journal of identity mutations is
-  applied to each region that references the identity — idempotent, ordered
-  per identity key, with an explicit head/position per region. This is a
-  much smaller surface than the v3 projection pipeline: identity rows only,
-  no content, no per-Space generations.
-- **Revocation lag** is handled by the same pattern the projected
-  authorizer already proves: the regional admission check compares the
-  mirror's applied-head to the identity's revocation marker; a region
-  that has not applied a revocation denies once its bounded staleness
-  budget expires (fail closed).
-- PAT issuance is routed to the Space's region: creating a Seoul PAT writes
-  the regional ledger directly (central records the issuance event for
-  audit/billing). The ledger row is born authoritative — no apply lag for
-  the grant itself.
-- Whether SSO sessions themselves are regional is a decision below.
+- **Control plane minimum:** SSO subject bindings
+  (provider/issuer/subject → canonical account id), the canonical
+  account/organization id registry, the enrollment directory, and the
+  per-account global-disable flag. Nothing else identity-related is
+  central.
+- **Regional ownership:** an enrolled account's account, email,
+  membership, credential/PAT, grant and lifecycle rows are first-class
+  rows in that region's `memory_identity` schema — the region is their
+  authority. The same applies to enrolled organizations.
+- **Enrollment is an explicit act:** SSO sign-in at a regional endpoint →
+  if the subject has no enrollment in that region, run the enrollment
+  flow (consent + policy validation) → create the regional account row.
+  Organization membership follows the same pattern: the organization must
+  be enrolled in region R and the invitee must enroll in R before the
+  membership row exists — an extension of the existing
+  `workspace_invitations`/`acceptances` command pattern.
+- **Space home and account home are independent:** an account enrolled in
+  region A may hold a grant on a Space homed in region B only if the
+  account is *also* enrolled in B. Cross-region sharing is therefore a
+  consent-based enrollment act, not implicit synchronization — the grant
+  row lives in the Space's region and references the regional account row
+  there.
+- **Global revocation is one narrow journal:** only central events —
+  account disable, SSO-subject unlink, enrollment removal — are applied
+  to the affected regions in order, reusing the v3 head-comparison /
+  bounded-staleness pattern (a region that has not applied a revocation
+  denies once its staleness budget expires; fail closed). PAT issuance
+  and grants are regional writes with zero apply lag.
+- **SSO/session evaluation:** the SSO subject is resolved centrally (it
+  is the login key); sessions are minted and evaluated *regionally*
+  against the regional account row and current enrollment — the same
+  principle as the regional serving authorizer, in the region's SQL.
+- **Region-only accounts** (no central SSO subject — regional credential
+  only) stay possible for strict customers: the directory simply has no
+  central mapping for them. The schema permits this now; the product flow
+  can surface it later.
 
 ## What the projection pipeline becomes
 
@@ -162,13 +202,15 @@ references them.
   watermarks/dirty/staging/targets/manifests/snapshot-stage) and the
   `src/release/seoul-projection-*` modules were D1→Seoul transport. Under
   this design they are replaced by:
-  - the identity-sync journal (control → region), and
-  - direct regional writes for everything Space-scoped.
+  - the central lifecycle journal (control → region: account disable,
+    SSO-subject unlink, enrollment removal only), and
+  - direct regional writes for everything Space-scoped and everything
+    identity-scoped.
 - The regional-side v3 machinery partially survives: `serving-authorizer`'s
   admission checks (data_policy/deployment/grant evaluation) become the
   permanent regional authorizer; the generation/lease/grant-heads freshness
   machinery is retired for content (regional rows are authoritative) but
-  the head-comparison pattern may be reused for the identity mirror's
+  the head-comparison pattern is reused for the lifecycle journal's
   staleness bound. Final call at implementation review.
 - `snapshot-dispatch`/`snapshot-materialization`/provisioning drafts: their
   role separation, preflight/postflight and ACL patterns carry over; the
@@ -209,8 +251,9 @@ activated before its own gate.
 5. **P-4 Placement + routing.** `data_policy` on Space creation,
    `resolveMemoryRoute` consumes the directory, `createRegionApp`
    generalization, region attestation.
-6. **P-5 Identity sync + regional authority.** Journal/outbox + regional
-   apply; permanent regional authorizer; revocation staleness bound.
+6. **P-5 Regional enrollment + authority.** Enrollment commands +
+   directory writer, central lifecycle journal + regional apply, permanent
+   regional authorizer, revocation staleness bound.
 7. **P-6 Cutover, backfill, recovery.** Sealed import (existing pattern:
    exact table/column/schema identity, chunk hashes, row counts, digests),
    freeze writes, verify target, keep D1 as recovery artifact, no dual
@@ -224,13 +267,14 @@ activated before its own gate.
 1. **Placement lookup path:** does every request read the directory, or is
    placement carried by a signed token/claim minted when the client selects
    a Space? (Latency vs revocation freshness.)
-2. **Account home vs Space home:** may an account in region A hold grants
-   on a Space in region B? If yes, identity mirror is mandatory; if no
-   (region-locked identities), the model is simpler but constrains
-   cross-region org usage. Initial proposal: allow it via the bounded
-   mirror — cross-region shares stay a separately-reviewed federation unit.
-3. **SSO/session placement:** sessions central with regional re-check, or
-   issued regionally like PATs?
+2. ~~**Account home vs Space home**~~ — **resolved 2026-09-16:** yes, via
+   explicit per-region enrollment. An account must be enrolled in the
+   Space's region to hold a grant there; no identity mirror exists.
+   Cross-region share workflows are enrollment invitations and stay a
+   separately-reviewed unit.
+3. ~~**SSO/session placement**~~ — **resolved 2026-09-16:** central SSO
+   subject resolution + regional session minting/evaluation against the
+   regional account row and enrollment state.
 4. **Control-plane location/provider:** which region hosts it, and does any
    customer's residency declaration ever cover control-plane rows
    (org metadata is itself residency-sensitive for strict customers)?
