@@ -239,12 +239,15 @@ activated before its own gate.
 2. **P-1 Postgres `Database` adapter + test pglite adapter.** Same
    interface; transactional `batch`; `withSession('first-primary')` maps to
    a single-session connection. Existing unit suites run against it.
-3. **P-2 Schema port.** Postgres migrations for the ~80 global tables into
-   `memory_control`/`memory_identity`/`memory_ops` on the control plane and
-   the ~22 Space-regional tables into `memory_content`/`memory_search`/
-   `memory_jobs`/`memory_ops` on the regional cluster — reusing existing
-   `postgres/` objects where they match, extending where they don't.
-   Placement directory + `data_policy` writer on `spaces`.
+3. **P-2 Schema port.** Postgres migrations per the frozen classification
+   ([`2026-09-17-residency-data-classification.md`](2026-09-17-residency-data-classification.md)):
+   14 control-plane tables + 3 split skeletons (accounts, organizations,
+   spaces) into `memory_control`/`memory_ops` on the control plane; 33
+   identity + 27 Space-scoped tables into `memory_identity`/
+   `memory_content`/`memory_search`/`memory_jobs`/`memory_ops`/
+   `memory_control` on the regional cluster — reusing existing `postgres/`
+   objects where they match, extending where they don't. Enrollment
+   directory, placement directory + `data_policy` writer on `spaces`.
 4. **P-3 Service port.** Dialect rewrites at the 122 call sites; identity/
    auth/workspace/memory/api/mcp first, then release modules (jobs, search,
    payloads, lifecycle, billing). Per-module focused suites.
