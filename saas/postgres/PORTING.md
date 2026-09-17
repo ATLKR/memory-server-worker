@@ -101,6 +101,33 @@ Discovery counted 75 ordinary central tables, 5 views and 227 final triggers in 
 
 No clinical tables or namespace are pre-created. The latest user decision places medical/strict data in Seoul and general data outside Seoul; this supersedes the earlier blanket recommendation to leave medical placement undecided. Storage admission must use that explicit fixed-region profile. It does not establish where runtime, inference, logs, backups, keys, SSO or operators process data. The later Cloudflare BAA/filtering and processing controls remain separate work, and this unfinished foundation cannot yet accept product traffic. A future clinical extension needs explicit Seoul physical separation, role/key boundaries and its own migration review; a schema name is not a residency guarantee. Do not send content overseas to classify it and do not infer sensitivity from names, IPs or email domains.
 
+## Regional-authority port progress (2026-09-17)
+
+The regional-authority schema port now covers the full frozen
+classification on both tiers. Ledgers are contiguous per lineage.
+
+| Lineage | Migration | Coverage |
+| --- | --- | --- |
+| control | `control/0003_placement_directory.sql` | Region/deployment catalogs, canonical account/org skeletons, central SSO provider binding, per-region enrollments, Space placement skeleton with `data_policy`/`home_region`/epoch rules, webhook-backed ordered lifecycle journal, provider revocations. |
+| control | `control/0004_billing_catalog.sql` | Pools (auto-created on placement), checkout requests/closures, billing events/lock, heartbeats, provider budgets. Cross-tier predicates move to the service boundary. |
+| regional | `migrations/0003_identity_foundation.sql` | Regional principals/emails/memberships/credentials/provider bindings. |
+| regional | `migrations/0004`–`0005` | Seoul PAT/archive slice (existing bounded module). |
+| regional | `migrations/0006_identity_authority.sql` | Domains/managers, challenges/consumptions, revocations/blocks, lifecycle applied-state + apply-head, active views. |
+| regional | `migrations/0007_workspace_regional.sql` | Workspace command records (sign-in/org/invite/key/revocation), OAuth flows, hierarchy, credential policies, SCIM, reauth, external blocks, mail budget, regional provider tombstones. Space-creating commands carry `data_policy` asserted against `deployment_identity`. |
+| regional | `migrations/0008_regional_space.sql` | `memory_content` memories/versions, ops ledgers (operations/usage/policies/erasure/events/export/cursors), jobs queue, search references, transition/erasure/metering/storage triggers. |
+| regional | `migrations/0009_payload_staging.sql` | D1 0022 payload staging/archival including the payload-aware transition replacements. |
+| regional | `migrations/0010_execution_time_guards.sql` | D1 0019/0024 final semantics: `greatest(recorded, wall)` admission, `issued_at`, regional lifecycle-apply gating, reauth consumption, SCIM cascade, cursor shapes, index-only migrations. |
+
+Deliberately not ported: `release_fts` (FTS5 virtual table — regional
+search decision pending), `release_shares` (cross-border, deferred to
+the federation unit), the 47 dropped-projection tables, and
+`release_meta` (`schema_migrations` already covers it).
+
+Remaining P-2 follow-up before P-3 service wiring: none for table
+coverage — service call-site port (P-3), placement/routing (P-4),
+enrollment/lifecycle apply (P-5), recovery rehearsal (P-6), and
+residency/cost evidence + GA gate (P-7) remain.
+
 ## Verification
 
 Run from `saas`:
