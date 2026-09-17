@@ -1,5 +1,15 @@
 # Native PostgreSQL port status
 
+> 2026-09-16 re-platform direction: PostgreSQL becomes the authority for all
+> durable storage with customer-declared per-Space residency — see
+> [`../docs/plans/2026-09-16-postgres-regional-authority.md`](../docs/plans/2026-09-16-postgres-regional-authority.md)
+> and the frozen classification in
+> [`../docs/plans/2026-09-17-residency-data-classification.md`](../docs/plans/2026-09-17-residency-data-classification.md).
+> Two migration lineages share the `migrations/0001`–`0002` foundation:
+> `postgres/migrations/` is the **regional** lineage (0003+ existing), and
+> `postgres/control/` is the **control-plane** lineage (0003+). Each cluster's
+> `schema_migrations` ledger stays contiguous within its own lineage.
+
 > Current scope: the user's later 2026-09-11 decision prefers Cloudflare for feasible persistence and full raw Agent Memory ingest, with Seoul PostgreSQL only for explicitly external Cloudflare data. See `../docs/cloudflare-storage-research.ko.md`. The full port matrix below is an inventory of the earlier alternative, not an instruction to expand PostgreSQL as the default backend. Migration 0004 and a standalone Hono PAT archive/keyword implementation are now present; see [Seoul serving scope and release gates](SEOUL-SERVING.md). No mandatory pgvector or general-memory Neon path is being activated.
 
 The D1 baseline is preserved at `adfb256545f395274f2645e2e83c16642b596d84`. This directory contains a foundation and a bounded native serving module, not a complete operational Memory backend. This source package does not install migration 0004 or execute a production cutover. Provider installation receipts are separate from source tests. The existing D1 migrations and SQL are unchanged.
