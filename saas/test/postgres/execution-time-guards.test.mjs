@@ -28,7 +28,7 @@ async function createFixture(t) {
     for (const name of ['0001_private_namespaces.sql', '0002_deployment_identity.sql', '0003_identity_foundation.sql',
         '0004_seoul_pat_archive.sql', '0005_seoul_archive_lifecycle.sql', '0006_identity_authority.sql',
         '0007_workspace_regional.sql', '0008_regional_space.sql', '0009_payload_staging.sql',
-        '0010_execution_time_guards.sql']) {
+        '0010_execution_time_guards.sql', '0011_deferred_shares.sql']) {
         await db.exec(await readFile(new URL(name, migrations), 'utf8'));
     }
     await db.exec(`RESET ROLE; ${restore}`);
@@ -40,9 +40,9 @@ async function createFixture(t) {
 
 const denied = e => ['55000', '23505', '23514', '23503', '42501'].includes(String(e?.code ?? ''));
 
-test('installs as regional version 10 with corrected cursor shapes', async t => {
+test('installs as regional version 11 with corrected cursor shapes', async t => {
     const { db } = await createFixture(t);
-    assert.equal((await db.query(`SELECT version FROM memory_control.schema_migrations ORDER BY version DESC LIMIT 1`)).rows[0].version, 10);
+    assert.equal((await db.query(`SELECT version FROM memory_control.schema_migrations ORDER BY version DESC LIMIT 1`)).rows[0].version, 11);
     assert.deepEqual((await db.query(`SELECT name FROM memory_ops.maintenance_progress ORDER BY name`)).rows,
         [{ name: 'source_erasure' }, { name: 'vector_resweep' }]);
     assert.deepEqual((await db.query(`SELECT kind, after_revision, generation FROM memory_ops.payload_backfill_progress ORDER BY kind`)).rows,
