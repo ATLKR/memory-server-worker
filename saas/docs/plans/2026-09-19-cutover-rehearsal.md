@@ -7,10 +7,13 @@ remains unexecuted; this document is the procedure and its evidence so far.
 
 One consistent cut, sealed, copied, verified — never dual writers.
 
-1. **Freeze**: source stays the sole writer until activation. The seal is a
-   consistent snapshot of named tables (per-table row count + SHA-256 over
-   canonical ordered row dumps + schema-inventory digest).
-   `src/postgres/cutover.ts`.
+1. **Freeze**: `freezeRuntime` revokes the runtime role's `LOGIN` and
+   terminates its backends — every serving path dies while the operator
+   session running the seal is unaffected. Read-only transactions are
+   session-bypassable and grant replay is error-prone; `NOLOGIN` is airtight
+   and exactly reversible with `unfreezeRuntime`. The seal is a consistent
+   snapshot of named tables (per-table row count + SHA-256 over canonical
+   ordered row dumps + schema-inventory digest). `src/postgres/cutover.ts`.
 2. **Copy**: INSERT-only into an empty target with
    `session_replication_role='replica'` (the pg_restore pattern) — user and
    constraint triggers are suppressed, so derived rows (job outbox, fts
@@ -32,7 +35,7 @@ One consistent cut, sealed, copied, verified — never dual writers.
 
 ## Evidence
 
-`test/postgres/cutover-rehearsal.test.mjs` (6/6 on PGlite):
+`test/postgres/cutover-rehearsal.test.mjs` (7/7 on PGlite):
 
 - Full-surface enumeration (`listRegionalTables`, 60+ regional tables) sealed
   and re-verified on a fresh schema.
@@ -44,6 +47,8 @@ One consistent cut, sealed, copied, verified — never dual writers.
 - Payload objects: live-reference inventory collapses agreed references,
   excludes terminal stages, and verifies fetched bytes against stored
   digests — a missing or corrupt object blocks activation on the target.
+- The freeze flips `memory_runtime`'s `rolcanlogin` at the authority and
+  restores it; unsafe role names are rejected before any DDL runs.
 
 ## Payload/object layer
 
@@ -69,6 +74,6 @@ Postgres. The cut therefore runs a parallel object pass:
 
 - **Live rehearsal** on real Neon/Supabase instances, including measured
   RPO/RTO, TLS-path verification, and the acceptance record.
-- **Operational runbook ordering** for a production cut: freeze trigger at the
-  service layer (write quarantine flag), migration-window sizing, and the
-  rollback journal for post-activation regression.
+- **Operational runbook ordering** for a production cut: the freeze/unfreeze
+  caller (an operator command or worker-side quarantine flag), migration-
+  window sizing, and the rollback journal for post-activation regression.

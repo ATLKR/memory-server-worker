@@ -75,6 +75,23 @@ export async function listRegionalTables(session: PgSession): Promise<string[]> 
     return r.rows.map(row => row.t);
 }
 
+/** Write freeze for the cut window. Revoking the runtime role's LOGIN is the
+ * airtight fence: every serving connection dies, writes and reads alike, while
+ * the admin session running the seal is unaffected. The alternative —
+ * read-only transactions — is session-bypassable; replaying the grant list is
+ * error-prone. `unfreezeRuntime` restores login exactly. */
+export async function freezeRuntime(admin: PgSession, role = 'memory_runtime'): Promise<void> {
+    if (!/^[a-z_][a-z0-9_]{0,62}$/.test(role)) throw new Error('cutover_role_invalid');
+    await admin.query(`ALTER ROLE ${role} NOLOGIN`);
+    await admin.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename=$1`, [role]);
+}
+
+/** Restore the runtime role's login after a verified or abandoned cut. */
+export async function unfreezeRuntime(admin: PgSession, role = 'memory_runtime'): Promise<void> {
+    if (!/^[a-z_][a-z0-9_]{0,62}$/.test(role)) throw new Error('cutover_role_invalid');
+    await admin.query(`ALTER ROLE ${role} LOGIN`);
+}
+
 /** Digest every row of `table` under the caller's snapshot/transaction. */
 export async function sealTable(session: PgSession, table: string): Promise<TableSeal> {
     const qualified = qualify(table);

@@ -4,8 +4,8 @@ import assert from 'node:assert/strict';
 import { PGlite } from '@electric-sql/pglite';
 import { createPgliteSession } from './pg-database-fixture.mjs';
 import { createHash } from 'node:crypto';
-import { copyTable, exportManifest, listRegionalTables, payloadInventory, sealPayloadObjects,
-    sealTable, verifyManifest, verifyPayloadObjects } from '../../src/postgres/cutover.ts';
+import { copyTable, exportManifest, freezeRuntime, listRegionalTables, payloadInventory,
+    sealPayloadObjects, sealTable, unfreezeRuntime, verifyManifest, verifyPayloadObjects } from '../../src/postgres/cutover.ts';
 
 const NOW = 1758000000000;
 // Regional tables with real seeded content — a representative cut, not the
@@ -169,4 +169,20 @@ test('payload objects seal against the row inventory and verify on the target st
     store.delete('hot-01/k1');
     const missing = await sealPayloadObjects(session, fetcher);
     assert.deepEqual(missing.unresolved.map(r => r.key), ['k1']);
+});
+
+test('the cut window freezes the runtime role at the authority and restores it', async t => {
+    const { session: admin } = await regionalDb(t);
+    const login = async () => (await admin.query(
+        `SELECT rolcanlogin FROM pg_catalog.pg_roles WHERE rolname='memory_runtime'`)).rows[0].rolcanlogin;
+    // Migrations provision memory_runtime NOLOGIN; the operator grants LOGIN at
+    // provisioning time, so start from the unfrozen state before the cut.
+    await unfreezeRuntime(admin);
+    assert.equal(await login(), true);
+    await freezeRuntime(admin);
+    assert.equal(await login(), false);
+    await unfreezeRuntime(admin);
+    assert.equal(await login(), true);
+    await assert.rejects(() => freezeRuntime(admin, 'memory_runtime; DROP TABLE x'),
+        e => e.message === 'cutover_role_invalid');
 });
