@@ -32,7 +32,7 @@ One consistent cut, sealed, copied, verified — never dual writers.
 
 ## Evidence
 
-`test/postgres/cutover-rehearsal.test.mjs` (5/5 on PGlite):
+`test/postgres/cutover-rehearsal.test.mjs` (6/6 on PGlite):
 
 - Full-surface enumeration (`listRegionalTables`, 60+ regional tables) sealed
   and re-verified on a fresh schema.
@@ -41,12 +41,32 @@ One consistent cut, sealed, copied, verified — never dual writers.
   schema's own transition guards reject an illegal one outright.
 - Post-cut writes change the seal; a rebuilt target re-verifies.
 - The importer refuses non-empty targets, unknown tables, and unsafe names.
+- Payload objects: live-reference inventory collapses agreed references,
+  excludes terminal stages, and verifies fetched bytes against stored
+  digests — a missing or corrupt object blocks activation on the target.
+
+## Payload/object layer
+
+Row cuts carry only `(payload_shard_id, payload_object_key, payload_sha256,
+payload_bytes)` references — the bytes live in the object store outside
+Postgres. The cut therefore runs a parallel object pass:
+
+- `payloadInventory` enumerates every live reference — `memories`,
+  `memory_versions`, and `payload_stages` in `ready`/`published`/
+  `purge_pending`. `staging` objects may not be uploaded yet and `purged`
+  ones are already gone — both are reconciliation outcomes, not cutover
+  content. References agreeing on a key collapse into one inventory row; a
+  digest conflict surfaces as an extra unresolved entry.
+- `sealPayloadObjects` fetches each object through a `PayloadFetcher`
+  ((shard,key)→bytes: R2, S3, or a fixture), verifies size + SHA-256, and
+  seals the set. Unfetched or digest-mismatched references land in
+  `unresolved` and block activation.
+- `verifyPayloadObjects` re-fetches on the target store — the object bytes
+  are re-homed to the residency-pinned store for the region; the seal is
+  what proves they arrived identical.
 
 ## Not yet covered
 
-- **Payload/object artifacts** (R2/object-store payloads referenced by
-  `memories.payload_*`): reconciliation is row-level only so far — object
-  bytes are out of the Postgres cut and need their own inventory/digest pass.
 - **Live rehearsal** on real Neon/Supabase instances, including measured
   RPO/RTO, TLS-path verification, and the acceptance record.
 - **Operational runbook ordering** for a production cut: freeze trigger at the

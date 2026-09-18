@@ -146,3 +146,69 @@ export async function verifyManifest(session: PgSession, manifest: CutoverManife
     }
     return mismatched;
 }
+
+// ---------------------------------------------------------------------------
+// Payload/object layer. Row cuts carry (payload_shard_id, payload_object_key,
+// payload_sha256, payload_bytes) references; the bytes live in the object store
+// outside Postgres. The seal therefore needs a parallel object pass: inventory
+// the live references, fetch every object, verify content digests, and record
+// the result so the target store can be reconciled the same way.
+
+export interface PayloadObjectRef { shard: string; key: string; sha256: string; bytes: number }
+export interface ObjectSeal extends PayloadObjectRef { verified: boolean }
+export interface PayloadSeal {
+    objects: ObjectSeal[];
+    /** References whose object could not be fetched or whose digest disagreed. */
+    unresolved: PayloadObjectRef[];
+    sha256: string;
+}
+/** (shard, key) → object bytes, or null when absent. R2, S3 or a fixture store. */
+export type PayloadFetcher = (shard: string, key: string) => Promise<Uint8Array | null>;
+
+/** Every live object reference. Staging/purged stages are excluded: a staging
+ * object may not be uploaded yet and a purged one is already gone — both are
+ * reconciliation outcomes, not cutover content. Two rows naming the same key
+ * must agree on its digest; a conflict seals as unresolved. */
+export async function payloadInventory(session: PgSession): Promise<PayloadObjectRef[]> {
+    const r = await session.query<{ shard: string; key: string; sha256: string; bytes: number }>(
+        `SELECT shard,key,sha256,bytes FROM (
+          SELECT payload_shard_id AS shard,payload_object_key AS key,payload_sha256 AS sha256,payload_bytes AS bytes
+            FROM memory_content.memories WHERE payload_object_key IS NOT NULL
+          UNION ALL
+          SELECT payload_shard_id,payload_object_key,payload_sha256,payload_bytes
+            FROM memory_content.memory_versions WHERE payload_object_key IS NOT NULL
+          UNION ALL
+          SELECT payload_shard_id,payload_object_key,payload_sha256,payload_bytes
+            FROM memory_content.payload_stages WHERE state IN ('ready','published','purge_pending')
+        ) inv GROUP BY shard,key,sha256,bytes ORDER BY shard,key`);
+    return r.rows.map(row => ({ shard: row.shard, key: row.key, sha256: row.sha256, bytes: Number(row.bytes) }));
+}
+
+/** Fetch every inventoried object, verify its stored digest, and seal the set. */
+export async function sealPayloadObjects(session: PgSession, fetcher: PayloadFetcher): Promise<PayloadSeal> {
+    const inventory = await payloadInventory(session);
+    const objects: ObjectSeal[] = [];
+    const unresolved: PayloadObjectRef[] = [];
+    for (const ref of inventory) {
+        const body = await fetcher(ref.shard, ref.key);
+        if (!body || body.length !== ref.bytes
+            || createHash('sha256').update(body).digest('hex') !== ref.sha256) {
+            unresolved.push(ref);
+            continue;
+        }
+        objects.push({ ...ref, verified: true });
+    }
+    const sha256 = createHash('sha256').update(canonical(objects.map(o => ({ shard: o.shard, key: o.key, sha256: o.sha256 })))).digest('hex');
+    return { objects, unresolved, sha256 };
+}
+
+/** Re-fetch every sealed object on the target store and compare digests. */
+export async function verifyPayloadObjects(seal: PayloadSeal, fetcher: PayloadFetcher): Promise<PayloadObjectRef[]> {
+    const mismatched: PayloadObjectRef[] = [];
+    for (const ref of seal.objects) {
+        const body = await fetcher(ref.shard, ref.key);
+        if (!body || body.length !== ref.bytes
+            || createHash('sha256').update(body).digest('hex') !== ref.sha256) mismatched.push(ref);
+    }
+    return mismatched;
+}
