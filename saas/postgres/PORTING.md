@@ -128,6 +128,48 @@ coverage — service call-site port (P-3), placement/routing (P-4),
 enrollment/lifecycle apply (P-5), recovery rehearsal (P-6), and
 residency/cost evidence + GA gate (P-7) remain.
 
+## Port progress (2026-09-18)
+
+- **P-3 service port.** Release service modules run on the PostgreSQL
+  `Database` adapter (`src/postgres/database.ts`): schema-qualified names,
+  JSONB, `least()` scalar min, `RETURNING`/`ON CONFLICT`, tsvector lexical
+  search. Control-plane billing tables are written through `env.CONTROL_DB`
+  when present (`billing.ts`, `provider-budget.ts`); regional authority
+  predicates keep evaluating on `env.DB`. Legacy exceptions unchanged:
+  `seoul-projection-*` (D1 transport) and `payloads.ts` (shard dialect).
+- **P-4 placement + routing (in progress).**
+  `src/routing/placement.ts` — `resolveMemoryRoute` reads the control
+  placement directory per call: `routed` only for a live region + exactly
+  one live deployment; `not_found`/`closed`/`unavailable` otherwise, and
+  `placement_directory_unavailable` on read failure — no fallback target.
+  `src/postgres/region-app.ts` — `createRegionWorkerApp` generalizes the
+  Seoul composition: `${prefix}_*` env bindings → attested `PostgresTarget`
+  → one attested session per request → `createApplication`+`createRelease`
+  over `createPostgresDatabase`; an optional `_CONTROL_*` target supplies
+  `CONTROL_DB`. `authority()` in `src/release/authority.ts` additionally
+  requires `s.data_policy->>'residency' = storage_region` of the serving
+  deployment — a Space whose data_policy declares a different region is
+  inadmissible on this cluster even before grant evaluation.
+- Open P-4 remainder: control-plane billing fixture coverage for
+  `_CONTROL_*` split wiring, provider-native attestation evidence.
+  `src/routing/router.ts` — `createRoutingWorkerApp` proxies Space-scoped
+  requests to `MEMORY_REGION_ENDPOINTS_JSON[region]` after a directory
+  read; non-Space paths get a typed `space_scope_required` refusal.
+- **P-5 enrollment + authority (in progress).**
+  `src/postgres/enrollment.ts` — explicit regional enrollment commands:
+  canonical account/org skeleton + live enrollment row (idempotent),
+  terminal removal, retired-region refusal. `signedIn` in
+  `release/extension.ts` enrolls the account in the serving deployment's
+  region when `CONTROL_DB` is configured.
+  `src/postgres/lifecycle-apply.ts` — central journal → regional apply:
+  `applyLifecycleEvent` preserves per-issuer order and the terminal
+  `account.deleted` rule; `syncLifecycleJournal` pulls events past each
+  issuer's apply-head; `scheduled()` syncs when `CONTROL_DB` is set.
+  `authority()`/`interactive()` additionally deny when a bound issuer's
+  apply-head is missing or older than `LIFECYCLE_STALENESS_MS` (900000) —
+  the bounded-staleness revocation gate; region-only accounts without
+  provider bindings are unaffected.
+
 ## Verification
 
 Run from `saas`:

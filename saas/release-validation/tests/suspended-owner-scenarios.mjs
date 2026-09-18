@@ -16,7 +16,49 @@ function httpRequest(db,clock,defaultToken) {
  const release=createRelease({DB:db,PUBLIC_ORIGIN:origin},{clock}),app=createApplication(db,readSettings({PUBLIC_ORIGIN:origin}),{clock,release});
  return(path,token=defaultToken,data)=>app(new Request(origin+path,{method:data?'POST':'GET',headers:{authorization:'Bearer '+token,...(data?{'content-type':'application/json',accept:'application/json, text/event-stream','mcp-protocol-version':'2025-11-25'}:{})},...(data?{body:JSON.stringify(data)}:{})}));
 }
-export async function suspendedOwnerFixture(db,clock) {
+export async function suspendedOwnerFixture(db,clock,options={}) {
+ // The regional apply unit is external to the intake path (same replay as
+ // lifecycle-heads.test.mjs): journaled lifecycle_events fold into
+ // lifecycle_applied_state plus the D1 revocation cascade and apply head.
+ await db.raw.exec(`CREATE FUNCTION suspended_test_apply() RETURNS trigger
+   LANGUAGE plpgsql SET search_path = pg_catalog AS $apply$
+ BEGIN
+   UPDATE memory_ops.lifecycle_applied_state s
+     SET sequence=NEW.sequence,kind=NEW.kind,occurred_at_ms=NEW.occurred_at,event_id=NEW.id
+     WHERE s.issuer=NEW.issuer AND s.subject=NEW.subject AND s.address=NEW.address
+       AND s.sequence<NEW.sequence AND s.kind<>'account.deleted';
+   INSERT INTO memory_ops.lifecycle_applied_state(issuer,subject,address,sequence,kind,occurred_at_ms,event_id)
+     SELECT NEW.issuer,NEW.subject,NEW.address,NEW.sequence,NEW.kind,NEW.occurred_at,NEW.id
+     WHERE NOT EXISTS(SELECT 1 FROM memory_ops.lifecycle_applied_state s
+       WHERE s.issuer=NEW.issuer AND s.subject=NEW.subject AND s.address=NEW.address);
+   INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms)
+     VALUES(NEW.issuer,NEW.sequence,memory_control.now_ms())
+     ON CONFLICT(issuer) DO UPDATE SET applied_sequence=GREATEST(EXCLUDED.applied_sequence,lifecycle_apply_head.applied_sequence),
+       applied_at_ms=EXCLUDED.applied_at_ms;
+   RETURN NULL;
+ END $apply$;
+ CREATE TRIGGER suspended_test_apply AFTER INSERT ON memory_ops.lifecycle_events
+   FOR EACH ROW EXECUTE FUNCTION suspended_test_apply();
+ CREATE FUNCTION suspended_test_revoke() RETURNS trigger
+   LANGUAGE plpgsql SET search_path = pg_catalog AS $revoke$
+ BEGIN
+   UPDATE memory_identity.credentials SET revoked_at=memory_control.now_ms() WHERE revoked_at IS NULL AND NEW.address=''
+     AND account_id IN (SELECT account_id FROM memory_identity.provider_identities WHERE issuer=NEW.issuer AND subject=NEW.subject);
+   UPDATE memory_identity.memberships SET revoked_at=memory_control.now_ms() WHERE revoked_at IS NULL AND NEW.address=''
+     AND account_id IN (SELECT account_id FROM memory_identity.provider_identities WHERE issuer=NEW.issuer AND subject=NEW.subject);
+   UPDATE memory_identity.account_emails SET revoked_at=memory_control.now_ms() WHERE revoked_at IS NULL AND (NEW.address='' OR address=NEW.address)
+     AND account_id IN (SELECT account_id FROM memory_identity.provider_identities WHERE issuer=NEW.issuer AND subject=NEW.subject);
+   UPDATE memory_identity.email_challenges SET invalidated_at=memory_control.now_ms() WHERE used_at IS NULL AND invalidated_at IS NULL AND (NEW.address='' OR address=NEW.address)
+     AND account_id IN (SELECT account_id FROM memory_identity.provider_identities WHERE issuer=NEW.issuer AND subject=NEW.subject);
+   UPDATE memory_identity.accounts SET disabled_at=memory_control.now_ms() WHERE disabled_at IS NULL AND NEW.kind='account.deleted'
+     AND id IN (SELECT account_id FROM memory_identity.provider_identities WHERE issuer=NEW.issuer AND subject=NEW.subject);
+   RETURN NULL;
+ END $revoke$;
+ CREATE TRIGGER suspended_test_revoke AFTER INSERT OR UPDATE ON memory_ops.lifecycle_applied_state
+   FOR EACH ROW EXECUTE FUNCTION suspended_test_revoke();`);
+ // Issuer watermark before the first event: authority() denies provider-bound
+ // accounts while lifecycle_apply_head is missing or stale.
+ await db.prepare('INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES(?,?,?)').bind(issuer,0,9007199254740991).run();
  const workspace=new WorkspaceService(db,clock,{identityLifecycle:true}),users={};
  for(const subject of ['alice','bob','carol']) users[subject]=await workspace.signIn({issuer,subject,email:subject+'@example.com',emailVerified:true,issuedAt:clock(),expiresAt:clock()+900000,permission:'write'});
  await db.prepare("UPDATE credentials SET reauthenticated_at=? WHERE kind='session'").bind(clock()).run();
@@ -27,10 +69,15 @@ export async function suspendedOwnerFixture(db,clock) {
  const store=new MemoryStore(db,clock),transfer=new Transfers(db,clock),admin=new Admin({DB:db,IDENTITY_WEBHOOK_SECRET:secret},clock);
  const personalMemory=await store.create(users.alice.token,personal,{body:'suspendedprivateword confidential personal body'},'personal-content');
  const organizationMemory=await store.create(users.alice.token,organization.spaceId,{body:'activeorganizationword retained organization body'},'organization-content');
- const accepted=await transfer.share(users.alice.token,personal,'carol@example.com');await transfer.accept(users.carol.token,accepted.id);
- const pending=await transfer.share(users.alice.token,personal,'bob@example.com');
- const independent=await transfer.share(users.bob.token,organization.spaceId,'carol@example.com');await transfer.accept(users.carol.token,independent.id);
- const reader=await admin.issueKey(users.carol.token,{label:'Independent reader',capabilities:['read'],spaceIds:[personal],expiresInDays:1});
+ // Cross-border share federation is deferred (0011); share INSERTs are denied.
+ // Tests unrelated to sharing pass {shares:false} and still exercise the fixture.
+ let accepted,pending,independent,reader;
+ if(options.shares!==false){
+  accepted=await transfer.share(users.alice.token,personal,'carol@example.com');await transfer.accept(users.carol.token,accepted.id);
+  pending=await transfer.share(users.alice.token,personal,'bob@example.com');
+  independent=await transfer.share(users.bob.token,organization.spaceId,'carol@example.com');await transfer.accept(users.carol.token,independent.id);
+  reader=await admin.issueKey(users.carol.token,{label:'Independent reader',capabilities:['read'],spaceIds:[personal],expiresInDays:1});
+ }
  const oldKey=await admin.issueKey(users.alice.token,{label:'Old owner key',capabilities:['read'],spaceIds:[personal],expiresInDays:1});
  let sequence=0;const deliver=async type=>{const raw=JSON.stringify({version:2,id:'owner-event-'+(++sequence),sequence,issuer,subject:'alice',type,occurredAt:clock(),email:null}),timestamp=String(Math.floor(clock()/1000));
   const response=await admin.identityWebhook(new Request(origin+'/webhooks/identity',{method:'POST',headers:{'x-memory-timestamp':timestamp,'x-memory-signature':await hmac(secret,timestamp+'.'+raw)},body:raw}));assert.equal(response.status,200);};

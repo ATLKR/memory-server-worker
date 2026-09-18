@@ -25,11 +25,10 @@ async function signed(overrides = {}, header = {}) {
   }).setProtectedHeader({ alg: 'RS256', typ: 'at+jwt', kid: 'test-key', ...header }).sign(keys.privateKey);
 }
 async function fixture(opts = {}) {
-  const storage = createDatabase();
-  storage.raw.exec(readFileSync(new URL('../auth-schema.sql', import.meta.url), 'utf8'));
-  storage.raw.exec("INSERT INTO accounts(id) VALUES ('alice')");
+  const storage = await createDatabase();
+  await storage.raw.exec("INSERT INTO memory_identity.accounts(id) VALUES ('alice')");
   let now = NOW;
-  storage.setClock(() => now);
+  await storage.setClockValue(now);
   const principals = [];
   const exchanges = [];
   const localToken = 'browser-local-session-00000000000000000000000000000000';
@@ -62,7 +61,7 @@ async function fixture(opts = {}) {
     return controller.handle(request(`/auth/callback?${params}`, { headers: { cookie } }));
   };
   return { ...storage, ...controller, request, begin, callback, principals, exchanges, localToken,
-    setNow: value => { now = value; } };
+    setNow: async value => { now = value; await storage.setClockValue(value); } };
 }
 
 test('browser login binds PKCE to a single-use callback and stores only the opaque local session', async t => {
@@ -88,12 +87,12 @@ test('browser login binds PKCE to a single-use callback and stores only the opaq
   assert.equal(f.principals[0].permission, 'write');
   assert.equal(f.principals[0].externalToken, undefined);
   assert.equal('reauthenticatedAt' in f.principals[0], false);
-  const row = f.raw.prepare('SELECT * FROM auth_flows').get();
+  const row = await f.raw.prepare('SELECT * FROM memory_identity.auth_flows').get();
   assert.equal(row.verifier, null);
   assert.equal(JSON.stringify(row).includes(flow.state), false);
   assert.equal(JSON.stringify(row).includes('must-not-be-stored'), false);
   assert.equal((await f.callback(flow)).status, 400);
-  assert.equal(f.raw.prepare('SELECT count(*) AS n FROM credentials').get().n, 1);
+  assert.equal((await f.raw.prepare('SELECT count(*) AS n FROM memory_identity.credentials').get()).n, 1);
 });
 
 test('callback cannot consume an auth flow that expires while its UPDATE waits to execute', async t => {
@@ -102,15 +101,19 @@ test('callback cannot consume an auth flow that expires while its UPDATE waits t
   let queued = false;
   f.db.prepare = sql => {
     const statement = prepare(sql);
-    if (sql.includes('UPDATE auth_flows SET consumed_at=')) {
+    if (sql.includes('UPDATE memory_identity.auth_flows SET consumed_at=')) {
       const first = statement.first.bind(statement);
-      statement.first = async () => { queued = true; f.setNow(NOW + 600001); return first(); };
+      statement.first = async () => {
+        queued = true;
+        await f.setNow(NOW + 600_001);
+        return first();
+      };
     }
     return statement;
   };
   const response = await f.callback(flow);
   assert.equal(response.status, 400); assert.equal(queued, true);
-  assert.equal(f.raw.prepare('SELECT consumed_at FROM auth_flows').get().consumed_at, null);
+  assert.equal((await f.raw.prepare('SELECT consumed_at FROM memory_identity.auth_flows').get()).consumed_at, null);
   assert.equal(f.exchanges.length, 0);
 });
 
@@ -125,22 +128,22 @@ test('callback rejects expired, unbound, duplicate and issuer-confused requests 
       if (scenario === 'issuer') response = await f.callback(flow, { iss: 'https://untrusted.example' });
       if (scenario === 'error') response = await f.callback(flow, { error: 'access_denied' });
       if (scenario === 'duplicate') response = await f.handle(f.request(`/auth/callback?code=x&code=y&state=${flow.state}&iss=${encodeURIComponent(settings.issuer)}`, { headers: { cookie: flow.cookie } }));
-      if (scenario === 'expiry') { f.setNow(NOW + 600_001); response = await f.callback(flow); }
+      if (scenario === 'expiry') { await f.setNow(NOW + 600_001); response = await f.callback(flow); }
       assert.equal(response.status, 400);
       assert.equal(f.exchanges.length, 0);
-      assert.equal(f.raw.prepare('SELECT count(*) AS n FROM credentials').get().n, 0);
+      assert.equal((await f.raw.prepare('SELECT count(*) AS n FROM memory_identity.credentials').get()).n, 0);
     });
   }
 });
 
 for(const during of [1,2])test('callback checks flow expiry after digest '+during,async t=>{
- const f=await fixture();t.after(f.close);const flow=await f.begin();f.setNow(NOW+599999);
- const original=crypto.subtle.digest;let calls=0;crypto.subtle.digest=async function(...args){const result=await original.apply(this,args);if(++calls===during)f.setNow(NOW+600001);return result;};t.after(()=>{crypto.subtle.digest=original;});
- assert.equal((await f.callback(flow)).status,400);assert.equal(f.exchanges.length,0);assert.equal(f.raw.prepare('SELECT consumed_at FROM auth_flows').get().consumed_at,null);
+ const f=await fixture();t.after(f.close);const flow=await f.begin();await f.setNow(NOW+599999);
+ const original=crypto.subtle.digest;let calls=0;crypto.subtle.digest=async function(...args){const result=await original.apply(this,args);if(++calls===during)await f.setNow(NOW+600001);return result;};t.after(()=>{crypto.subtle.digest=original;});
+ assert.equal((await f.callback(flow)).status,400);assert.equal(f.exchanges.length,0);assert.equal((await f.raw.prepare('SELECT consumed_at FROM memory_identity.auth_flows').get()).consumed_at,null);
 });
 
 test('token verification checks expiry after asynchronous key resolution',async t=>{
- const f=await fixture({jwks:async()=>{f.setNow(NOW+900001);return keys.publicKey;}});t.after(f.close);
+ const f=await fixture({jwks:async()=>{await f.setNow(NOW+900001);return keys.publicKey;}});t.after(f.close);
  const token=await signed();await assert.rejects(()=>f.resolveBearer(token));
  assert.equal(f.principals.length,0);
 });
@@ -156,7 +159,7 @@ test('real signed bearer validation rejects wrong token authority, use, lifetime
   for (const claims of invalid) await t.test(JSON.stringify(claims), async t => {
     const f = await fixture(); t.after(f.close);
     await assert.rejects(f.resolveBearer(await signed(claims)));
-    assert.equal(f.raw.prepare('SELECT count(*) AS n FROM credentials').get().n, 0);
+    assert.equal((await f.raw.prepare('SELECT count(*) AS n FROM memory_identity.credentials').get()).n, 0);
   });
   const f = await fixture(); t.after(f.close);
   await assert.rejects(f.resolveBearer(await signed({}, { typ: 'JWT' })));
@@ -176,7 +179,7 @@ test('MCP clients may differ from browser client but write access requires both 
 test('browser callback rejects access tokens issued to a different registered client', async t => {
   const f = await fixture({ claims: { client_id: 'other-client', azp: 'other-client' } }); t.after(f.close);
   assert.equal((await f.callback(await f.begin())).status, 400);
-  assert.equal(f.raw.prepare('SELECT count(*) AS n FROM credentials').get().n, 0);
+  assert.equal((await f.raw.prepare('SELECT count(*) AS n FROM memory_identity.credentials').get()).n, 0);
 });
 
 test('logout requires exact Origin POST and permanently revokes the browser credential', async t => {
@@ -187,12 +190,12 @@ test('logout requires exact Origin POST and permanently revokes the browser cred
     const response = await f.handle(f.request('/auth/logout', { method: 'POST', headers: { ...headers, ...(origin ? { origin } : {}) } }));
     assert.equal(response.status, 403);
   }
-  assert.equal(f.raw.prepare('SELECT revoked_at FROM credentials').get().revoked_at, null);
+  assert.equal((await f.raw.prepare('SELECT revoked_at FROM memory_identity.credentials').get()).revoked_at, null);
   assert.equal((await f.handle(f.request('/auth/logout', { headers }))).status, 405);
   const response = await f.handle(f.request('/auth/logout', { method: 'POST', headers: { ...headers, origin: settings.origin } }));
   assert.equal(response.status, 303);
   assert.match(response.headers.get('set-cookie'), /__Host-memory_session=;.*Max-Age=0/);
-  assert.equal(f.raw.prepare('SELECT revoked_at FROM credentials').get().revoked_at, NOW);
+  assert.equal((await f.raw.prepare('SELECT revoked_at FROM memory_identity.credentials').get()).revoked_at, NOW);
 });
 
 test('missing client configuration leaves unrelated public pages routable and fails login closed', async t => {
@@ -206,13 +209,13 @@ test('provider redirects, oversized bodies and callback races cannot issue sessi
     Response.json({ access_token: 'x'.repeat(50_000) })]) {
     const f = await fixture({ fetch: async () => response }); t.after(f.close);
     assert.equal((await f.callback(await f.begin())).status, 400);
-    assert.equal(f.raw.prepare('SELECT count(*) AS n FROM credentials').get().n, 0);
+    assert.equal((await f.raw.prepare('SELECT count(*) AS n FROM memory_identity.credentials').get()).n, 0);
   }
   const f = await fixture(); t.after(f.close);
   const flow = await f.begin();
   const responses = await Promise.all([f.callback(flow), f.callback(flow)]);
   assert.deepEqual(responses.map(r => r.status).sort(), [303, 400]);
-  assert.equal(f.raw.prepare('SELECT count(*) AS n FROM credentials').get().n, 1);
+  assert.equal((await f.raw.prepare('SELECT count(*) AS n FROM memory_identity.credentials').get()).n, 1);
 });
 
 test('production JWKS transport verifies real provider keys and rejects redirects or oversized key sets', async t => {
@@ -227,7 +230,7 @@ test('production JWKS transport verifies real provider keys and rejects redirect
     const bad = await fixture({ remoteJwks: true, fetch: async () => result });
     t.after(bad.close);
     await assert.rejects(bad.resolveBearer(token));
-    assert.equal(bad.raw.prepare('SELECT count(*) AS n FROM credentials').get().n, 0);
+    assert.equal((await bad.raw.prepare('SELECT count(*) AS n FROM memory_identity.credentials').get()).n, 0);
   }
 });
 
@@ -244,7 +247,7 @@ test('invalid provider configuration and duplicate session cookies cannot become
     origin: settings.origin, cookie: `__Host-memory_session=${f.localToken}; __Host-memory_session=${f.localToken}`,
   } }));
   assert.equal(response.status, 303);
-  assert.equal(f.raw.prepare('SELECT revoked_at FROM credentials').get().revoked_at, null);
+  assert.equal((await f.raw.prepare('SELECT revoked_at FROM memory_identity.credentials').get()).revoked_at, null);
 });
 
 test('separate request controllers reuse public JWKS data and refresh an expired cache', async t => {
@@ -296,14 +299,14 @@ test('callback diagnostics remain request-local and expose no verifier or cookie
 
 for (const boundary of ['flow claim', 'verifier erasure']) test('callback checks flow expiry after '+boundary+' before token exchange', async t => {
   const f = await fixture(); t.after(f.close); const flow = await f.begin();
-  f.raw.prepare('UPDATE auth_flows SET expires_at=?').run(NOW + 100);
+  await f.raw.prepare('UPDATE memory_identity.auth_flows SET expires_at=?').run(NOW + 100);
   const prepare = f.db.prepare.bind(f.db);
   f.db.prepare = sql => {
     const statement = prepare(sql), method = boundary === 'flow claim' ? 'first' : 'run', invoke = statement[method].bind(statement);
-    statement[method] = async () => { const value = await invoke(); if (sql.includes(boundary === 'flow claim' ? 'SET consumed_at=?' : 'SET verifier=NULL')) f.setNow(NOW + 200); return value; };
+    statement[method] = async () => { const value = await invoke(); if (sql.includes(boundary === 'flow claim' ? 'SET consumed_at=?' : 'SET verifier=NULL')) await f.setNow(NOW + 200); return value; };
     return statement;
   };
   assert.equal((await f.callback(flow)).status, 400);
   assert.equal(f.exchanges.length, 0);
-  assert.equal(f.raw.prepare('SELECT verifier FROM auth_flows').get().verifier, null);
+  assert.equal((await f.raw.prepare('SELECT verifier FROM memory_identity.auth_flows').get()).verifier, null);
 });

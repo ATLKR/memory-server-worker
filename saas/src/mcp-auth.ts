@@ -77,22 +77,22 @@ export async function toolResponse(response: Response, token: string, db: Identi
     ? [...wire.matchAll(/(?:^|\n)data: ?([^\r\n]+)(?=\r?\n|$)/g)].map(match => JSON.parse(match[1]!)) : [JSON.parse(wire)];
   const untrackedSuccess = !manifest && envelopes.some(envelope => envelope.result && envelope.result.isError !== true);
   const hash = await digestToken(token), at = clock(), actions = [...new Set(checks.map(check => check.action))];
-  const branches = actions.map(action => `SELECT w.key,${authority.expiry(action)} AS expiresAt
-    FROM wanted w JOIN spaces s ON s.id=json_extract(w.value,'$.spaceId') CROSS JOIN actor c
-    WHERE json_extract(w.value,'$.action')='${action}' AND ${authority.sql(action)}
-      AND (json_type(w.value,'$.name') IS NULL OR (s.name IS json_extract(w.value,'$.name')
-        AND s.organization_id IS json_extract(w.value,'$.organizationId') AND s.security_mode IS json_extract(w.value,'$.securityMode')))
-      AND (json_type(w.value,'$.memoryId') IS NULL OR EXISTS(SELECT 1 FROM memories r
-        WHERE r.id=json_extract(w.value,'$.memoryId') AND r.space_id=s.id AND r.revision=json_extract(w.value,'$.revision')
+  const branches = actions.map(action => `SELECT w.key,${authority.expiry(action)} AS "expiresAt"
+    FROM wanted w JOIN memory_control.spaces s ON s.id=w.value->>'spaceId' CROSS JOIN actor c
+    WHERE w.value->>'action'='${action}' AND ${authority.sql(action)}
+      AND (w.value->>'name' IS NULL OR (s.name IS NOT DISTINCT FROM w.value->>'name'
+        AND s.organization_id IS NOT DISTINCT FROM w.value->>'organizationId' AND s.security_mode IS NOT DISTINCT FROM w.value->>'securityMode'))
+      AND (w.value->>'memoryId' IS NULL OR EXISTS(SELECT 1 FROM memory_content.memories r
+        WHERE r.id=w.value->>'memoryId' AND r.space_id=s.id AND r.revision=(w.value->>'revision')::bigint
           AND ${authority.liveMemory}))`);
   const snapshot = await db.withSession('first-primary').prepare(`/* mcp-response-authority */
     WITH actor AS MATERIALIZED (SELECT id,account_id,kind,token_digest,expires_at,membership_expires_at,permission,membership_id
-      FROM active_credentials WHERE token_digest=?),
-    wanted AS MATERIALIZED (SELECT key,value FROM json_each(?)),
-    allowed AS MATERIALIZED (${branches.length ? branches.join(' UNION ALL ') : 'SELECT NULL AS key,0 AS expiresAt WHERE 0'})
-    SELECT min(c.expires_at,c.membership_expires_at) AS expiresAt,
-      (SELECT json_group_array(json_object('index',w.key,'expiresAt',coalesce(a.expiresAt,0)))
-        FROM wanted w LEFT JOIN allowed a ON a.key=w.key) AS grants FROM actor c`)
+      FROM memory_identity.active_credentials WHERE token_digest=?),
+    wanted AS MATERIALIZED (SELECT (ord-1)::int AS key,value FROM jsonb_array_elements(?::jsonb) WITH ORDINALITY AS e(value,ord)),
+    allowed AS MATERIALIZED (${branches.length ? branches.join(' UNION ALL ') : 'SELECT NULL::int AS key,0 AS "expiresAt" WHERE false'})
+    SELECT least(c.expires_at,c.membership_expires_at) AS "expiresAt",
+      coalesce((SELECT jsonb_agg(jsonb_build_object('index',w.key,'expiresAt',coalesce(a."expiresAt",0)))
+        FROM wanted w LEFT JOIN allowed a ON a.key=w.key)::text,'[]') AS grants FROM actor c`)
     .bind(hash, JSON.stringify(checks), ...actions.flatMap(action => authority.values(hash, at, action)))
     .first<{ expiresAt: number; grants: string }>();
   const checkedAt = clock();

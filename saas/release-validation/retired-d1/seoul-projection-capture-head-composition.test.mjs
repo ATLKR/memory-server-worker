@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
-import { fixture, at } from './db.mjs';
+import { fixture, at } from './db-sqlite.mjs';
 import { WorkspaceService } from '../../src/workspace.ts';
 import { Admin } from '../../src/release/admin.ts';
 import { IdentityService } from '../../src/identity.ts';
@@ -82,7 +82,7 @@ for (const prepared of [false, true]) for (const recursive of ['ON', 'OFF']) tes
     if (prepared) {
       assert.deepEqual(await d1.preparer.prepare(row.revision), { status: 'prepared', revision: row.revision, eventId: row.event_id,
         sourceChangeSha256: candidate.sourceChangeSha256, transportPayloadSha256: candidate.transportPayloadSha256 });
-      const persisted = d1.raw.prepare('SELECT payload_bytes,payload_sha256 FROM release_seoul_projection_events WHERE event_id=?').get(row.event_id);
+      const persisted = (await d1.raw.prepare('SELECT payload_bytes,payload_sha256 FROM release_seoul_projection_events WHERE event_id=?').get(row.event_id));
       assert.equal(persisted.payload_bytes, candidate.eventText); assert.equal(persisted.payload_sha256, candidate.transportPayloadSha256);
       // Send bytes read from the persisted transport, including older positive
       // sources prepared after the same stream's newer terminal head.

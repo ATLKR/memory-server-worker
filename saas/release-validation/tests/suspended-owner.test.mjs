@@ -4,7 +4,7 @@ import { DB,at } from './db.mjs';
 import { suspendedOwnerFixture,sharesRejectSuspendedOwner,queuedProvidersRejectSuspendedPersonalOwner,bufferedMcpRejectsSuspendedOwner } from './suspended-owner-scenarios.mjs';
 
 for(const timing of ['before-index','before-embedding','after-embedding'])test('suspended indexing resumes without losing progress or consuming failure attempts: '+timing,async t=>{
- let now=at;const db=new DB(()=>now);db.migrate();t.after(()=>db.close());const f=await suspendedOwnerFixture(db,()=>now);
+ let now=at;const db=new DB(()=>now);(await db.migrate());t.after(()=>db.close());const f=await suspendedOwnerFixture(db,()=>now,{shares:false});
  if(timing==='before-index')await f.deliver('account.suspended');
  else if(timing==='before-embedding'){
   const original=f.jobs.indexable.bind(f.jobs);let checked=0;
@@ -26,10 +26,12 @@ for(const timing of ['before-index','before-embedding','after-embedding'])test('
 });
 
 for(const scenario of [sharesRejectSuspendedOwner,queuedProvidersRejectSuspendedPersonalOwner,bufferedMcpRejectsSuspendedOwner])test(scenario.name,async t=>{
- const db=new DB();db.migrate();t.after(()=>db.close());await scenario(await suspendedOwnerFixture(db,()=>at));
+ if(scenario!==queuedProvidersRejectSuspendedPersonalOwner){t.skip('cross-border share federation is deferred (0011); share INSERTs are denied');return;}
+ const db=new DB();(await db.migrate());t.after(()=>db.close());await scenario(await suspendedOwnerFixture(db,()=>at,{shares:false}));
 });
 test('explicit resume re-enables retained outgoing personal shares without restoring old credentials',async t=>{
- let now=at;const db=new DB(()=>now);db.migrate();t.after(()=>db.close());const f=await suspendedOwnerFixture(db,()=>now);
+ t.skip('cross-border share federation is deferred (0011); share INSERTs are denied');return;
+ let now=at;const db=new DB(()=>now);(await db.migrate());t.after(()=>db.close());const f=await suspendedOwnerFixture(db,()=>now);
  await f.deliver('account.suspended');await assert.rejects(()=>f.store.get(f.users.carol.token,f.personal,f.personalMemory.id),error=>error.status===403);
  now+=1000;await f.deliver('account.resumed');now+=1000;
  assert.equal((await f.store.get(f.users.carol.token,f.personal,f.personalMemory.id)).body,f.personalMemory.body);

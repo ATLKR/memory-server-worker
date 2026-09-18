@@ -135,7 +135,7 @@ CREATE FUNCTION memory_content.payload_stage_admission() RETURNS trigger
 BEGIN
   IF NOT EXISTS(SELECT 1 FROM memory_content.payload_intents i
       WHERE i.id = NEW.intent_id AND i.published_at IS NULL AND i.collection_started_at IS NULL
-        AND i.expires_at > floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
+        AND i.expires_at > memory_control.now_ms()
         AND NEW.ordinal < i.item_count AND NEW.state = 'staging'
         AND (SELECT count(*) FROM memory_content.payload_stages WHERE intent_id = i.id) < i.item_count
         AND coalesce((SELECT sum(payload_bytes) FROM memory_content.payload_stages WHERE intent_id = i.id), 0)
@@ -165,7 +165,7 @@ BEGIN
         AND (SELECT count(*) FROM memory_content.payload_stages
           WHERE intent_id = OLD.id AND state = 'published') = OLD.item_count)
       OR (NEW.published_at IS NULL AND NEW.collection_started_at IS NOT NULL
-        AND OLD.expires_at <= floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
+        AND OLD.expires_at <= memory_control.now_ms()
         AND (SELECT count(*) FROM memory_content.payload_stages p
           WHERE p.intent_id = OLD.id AND p.state IN ('purge_pending', 'purged')
             AND EXISTS(SELECT 1 FROM memory_ops.payload_purges q WHERE q.payload_id = p.id))
@@ -216,7 +216,7 @@ CREATE FUNCTION memory_content.payload_stage_publish() RETURNS trigger
 BEGIN
   IF NOT EXISTS(SELECT 1 FROM memory_content.payload_intents i
       WHERE i.id = NEW.intent_id AND i.collection_started_at IS NULL
-        AND i.expires_at > floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint)
+        AND i.expires_at > memory_control.now_ms())
     OR NOT EXISTS(SELECT 1 FROM memory_content.memories m
         JOIN memory_content.payload_intents i ON i.id = NEW.intent_id
         WHERE m.id = NEW.memory_id AND m.space_id = i.space_id AND m.payload_id = NEW.id
@@ -278,8 +278,11 @@ BEGIN
     OR NEW.payload_sha256 IS DISTINCT FROM OLD.payload_sha256
     OR NEW.payload_bytes IS DISTINCT FROM OLD.payload_bytes
     OR NEW.created_at IS DISTINCT FROM OLD.created_at
-    OR (TG_TABLE_NAME = 'payload_purges' AND OLD.purged_at IS NOT NULL)
-    OR (TG_TABLE_NAME = 'payload_retirements' AND OLD.retired_at IS NOT NULL)
+    -- Field access must not name a column the other queue table lacks: SQL
+    -- does not short-circuit OR, so OLD.purged_at/OLD.retired_at would raise
+    -- "record has no field" on the sibling table. Read through to_jsonb.
+    OR (TG_TABLE_NAME = 'payload_purges' AND (to_jsonb(OLD) ->> 'purged_at') IS NOT NULL)
+    OR (TG_TABLE_NAME = 'payload_retirements' AND (to_jsonb(OLD) ->> 'retired_at') IS NOT NULL)
     OR NEW.attempts < OLD.attempts
   THEN RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'Payload cleanup evidence is immutable'; END IF;
   RETURN NEW;
@@ -297,7 +300,7 @@ BEGIN
       JOIN memory_content.payload_intents i ON i.id = p.intent_id
       WHERE p.id = NEW.payload_id AND p.memory_id = NEW.memory_id AND p.state = 'ready'
         AND i.action = 'archive'
-        AND i.expires_at > floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
+        AND i.expires_at > memory_control.now_ms()
         AND ((NEW.target = 'current' AND EXISTS(SELECT 1 FROM memory_content.memories m
           WHERE m.id = NEW.memory_id AND m.revision = NEW.revision AND m.space_id = i.space_id
             AND m.payload_id IS NULL AND m.erased_at IS NULL
@@ -503,7 +506,7 @@ BEGIN
       payload_object_key, payload_sha256, payload_bytes, created_at, retired_at)
     SELECT OLD.payload_id, OLD.space_id, OLD.id, OLD.payload_shard_id, OLD.payload_object_key,
       OLD.payload_sha256, OLD.payload_bytes,
-      floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint, NULL
+      memory_control.now_ms(), NULL
     WHERE NOT EXISTS(SELECT 1 FROM memory_ops.payload_retirements WHERE payload_id = OLD.payload_id);
   RETURN NULL;
 END

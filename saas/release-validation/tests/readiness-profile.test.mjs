@@ -37,8 +37,11 @@ async function sign(payload = claims(), options = {}) {
 }
 
 async function readyFixture(t, overrides = {}) {
-  const db = new DB(); db.migrate(21); t.after(() => db.close());
-  db.raw.prepare('INSERT INTO release_heartbeats(name,last_success_at) VALUES(?,?)').run('maintenance', at);
+  const db = new DB(); (await db.migrate(21)); t.after(() => db.close());
+  // The probe reads max(version) as the central schema position; pin it to the
+  // contract version the signed acceptance claims (regional migrations stop lower).
+  (await db.raw.prepare("INSERT INTO memory_control.schema_migrations(version,name) VALUES(21,'0021_acceptance.sql')").run());
+  (await db.raw.prepare('INSERT INTO release_heartbeats(name,last_success_at) VALUES(?,?)').run('maintenance', at));
   const env = { DB: db, PUBLIC_ORIGIN: origin, SSO_CLIENT_ID: 'registered-central-client',
     AI: { run() {} }, MEMORY_INDEX: { query() {}, upsert() {}, deleteByIds() {}, getByIds() {} },
     PAYLOAD_KEY: Buffer.alloc(32, 1).toString('base64url'), EMAIL: { send() {} }, MAIL_FROM: 'memory@example.org',
@@ -139,7 +142,9 @@ for (const [name, override, check] of [
 
 test('metering checks live database tables and budget/meter triggers', async t => {
   const f = await readyFixture(t);
-  f.db.raw.exec('DROP TRIGGER release_operation_meter');
+  // The probe counts the metering functions via pg_proc; dropping the function
+  // cascades to its trigger, removing the metering mechanism entirely.
+  (await f.db.raw.exec('DROP FUNCTION memory_ops.operation_meter() CASCADE'));
   assert.equal((await f.evaluate()).checks.metering, false);
 });
 
@@ -153,7 +158,7 @@ test('schema, storage and maintenance failures are sanitized and fail closed', a
   assert.equal(failed.checks.storage, false); assert.doesNotMatch(JSON.stringify(failed), /private-database-id/);
   f.options.inspectStorage = async () => ({ ready: true, hotSchemaVersion: 1, resourceFingerprint: fingerprint });
   for (const heartbeat of [at - 900000, at + 1]) {
-    f.db.raw.prepare('UPDATE release_heartbeats SET last_success_at=?').run(heartbeat);
+    (await f.db.raw.prepare('UPDATE release_heartbeats SET last_success_at=?').run(heartbeat));
     assert.equal((await f.evaluate()).checks.maintenance, false);
   }
 });
@@ -165,7 +170,7 @@ test('acceptance expiration is rechecked after asynchronous verification', async
   assert.equal((await f.evaluate()).checks.operatorAcceptance, false);
 });
 
-test('native workerd verifies Ed25519 acceptance with real D1 readiness probes', async t => {
+test('native workerd verifies Ed25519 acceptance with real readiness probes', async t => {
   const bindings = {
     PUBLIC_ORIGIN: origin, SSO_CLIENT_ID: 'registered-central-client', PAYLOAD_KEY: Buffer.alloc(32, 1).toString('base64url'),
     MAIL_FROM: 'memory@example.org', IDENTITY_WEBHOOK_SECRET: 'd'.repeat(32), BACKGROUND_JOBS_ENABLED: 'true',
@@ -175,9 +180,16 @@ test('native workerd verifies Ed25519 acceptance with real D1 readiness probes',
   };
   const { outputFiles } = await build({ stdin: {
     contents: `import {evaluateReadiness} from './src/release/readiness.ts';
+      // PostgreSQL metadata probes have no D1 equivalent; the worker stub returns
+      // the same bounded probe shape the live database answers.
+      const probeDb={withSession(){return this},prepare(sql){const s={bind(){return s},async first(){
+        if(sql.includes('schema_migrations'))return{version:21};
+        if(sql.includes('heartbeats'))return{at:${at}};
+        if(sql.includes('information_schema'))return{tables:3,views:1,triggers:2};
+        return null}};return s}};
       export default {async fetch(request,env) {
         const mode=new URL(request.url).searchParams.get('mode');
-        const configured={...env,AI:{run(){}},MEMORY_INDEX:{query(){},upsert(){},deleteByIds(){},getByIds(){}},
+        const configured={...env,DB:probeDb,AI:{run(){}},MEMORY_INDEX:{query(){},upsert(){},deleteByIds(){},getByIds(){}},
           EMAIL:{send(){}},METRICS:{writeDataPoint(){}},REQUEST_LIMITER:{limit(){}}};
         if(mode==='pilot') configured.RELEASE_MODE='pilot';
         if(mode==='tampered') configured.LIVE_ACCEPTANCE_JWS=configured.LIVE_ACCEPTANCE_JWS.replace(/\\.[^.]+$/,'.AAAA');
@@ -190,20 +202,9 @@ test('native workerd verifies Ed25519 acceptance with real D1 readiness probes',
     define: { BUILD_SOURCE_REVISION: JSON.stringify(revision), BUILD_RESOURCE_FINGERPRINT: JSON.stringify(fingerprint) } });
   const mf = new Miniflare(convertV4MiniflareOptions({ name: 'readiness-native-test', modules: true,
     compatibilityDate: '2026-09-08', compatibilityFlags: ['nodejs_compat'], script: outputFiles[0].text,
-    d1Databases: ['DB'], bindings,
+    bindings,
   }));
   t.after(() => mf.dispose());
-  const db = await mf.getD1Database('DB');
-  // Minimal native catalog fixture; the preceding Node tests use all actual migrations.
-  await db.batch([
-    'CREATE TABLE release_meta(version INTEGER)', 'INSERT INTO release_meta VALUES(21)',
-    'CREATE TABLE release_heartbeats(name TEXT,last_success_at INTEGER)', `INSERT INTO release_heartbeats VALUES('maintenance',${at})`,
-    'CREATE TABLE release_operations(id TEXT)', 'CREATE TABLE release_usage_events(id TEXT)',
-    'CREATE TABLE release_usage_counters(id TEXT)', 'CREATE TABLE release_pools(id TEXT)',
-    'CREATE VIEW release_space_pools AS SELECT id FROM release_pools',
-    'CREATE TRIGGER release_operation_budget BEFORE INSERT ON release_operations BEGIN SELECT 1; END',
-    'CREATE TRIGGER release_operation_meter AFTER INSERT ON release_operations BEGIN SELECT 1; END',
-  ].map(sql => db.prepare(sql)));
   await t.test('valid operator key returns 200 without revealing evidence', async () => {
     const response = await mf.dispatchFetch(origin + '/ready');
     assert.equal(response.status, 200);

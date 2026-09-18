@@ -91,13 +91,15 @@ async function acceptance(env: ReadinessEnvironment, options: ReadinessOptions, 
 export async function evaluateReadiness(env: ReadinessEnvironment, options: ReadinessOptions): Promise<ReadinessResult> {
   const clock = options.clock ?? Date.now;
   const [schema, heartbeat, meter, storage] = await Promise.all([
-    safe(() => env.DB.withSession('first-primary').prepare('SELECT max(version) AS version FROM release_meta').first<{ version: number }>()),
-    safe(() => env.DB.withSession('first-primary').prepare("SELECT last_success_at AS at FROM release_heartbeats WHERE name='maintenance'").first<{ at: number }>()),
+    safe(() => env.DB.withSession('first-primary').prepare('SELECT max(version) AS version FROM memory_control.schema_migrations').first<{ version: number }>()),
+    safe(() => env.DB.withSession('first-primary').prepare("SELECT last_success_at AS at FROM memory_ops.heartbeats WHERE name='maintenance'").first<{ at: number }>()),
     safe(() => env.DB.withSession('first-primary').prepare(`SELECT
-      sum(type='table' AND name IN ('release_operations','release_usage_events','release_usage_counters','release_pools')) AS tables,
-      sum(type='view' AND name='release_space_pools') AS views,
-      sum(type='trigger' AND name IN ('release_operation_budget','release_operation_meter')) AS triggers
-      FROM sqlite_master WHERE name IN ('release_operations','release_usage_events','release_usage_counters','release_pools','release_space_pools','release_operation_budget','release_operation_meter')`).first<{ tables: number; views: number; triggers: number }>()),
+      (SELECT count(*) FROM information_schema.tables
+        WHERE table_schema='memory_ops' AND table_name IN ('release_operations','usage_events','usage_counters')) AS tables,
+      (SELECT count(*) FROM information_schema.views
+        WHERE table_schema='memory_ops' AND table_name='space_pools') AS views,
+      (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+        WHERE n.nspname='memory_ops' AND p.proname IN ('operation_meter','operation_revision_guard')) AS triggers`).first<{ tables: number; views: number; triggers: number }>()),
     safe(() => options.inspectStorage()),
   ]);
   let sso = false, mail = false, encryptedIngest = false, validRoster = false;
@@ -123,7 +125,7 @@ export async function evaluateReadiness(env: ReadinessEnvironment, options: Read
     encryptedIngest,
     mail,
     deprovisioning: new TextEncoder().encode(env.IDENTITY_WEBHOOK_SECRET ?? '').length >= 32,
-    metering: meter?.tables === 4 && meter.views === 1 && meter.triggers === 2,
+    metering: meter?.tables === 3 && meter.views === 1 && meter.triggers === 2,
     storage: Boolean(storage?.ready && Number.isInteger(options.hotSchemaVersion) && options.hotSchemaVersion > 0 && storage.hotSchemaVersion === options.hotSchemaVersion && sha256(storage.resourceFingerprint)),
     maintenance: Boolean(heartbeat && Number.isSafeInteger(heartbeat.at) && now >= heartbeat.at && now - heartbeat.at < 900000),
     backgroundJobs: env.BACKGROUND_JOBS_ENABLED === 'true',

@@ -161,7 +161,7 @@ test('transaction-pooler attestation and all timeout state stay inside one actua
    if(c.text==='BEGIN'){inTransaction=true;effects.push('BEGIN');return {rows:[],rowCount:null};}
    if(c.text==='COMMIT'||c.text==='ROLLBACK'){assert.equal(inTransaction,true);inTransaction=false;effects.push(c.text);return {rows:[],rowCount:null};}
    assert.equal(inTransaction,true,'pooler could switch backend outside BEGIN');
-   if(c.text.includes('set_config')){assert.equal(c.values[1],true,'session state must not survive the transaction');assert.ok(Number(c.values[0])>0);return {rows:[{}],rowCount:1};}
+   if(c.text.includes('set_config')){assert.equal(c.values[1],true,'session state must not survive the transaction');if(!c.text.includes('caller_region'))assert.ok(Number(c.values[0])>0);return {rows:[{}],rowCount:1};}
    if(c.text.includes('pg_roles'))return {rows:[role()],rowCount:1};
    effects.push(c.text);return {rows:[],rowCount:1};
   }}),verifyDeployment:async session=>{await session.query('SELECT deployment_metadata');return {region:'sg',deploymentId:'memory-sg-test'};}

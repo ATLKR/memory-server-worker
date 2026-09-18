@@ -20,30 +20,30 @@ async function approvals(t) {
 test('approved ingestion still rejects an operation key bound to another request',async t=>{
  const f=await approvals(t);
  await assert.rejects(()=>f.ingest.approve(f.token,'s1',f.b.id,[0],'approve-a'),error=>error.status===409&&error.code==='idempotency_conflict');
- assert.equal(f.db.raw.prepare('SELECT count(*) n FROM memories').get().n,2);
- assert.equal(f.db.raw.prepare('SELECT count(*) n FROM release_operations').get().n,4);
+ assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM memories').get()).n,2);
+ assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM release_operations').get()).n,4);
  const replay=await f.ingest.approve(f.token,'s1',f.b.id,[0],'approve-b');
  assert.equal(replay.replayed,true);assert.deepEqual(replay.memories,f.approvedB.memories);
 });
 
 test('an unused approval-replay key receives a zero-cost persistent receipt',async t=>{
- const f=await approvals(t),before=f.db.raw.prepare('SELECT sum(units) n FROM release_usage_events').get().n;
+ const f=await approvals(t),before=(await f.db.raw.prepare('SELECT sum(units) n FROM release_usage_events').get()).n;
  const replay=await f.ingest.approve(f.token,'s1',f.b.id,[0],'approve-new');
  assert.equal(replay.replayed,true);assert.deepEqual(replay.memories,f.approvedB.memories);
  await assert.rejects(()=>new MemoryStore(f.db,()=>at).create(f.token,'s1',{body:'different request'},'approve-new'),error=>error.status===409);
- assert.equal(f.db.raw.prepare('SELECT count(*) n FROM memories').get().n,2);
- assert.equal(f.db.raw.prepare('SELECT sum(units) n FROM release_usage_events').get().n,before);
- assert.equal(f.db.raw.prepare("SELECT units FROM release_operations WHERE client_key='approve-new'").get().units,0);
+ assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM memories').get()).n,2);
+ assert.equal((await f.db.raw.prepare('SELECT sum(units) n FROM release_usage_events').get()).n,before);
+ assert.equal((await f.db.raw.prepare("SELECT units FROM release_operations WHERE client_key='approve-new'").get()).units,0);
 });
 
 test('approval receipt lookup rechecks current human authority',async t=>{
  const f=await approvals(t);let changed=false;const prepare=f.db.prepare.bind(f.db);
- f.db.prepare=sql=>{
+ f.db.prepare= sql=>{
   const statement=prepare(sql);
-  if(sql.startsWith('SELECT id,request_hash AS requestHash')){
-   const first=statement.first.bind(statement);statement.first=async()=>{const result=await first();if(!changed){changed=true;f.db.raw.exec("UPDATE credentials SET revoked_at=1 WHERE id='session:alice'");}return result;};
+  if(sql.startsWith('SELECT id,request_hash AS "requestHash"')){
+   const first=statement.first.bind(statement);statement.first=async()=>{const result=await first();if(!changed){changed=true;(await f.db.raw.exec("UPDATE credentials SET revoked_at=1 WHERE id='session:alice'"));}return result;};
   }return statement;
  };
  await assert.rejects(()=>f.ingest.approve(f.token,'s1',f.b.id,[0],'approve-b'),error=>error.status===403);
- assert.equal(changed,true);assert.equal(f.db.raw.prepare('SELECT count(*) n FROM memories').get().n,2);
+ assert.equal(changed,true);assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM memories').get()).n,2);
 });

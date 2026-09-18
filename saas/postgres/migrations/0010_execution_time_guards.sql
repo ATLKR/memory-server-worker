@@ -15,7 +15,9 @@
 BEGIN;
 SET LOCAL ROLE memory_owner;
 
-CREATE FUNCTION memory_control.now_ms() RETURNS bigint
+-- Defined in 0002 (payload admission already needs it at version 9); OR
+-- REPLACE keeps the identical body so later lineages stay self-consistent.
+CREATE OR REPLACE FUNCTION memory_control.now_ms() RETURNS bigint
   LANGUAGE sql STABLE SET search_path = pg_catalog AS $now$
   SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint;
 $now$;

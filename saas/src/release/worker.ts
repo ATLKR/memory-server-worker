@@ -50,7 +50,7 @@ http.use('*', async (context, next) => {
 http.all('*', context => {
     const env = context.get('releaseEnv');
     const settings = readSettings(env), release = createRelease(env, { identity: new IdentityService(env.DB) });
-    const app = createApplication(env.DB, settings, { auth: { publicKeyCache }, limit: key => env.REQUEST_LIMITER.limit({ key }), release });
+    const app = createApplication(env.DB, settings, { auth: { publicKeyCache }, limit: key => env.REQUEST_LIMITER.limit({ key }), release, control: env.CONTROL_DB });
     return app(context.req.raw);
 });
 

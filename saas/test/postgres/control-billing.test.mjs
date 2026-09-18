@@ -27,14 +27,15 @@ async function createControlFixture(t) {
     await db.exec(await readFile(new URL('0002_deployment_identity.sql', migrations), 'utf8'));
     await db.exec(await readFile(new URL('../../postgres/control/0003_placement_directory.sql', import.meta.url), 'utf8'));
     await db.exec(await readFile(new URL('../../postgres/control/0004_billing_catalog.sql', import.meta.url), 'utf8'));
+    await db.exec(await readFile(new URL('../../postgres/control/0005_checkout_attempt_freeze.sql', import.meta.url), 'utf8'));
     await db.exec(`RESET ROLE; ${restore}`);
     const asOwner = async fn => { await db.exec('SET ROLE memory_owner'); try { return await fn(db); } finally { await db.exec('ROLLBACK'); await db.exec('RESET ROLE'); } };
     return { db, asOwner };
 }
 
-test('installs as control version 4 with the billing catalog', async t => {
+test('installs as control version 5 with the billing catalog', async t => {
     const { db } = await createControlFixture(t);
-    assert.equal((await db.query(`SELECT version FROM memory_control.schema_migrations ORDER BY version DESC LIMIT 1`)).rows[0].version, 4);
+    assert.equal((await db.query(`SELECT version FROM memory_control.schema_migrations ORDER BY version DESC LIMIT 1`)).rows[0].version, 5);
     const tables = (await db.query(`SELECT table_schema||'.'||table_name t FROM information_schema.tables
         WHERE table_name IN ('pools','checkout_requests','checkout_closures','billing_events','billing_lock','heartbeats','provider_budgets')
         ORDER BY 1`)).rows.map(r => r.t);
@@ -88,4 +89,19 @@ test('checkout request/closure records stay consistent and immutable', async t =
         await db.query(`INSERT INTO memory_ops.checkout_closures(request_id, session_id, state,
             actor_credential_id, checked_at) VALUES ('req:2','s','subscription_ended','c',$1)`, [NOW]);
     }), e => ['23514', '42501'].includes(String(e?.code ?? '')));
+    // Attempted checkout parameters are frozen; unattempted claims stay mutable.
+    await assert.rejects(() => asOwner(async () => {
+        await db.query(`UPDATE memory_control.checkout_requests SET expires_at=expires_at+1 WHERE id='req:1'`);
+    }), e => ['55000', '42501'].includes(String(e?.code ?? '')));
+    await assert.rejects(() => asOwner(async () => {
+        await db.query(`UPDATE memory_control.checkout_requests SET price_id='price:other' WHERE id='req:1'`);
+    }), e => ['55000', '42501'].includes(String(e?.code ?? '')));
+    await asOwner(async () => {
+        await db.query(`INSERT INTO memory_control.checkout_requests(id, pool_id, price_id, created_at,
+            operation_key, expires_at, checkout_attempted) VALUES ('req:3','account:account:a','price:pro',$1,'op:3',$2,0)`, [NOW, NOW + 3600000]);
+        await db.query(`UPDATE memory_control.checkout_requests SET expires_at=$1,checkout_attempted=1 WHERE id='req:3'`, [NOW + 7200000]);
+    });
+    await assert.rejects(() => asOwner(async () => {
+        await db.query(`UPDATE memory_control.checkout_requests SET expires_at=$1 WHERE id='req:3'`, [NOW + 7300000]);
+    }), e => ['55000', '42501'].includes(String(e?.code ?? '')));
 });

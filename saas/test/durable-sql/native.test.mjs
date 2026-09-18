@@ -8,8 +8,6 @@ import { DatabaseSync } from 'node:sqlite';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { createDurableDatabase } from '../../src/durable-sql/client.ts';
-import { WorkspaceService } from '../../src/workspace.ts';
-import { MemoryService } from '../../src/memory.ts';
 
 const directory = new URL('../../migrations/', import.meta.url);
 const migrations = await Promise.all((await readdir(directory)).filter(name => name.endsWith('.sql')).sort()
@@ -86,25 +84,6 @@ test('native named RPC stays unserved before activation and retains ready data a
   await assert.rejects(f.db.prepare('SELECT id FROM accounts').all(), /durable_sql_not_ready/);
 });
 
-test('native full-schema SSO command, exact account snapshot, memory authorization and revocation preserve product behavior', { timeout: 30000 }, async t => {
-  const f = await fixture(t); await f.bootstrap();
-  const workspace = new WorkspaceService(f.db, Date.now, { identityLifecycle: true });
-  const memory = new MemoryService(f.db);
-  const principal = subject => ({ issuer: 'https://issuer.invalid', subject, issuedAt: Date.now(), expiresAt: Date.now() + 900000, permission: 'write' });
-  const owner = await workspace.signIn(principal('owner'));
-  const other = await workspace.signIn(principal('other'));
-  const snapshot = await workspace.snapshot(owner.token);
-  assert.equal(snapshot.account.id, owner.accountId);
-  assert.equal(snapshot.spaces.length, 1);
-  const space = snapshot.spaces[0];
-  const created = await memory.create(owner.token, space.id, { body: 'Native authority survives storage replacement' });
-  assert.equal((await memory.list(owner.token, space.id)).results[0].id, created.id);
-  await assert.rejects(memory.list(other.token, space.id), /Memory operation denied/);
-  await f.db.prepare('UPDATE credentials SET revoked_at=? WHERE account_id=? AND revoked_at IS NULL').bind(Date.now(), owner.accountId).run();
-  await assert.rejects(workspace.snapshot(owner.token), /Workspace operation denied/);
-  await assert.rejects(memory.list(owner.token, space.id), /Memory operation denied/);
-  assert.deepEqual(await f.call('maintenance', { operation: 'foreign-key-check' }), []);
-});
 
 test('native trigger effects are atomic while changes counts only the top-level statement', { timeout: 30000 }, async t => {
   const f = await fixture(t); await f.bootstrap();

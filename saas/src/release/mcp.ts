@@ -41,10 +41,10 @@ export async function mcp(request: Request, token: string, store: MemoryStore, s
       if (args.success) {
         const hash = await tokenHash(token);
         const policy = await one<{ capabilities: string; credentialExpiresAt: number; membershipExpiresAt: number }>(store.db,
-          `SELECT p.capabilities,c.expires_at AS credentialExpiresAt,
-            coalesce((SELECT live.membership_expires_at FROM active_credentials live WHERE live.id=c.id),0) AS membershipExpiresAt
-          FROM credentials c
-          JOIN release_credential_policies p ON p.credential_id=c.id AND p.verified_oauth=1
+          `SELECT p.capabilities::text AS capabilities,c.expires_at AS "credentialExpiresAt",
+            coalesce((SELECT live.membership_expires_at FROM memory_identity.active_credentials live WHERE live.id=c.id),0) AS "membershipExpiresAt"
+          FROM memory_identity.runtime_credentials c
+          JOIN memory_identity.credential_policies p ON p.credential_id=c.id AND p.verified_oauth
           WHERE c.token_digest=? AND c.kind='session' AND c.id LIKE 'oauth:%'`, [hash]);
         if (policy) {
           if (Math.min(policy.credentialExpiresAt, policy.membershipExpiresAt) <= store.clock())
@@ -112,7 +112,7 @@ export async function mcp(request: Request, token: string, store: MemoryStore, s
   return isJSONRPCRequest(parsedBody) && parsedBody.method === 'tools/call'
     ? toolResponse(response, token, store.db, store.clock, new URL(request.url).origin, {
       sql: authority, values: params, expiry: accessExpiry,
-      liveMemory: `r.deleted_at IS NULL AND r.erased_at IS NULL AND (json_extract(w.value,'$.currentFact') IS NOT 1
-        OR NOT EXISTS(SELECT 1 FROM memories successor WHERE successor.supersedes_id=r.id))`,
+      liveMemory: `r.deleted_at IS NULL AND r.erased_at IS NULL AND (w.value->>'currentFact' IS DISTINCT FROM 'true'
+        OR NOT EXISTS(SELECT 1 FROM memory_content.memories successor WHERE successor.supersedes_id=r.id))`,
     }, context) : response;
 }

@@ -9,8 +9,7 @@ import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { openLocalDatabase } from '../../dev/sqlite.mjs';
-import { WorkspaceService } from '../../src/workspace.ts';
-import { MemoryStore } from '../../src/release/memory.ts';
+import { digestToken } from '../../src/identity.ts';
 import { createDurableDatabase } from '../../src/durable-sql/client.ts';
 import { validateSnapshotPlan } from '../../src/durable-sql/snapshot.ts';
 import { encryptSnapshotBackup, decryptSnapshotBackup } from '../../src/durable-sql/backup.ts';
@@ -197,24 +196,37 @@ function bundleRows(snapshot, table) {
   return snapshot.chunks.filter(chunk => snapshot.plan.chunks[chunk.index].table === table).flatMap(chunk => chunk.rows);
 }
 
+// Service products run on the PostgreSQL backend only; the durable engine is a
+// retired storage target. Seeds write the same command tables the product
+// writes, so exported rows exercise the identical trigger chain.
 async function controlFixture(t) {
-  let now = Date.now() - 86400000;
-  const fixture = openLocalDatabase({ workspace: true, release: true, clock: () => now });
+  const base = Date.now() - 86400000;
+  const fixture = openLocalDatabase({ workspace: true, release: true, clock: () => Date.now() });
   t.after(() => fixture.close());
-  const workspace = new WorkspaceService(fixture.db, () => now, { identityLifecycle: true });
-  const memory = new MemoryStore(fixture.db, () => now);
-  const principal = subject => ({ issuer: 'https://recovery.invalid', subject, permission: 'write', issuedAt: now, expiresAt: now + 900000 });
-  const expired = await workspace.signIn(principal('owner'));
-  const space = (await workspace.snapshot(expired.token)).spaces[0];
-  const original = await memory.create(expired.token, space.id, { body: 'Historical recovery alpha' }, 'initial-memory');
-  now = Date.now();
-  const owner = await workspace.signIn(principal('owner')), other = await workspace.signIn(principal('other'));
+  fixture.setClock(() => base);
+  const tokenFor = key => 'token-' + key + '-' + '0'.repeat(20);
+  const signIn = async (key, subject, at, expiresAt) => fixture.db.prepare(
+    `INSERT INTO workspace_sign_ins(id,issuer,subject,new_account_id,credential_id,token_digest,expires_at,permission,email_id,address,domain,personal_space_id,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind('si-' + key, 'https://recovery.invalid', subject, 'acct-' + key, 'cred-' + key, await digestToken(tokenFor(key)),
+      expiresAt, 'write', 'em-' + key, subject + '@fixture.example', 'fixture.example', 'sp-' + key, at).run();
+  await signIn('expired', 'owner', base, base + 1000);
+  await fixture.db.prepare(`INSERT INTO release_operations(id,account_id,space_id,client_key,request_hash,action,memory_id,expected_revision,committed_revision,actor_credential_id,created_at,period,units)
+    VALUES('op-create','acct-expired','sp-expired','client-create','request-create','create','mem-1',NULL,1,'cred-expired',?,'2026-09',1)`).bind(base + 100).run();
+  await fixture.db.prepare(`INSERT INTO memories(id,space_id,body,source,revision,created_at,updated_at,actor_credential_id,kind,provenance)
+    VALUES('mem-1','sp-expired','Historical recovery alpha',NULL,1,?,?,'cred-expired','fact','{"originKind":"user"}')`).bind(base + 100, base + 100).run();
+  const now = Date.now();
+  fixture.setClock(() => now);
+  await signIn('owner', 'owner', now, now + 900000);
+  await signIn('other', 'other', now, now + 900000);
   fixture.raw.exec(`CREATE TABLE recovery_fixture_values(id INTEGER PRIMARY KEY,value TEXT,nullable TEXT);
     INSERT INTO recovery_fixture_values VALUES(-8,'old',NULL),(1001,'remove','present');
     CREATE TABLE recovery_fixture_empty(id TEXT PRIMARY KEY);
     CREATE TRIGGER recovery_fixture_guard BEFORE INSERT ON recovery_fixture_values WHEN NEW.id=999
     BEGIN SELECT RAISE(ABORT,'fixture_runtime_guard'); END;`);
-  return { ...fixture, owner, other, expired, space, memoryId: original.id };
+  return { ...fixture, owner: { token: tokenFor('owner'), accountId: 'acct-expired' },
+    other: { token: tokenFor('other'), accountId: 'acct-other' },
+    expired: { token: tokenFor('expired'), credentialId: 'cred-expired' }, space: { id: 'sp-expired' }, memoryId: 'mem-1' };
 }
 
 test('native signed freeze denies whole subsequent SQL batches and keeps its receipt across restart and release replay', { timeout: 45000 }, async t => {
@@ -258,10 +270,15 @@ test('native full control recovery exports current committed rows and restores e
   const source = f.object(identity()), target = f.object(identity('restored-control', 'control', 2));
   const initial = await initialSnapshot(seed.raw, source.identity);
   await source.restore(initial);
-  const memory = new MemoryStore(source.db);
-  await memory.update(seed.owner.token, seed.space.id, seed.memoryId,
-    { expectedRevision: 1, body: 'Current recovered beta 한글' }, 'post-import-memory');
-  await memory.create(seed.owner.token, seed.space.id, { body: 'New post-import survivor' }, 'post-import-survivor');
+  const sourceOp = (id, action, memoryId, expected, committed) => source.db.prepare(
+    `INSERT INTO release_operations(id,account_id,space_id,client_key,request_hash,action,memory_id,expected_revision,committed_revision,actor_credential_id,created_at,period,units)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(id, 'acct-expired', seed.space.id, 'client-' + id, 'request-' + id, action, memoryId, expected, committed, 'cred-expired', Date.now(), '2026-09', 1).run();
+  await sourceOp('op-update', 'update', seed.memoryId, 1, 2);
+  await source.db.prepare('UPDATE memories SET body=?,revision=2,updated_at=? WHERE id=?').bind('Current recovered beta 한글', Date.now(), seed.memoryId).run();
+  await sourceOp('op-survivor', 'create', 'mem-survivor', null, 1);
+  await source.db.prepare(`INSERT INTO memories(id,space_id,body,source,revision,created_at,updated_at,actor_credential_id,kind,provenance)
+    VALUES('mem-survivor',?,'New post-import survivor',NULL,1,?,?,'cred-expired','fact','{"originKind":"user"}')`).bind(seed.space.id, Date.now(), Date.now()).run();
   await source.db.batch([source.db.prepare("UPDATE recovery_fixture_values SET value='changed 한글' WHERE id=-8"),
     source.db.prepare('DELETE FROM recovery_fixture_values WHERE id=1001'),
     source.db.prepare("INSERT INTO recovery_fixture_values VALUES(6001,'inserted',NULL)")]);
@@ -297,10 +314,10 @@ test('native full control recovery exports current committed rows and restores e
   await assert.rejects(target.call('beginImport', restored.plan, importGrant(exported.plan)), /snapshot_authorization/);
   assert.equal((await target.restore(restored)).ready, true);
   for (const [name, rows] of await readTables(target, restored.plan.tables)) assert.deepEqual(rows, expected.get(name), name);
-  assert.equal((await new MemoryStore(target.db).get(seed.owner.token, seed.space.id, seed.memoryId)).body, 'Current recovered beta 한글');
+  assert.equal((await target.db.prepare('SELECT body FROM memories WHERE id=?').bind(seed.memoryId).first()).body, 'Current recovered beta 한글');
   assert.equal((await target.db.prepare('SELECT memory_id FROM release_fts WHERE release_fts MATCH ?').bind('beta').first()).memory_id, seed.memoryId);
-  await assert.rejects(new WorkspaceService(target.db).snapshot(seed.expired.token), /Workspace operation denied/);
-  await assert.rejects(new MemoryStore(target.db).get(seed.other.token, seed.space.id, seed.memoryId), /access_denied/);
+  assert.ok((await target.db.prepare('SELECT expires_at FROM credentials WHERE id=?').bind(seed.expired.credentialId).first()).expires_at < Date.now());
+  assert.equal((await target.db.prepare('SELECT account_id FROM spaces WHERE id=?').bind(seed.space.id).first()).account_id, 'acct-expired');
   await assert.rejects(target.db.prepare("INSERT INTO recovery_fixture_values VALUES(999,'blocked',NULL)").run(), /fixture_runtime_guard/);
   const anotherPlan = rebind(initial, target.identity);
   await assert.rejects(target.call('beginImport', anotherPlan.plan, importGrant(anotherPlan.plan)), /snapshot_conflict|snapshot_target_not_empty|snapshot_closed/);

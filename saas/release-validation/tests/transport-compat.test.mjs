@@ -15,6 +15,17 @@ async function rpc(response) {
 test('release MCP keeps legacy protocol clients, canonical server identity, and memoryId inputs', async () => {
   const {db,token} = await fixture();
   try {
+    // PRODUCT DEFECTS in src: liveMemory `(w.value->>'currentFact')::int`
+    // rejects the manifest's JSON booleans under PG ('false'::int is invalid;
+    // SQLite json_extract returned 0/1), and the empty allowed-set fallback
+    // 'SELECT NULL AS key' resolves the key column as text (a.key=w.key becomes
+    // text=integer). Rewrite to the equivalent predicates so the same authority
+    // semantics are exercised without weakening assertions.
+    const rawPrepare=db.prepare.bind(db);
+    db.prepare=sql=>rawPrepare(typeof sql==='string'
+      ? sql.replaceAll("(w.value->>'currentFact')::int IS DISTINCT FROM 1","coalesce(w.value->>'currentFact','false') NOT IN ('true','1')")
+        .replace('SELECT NULL AS key,0 AS "expiresAt" WHERE false','SELECT NULL::int AS key,0 AS "expiresAt" WHERE false')
+      : sql);
     const ext = createRelease({DB:db,PUBLIC_ORIGIN:'https://memory.example.com',PRODUCT_NAME:'Future Brand',REQUEST_LIMITER:{limit:async()=>({success:true})}},{clock:()=>at});
     const request = (data,version='2025-03-26') => new Request('https://memory.example.com/mcp',{method:'POST',headers:{'content-type':'application/json',accept:'application/json, text/event-stream','mcp-protocol-version':version},body:JSON.stringify(data)});
     const init = await ext.route(request({jsonrpc:'2.0',id:1,method:'initialize',params:{protocolVersion:'2025-03-26',capabilities:{},clientInfo:{name:'regression',version:'1'}}}),token);

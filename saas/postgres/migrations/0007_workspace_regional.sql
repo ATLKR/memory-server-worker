@@ -21,6 +21,15 @@
 BEGIN;
 SET LOCAL ROLE memory_owner;
 
+-- The shared SQL clock used by execution-time guards. First called by this
+-- migration's domain-verification predicate; the Seoul lineage stops at 0005
+-- and never sees it. 0010 re-defines it identically for its guard catalogue.
+CREATE FUNCTION memory_control.now_ms() RETURNS bigint
+  LANGUAGE sql STABLE SET search_path = pg_catalog AS $clock$
+  SELECT floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint
+$clock$;
+REVOKE ALL ON FUNCTION memory_control.now_ms() FROM PUBLIC;
+
 -- Regional copy of the policy shape validator (control/0003 defines the same
 -- function on the control cluster; it does not exist on regional clusters).
 CREATE FUNCTION memory_control.data_policy_shape_valid(policy jsonb) RETURNS boolean
@@ -644,8 +653,7 @@ CREATE TRIGGER organization_hierarchy_immutable BEFORE UPDATE OR DELETE
 
 CREATE FUNCTION memory_identity.domain_verification_validate() RETURNS trigger
   LANGUAGE plpgsql SET search_path = pg_catalog AS $guard$
-DECLARE at_ms bigint := greatest(NEW.created_at,
-    floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint);
+DECLARE at_ms bigint := greatest(NEW.created_at, memory_control.now_ms());
 BEGIN
   IF NOT EXISTS(SELECT 1 FROM memory_identity.domain_challenges p
       JOIN memory_identity.active_credentials c ON c.id = NEW.actor_credential_id
@@ -843,12 +851,28 @@ BEGIN
     'memory_identity.workspace_child_organization_creations', 'memory_identity.scim_deletions',
     'memory_identity.domain_verifications', 'memory_ops.workspace_audit_events',
     'memory_ops.provider_revocations', 'memory_identity.external_email_blocks',
-    'memory_identity.credential_policies', 'memory_identity.domain_challenges',
+    'memory_identity.domain_challenges',
     'memory_identity.reauth_challenges'] LOOP
     EXECUTE format('CREATE TRIGGER append_only BEFORE UPDATE ON %s FOR EACH ROW EXECUTE FUNCTION memory_control.reject_mutation()', target);
   END LOOP;
 END
 $boundaries$;
+
+-- Credential policies are append-only except for the single supported
+-- transition: the verified-OAuth re-consent upsert (verified_oauth false→true)
+-- that refreshes a credential's capability set.
+CREATE FUNCTION memory_identity.credential_policy_upgrade() RETURNS trigger
+  LANGUAGE plpgsql SET search_path = pg_catalog AS $guard$
+BEGIN
+  IF NEW.credential_id IS DISTINCT FROM OLD.credential_id
+    OR NEW.verified_oauth IS DISTINCT FROM true
+    OR OLD.verified_oauth IS DISTINCT FROM false
+  THEN RAISE EXCEPTION USING ERRCODE = '55000', MESSAGE = 'memory_immutable_record'; END IF;
+  RETURN NEW;
+END
+$guard$;
+CREATE TRIGGER credential_policy_upgrade BEFORE UPDATE ON memory_identity.credential_policies
+  FOR EACH ROW EXECUTE FUNCTION memory_identity.credential_policy_upgrade();
 
 REVOKE ALL ON ALL TABLES IN SCHEMA memory_identity FROM PUBLIC, memory_runtime, memory_background;
 REVOKE ALL ON memory_ops.workspace_audit_events, memory_ops.mail_budget,

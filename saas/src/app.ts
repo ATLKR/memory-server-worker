@@ -16,6 +16,9 @@ export interface ApplicationOptions {
   clock?: () => number;
   auth?: AuthOptions;
   limit?: (key: string) => Promise<{ success: boolean }>;
+  /** Control-plane handle for enrollment-directory admission checks. Absent
+   * on single-cluster deployments. */
+  control?: import('./release/types.ts').Database;
 }
 function cookieToken(request: Request): string | null {
   const cookies = (request.headers.get('cookie') ?? '').split(';').map(x => x.trim())
@@ -49,7 +52,7 @@ function protect(response: Response, pathname: string): Response {
 
 export function createApplication(db: IdentityDatabase, settings: Settings, options: ApplicationOptions = {}) {
   const clock = options.clock ?? Date.now;
-  const workspace = new WorkspaceService(db, clock, { identityLifecycle: options.release?.identityLifecycle === 2 });
+  const workspace = new WorkspaceService(db, clock, { identityLifecycle: options.release?.identityLifecycle === 2, control: options.control });
   const memory = new MemoryService(db, clock);
   const memoryApi = createMemoryApi(db, clock);
   const auth = createAuthController(db, settings.auth, async (p, token) => {
@@ -83,7 +86,7 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
       if (url.pathname === '/auth/logout' && expectedAccount !== null) {
         const token = cookieToken(request);
         const credential = token ? await db.withSession('first-primary').prepare(
-          "SELECT account_id AS accountId FROM credentials WHERE token_digest=? AND kind='session' AND membership_id IS NULL"
+          'SELECT account_id AS "accountId" FROM memory_identity.runtime_credentials WHERE token_digest=? AND kind=\'session\' AND membership_id IS NULL'
         ).bind(await digestToken(token)).first<{ accountId: string }>() : null;
         if (credential && credential.accountId !== expectedAccount) throw new HttpError(409, 'account_mismatch');
       }
@@ -110,7 +113,7 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     try { hash = await digestToken(token); } catch { throw new HttpError(401, 'authentication_required'); }
     const at = clock();
     const credential = await db.withSession('first-primary').prepare(`
-      SELECT account_id AS accountId,kind,min(expires_at,membership_expires_at) AS expiresAt FROM active_credentials
+      SELECT account_id AS "accountId",kind,least(expires_at,membership_expires_at) AS "expiresAt" FROM memory_identity.active_credentials
       WHERE token_digest=? AND expires_at>? AND membership_expires_at>?`)
       .bind(hash, at, at).first<{ accountId: string; kind: string; expiresAt: number }>();
     if (!credential || credential.expiresAt <= clock() || (!bearer && credential.kind !== 'session')) throw new HttpError(401, external ? 'invalid_token' : 'authentication_required');

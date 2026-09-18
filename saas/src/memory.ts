@@ -1,4 +1,5 @@
 import { sqlNow } from './sql-clock.ts';
+import { dataPolicySql } from './data-policy.ts';
 import type { SeoulProjectionCapture } from './release/seoul-projection-capture.ts';
 import { digestToken } from './identity.ts';
 import type { IdentityDatabase, SqlValue } from './identity.ts';
@@ -66,28 +67,28 @@ function authority(write: boolean): string {
   return `c.token_digest=? AND c.expires_at>${sqlNow()} AND c.membership_expires_at>${sqlNow()}
     ${write ? "AND c.permission='write'" : ''}
     AND s.security_mode='managed' AND (
-      (s.organization_id IS NULL AND s.account_id=c.account_id
+      (s.organization_id IS NULL AND s.owner_account_id=c.account_id
         AND c.kind IN ('session','personal_key') AND c.membership_id IS NULL)
       OR (s.organization_id IS NOT NULL AND EXISTS (
-        SELECT 1 FROM active_memberships m
+        SELECT 1 FROM memory_identity.active_memberships m
         WHERE m.account_id=c.account_id AND m.organization_id=s.organization_id AND m.expires_at>${sqlNow()}
           AND ((c.kind='session' AND c.membership_id IS NULL) OR (c.kind='api_key' AND c.membership_id=m.id))
           ${write ? "AND m.role IN ('owner','admin')" : ''}
       )))`;
 }
-const memoryColumns = `r.id,r.space_id AS spaceId,r.body,r.source,r.revision,
-  r.created_at AS createdAt,r.updated_at AS updatedAt`;
-const spaceColumns = `s.id,s.name,s.organization_id AS organizationId,s.security_mode AS securityMode`;
+const memoryColumns = `r.id,r.space_id AS "spaceId",r.body,r.source,r.revision,
+  r.created_at AS "createdAt",r.updated_at AS "updatedAt"`;
+const spaceColumns = `s.id,s.name,s.organization_id AS "organizationId",s.security_mode AS "securityMode"`;
 type ExpiryFacts = { credentialExpiresAt: number; grantExpiresAt: number };
 function grantExpiry(write = false): string {
-  return `CASE WHEN s.organization_id IS NULL AND s.account_id=c.account_id THEN 9007199254740991 ELSE
-      coalesce((SELECT MAX(m.expires_at) FROM active_memberships m WHERE m.account_id=c.account_id
+  return `CASE WHEN s.organization_id IS NULL AND s.owner_account_id=c.account_id THEN 9007199254740991 ELSE
+      coalesce((SELECT max(m.expires_at) FROM memory_identity.active_memberships m WHERE m.account_id=c.account_id
         AND m.organization_id=s.organization_id
         AND ((c.kind='session' AND c.membership_id IS NULL) OR (c.kind='api_key' AND c.membership_id=m.id))
         ${write ? "AND m.role IN ('owner','admin')" : ''}),0) END`;
 }
 function expiryColumns(write = false): string {
-  return `min(c.expires_at,c.membership_expires_at) AS credentialExpiresAt,${grantExpiry(write)} AS grantExpiresAt`;
+  return `least(c.expires_at,c.membership_expires_at) AS "credentialExpiresAt",${grantExpiry(write)} AS "grantExpiresAt"`;
 }
 export const memoryResponseAuthority: ToolAuthority = {
   sql: action => authority(action !== 'read'), values: (hash, at) => [hash, at, at, at],
@@ -126,8 +127,8 @@ export class MemoryService {
   private async readMemory(hash: string, spaceId: string, memoryId: string, write = false): Promise<Memory> {
     const at = this.now();
     const row = await this.db.withSession('first-primary').prepare(`
-      SELECT ${memoryColumns},${expiryColumns(write)} FROM memories r JOIN spaces s ON s.id=r.space_id
-      CROSS JOIN active_credentials c
+      SELECT ${memoryColumns},${expiryColumns(write)} FROM memory_content.memories r JOIN memory_control.spaces s ON s.id=r.space_id
+      CROSS JOIN memory_identity.active_credentials c
       WHERE r.id=? AND s.id=? AND r.deleted_at IS NULL AND ${authority(write)}`)
       .bind(memoryId, spaceId, hash, at, at, at).first<Memory & ExpiryFacts>();
     if (!row) throw new MemoryDenied();
@@ -151,14 +152,17 @@ export class MemoryService {
     const id = crypto.randomUUID();
     const organizationId = input.organizationId ?? null;
     const sql = `
-      INSERT INTO spaces(id,name,account_id,organization_id,security_mode,created_at,actor_credential_id)
-      SELECT ?,?,s.account_id,s.organization_id,s.security_mode,?,c.id
-      FROM active_credentials c CROSS JOIN (
-        SELECT CASE WHEN ? IS NULL THEN account_id ELSE NULL END AS account_id,
-          ? AS organization_id,'managed' AS security_mode
-        FROM active_credentials WHERE token_digest=?
+      INSERT INTO memory_control.spaces(id,owner_account_id,organization_id,deployment_id,data_policy,
+        name,security_mode,created_at_ms,actor_credential_id,source_byte_limit,message_limit)
+      SELECT ?,s.owner_account_id,s.organization_id,
+        (SELECT deployment_id FROM memory_control.deployment_identity),${dataPolicySql('?')},
+        ?,s.security_mode,?,c.id,67108864,100000
+      FROM memory_identity.active_credentials c CROSS JOIN (
+        SELECT CASE WHEN ?::text IS NULL THEN account_id ELSE NULL END AS owner_account_id,
+          ?::text AS organization_id,'managed' AS security_mode
+        FROM memory_identity.active_credentials WHERE token_digest=?
       ) s WHERE ${authority(true)} AND c.kind='session' AND c.id NOT LIKE 'oauth:%'`;
-    const values = [id, input.name, at, organizationId, organizationId, hash, hash, at, at, at];
+    const values = [id, null, input.name, at, organizationId, organizationId, hash, hash, at, at, at];
     let inserted: boolean;
     if (this.capture) {
       const result = await this.capture.ordinaryCommand(this.db, { commandType: 'space-create', entityId: id, receiptId: null, actorDigest: hash, commandAt: at, organizationId }, sql, values);
@@ -169,7 +173,7 @@ export class MemoryService {
     if (!inserted) throw new MemoryDenied();
     const fresh = this.now();
     const row = await this.db.withSession('first-primary').prepare(`
-      SELECT ${spaceColumns},${expiryColumns()} FROM spaces s CROSS JOIN active_credentials c
+      SELECT ${spaceColumns},${expiryColumns()} FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c
       WHERE s.id=? AND ${authority(false)}`).bind(id, hash, fresh, fresh, fresh).first<Space & ExpiryFacts>();
     if (!row) throw new MemoryDenied();
     return checked<Space>(row, this.now());
@@ -184,8 +188,8 @@ export class MemoryService {
     const at = this.now();
     const id = crypto.randomUUID();
     const inserted = await this.write(`
-      INSERT INTO memories(id,space_id,body,source,revision,created_at,updated_at,actor_credential_id)
-      SELECT ?,s.id,?,?,1,?,?,c.id FROM spaces s CROSS JOIN active_credentials c
+      INSERT INTO memory_content.memories(id,space_id,body,source,revision,created_at,updated_at,actor_credential_id)
+      SELECT ?,s.id,?,?,1,?,?,c.id FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c
       WHERE s.id=? AND ${authority(true)}`,
       [id, input.body, input.source ?? null, at, at, spaceId, hash, at, at, at]);
     if (!inserted) throw new MemoryDenied();
@@ -202,16 +206,19 @@ export class MemoryService {
     const hash = await tokenDigest(token);
     const at = this.now();
     const rows = await this.db.withSession('first-primary').prepare(`
-      SELECT ${spaceColumns},${expiryColumns()} FROM active_credentials c LEFT JOIN spaces s ON s.id IN (
-        SELECT owned.id FROM spaces owned WHERE owned.account_id=c.account_id AND c.kind IN ('session','personal_key')
-        UNION SELECT managed.id FROM account_emails claim JOIN active_memberships member
-          ON member.email_id=claim.id AND member.account_id=claim.account_id
-          JOIN spaces managed ON managed.organization_id=member.organization_id
-          WHERE claim.account_id=c.account_id AND ((c.kind='session' AND c.membership_id IS NULL)
-            OR (c.kind='api_key' AND c.membership_id=member.id))
-      ) AND ${authority(false)}
+      SELECT ${spaceColumns},${expiryColumns()} FROM memory_identity.active_credentials c LEFT JOIN LATERAL (
+        SELECT s.* FROM (
+          SELECT owned.id FROM memory_control.spaces owned WHERE owned.owner_account_id=c.account_id AND c.kind IN ('session','personal_key')
+          UNION SELECT managed.id FROM memory_identity.runtime_account_emails claim JOIN memory_identity.active_memberships member
+            ON member.email_id=claim.id AND member.account_id=claim.account_id
+            JOIN memory_control.spaces managed ON managed.organization_id=member.organization_id
+            WHERE claim.account_id=c.account_id AND ((c.kind='session' AND c.membership_id IS NULL)
+              OR (c.kind='api_key' AND c.membership_id=member.id))
+        ) candidate CROSS JOIN LATERAL (SELECT * FROM memory_control.spaces s WHERE s.id=candidate.id LIMIT 1) s
+        WHERE ${authority(false)}
+      ) s ON true
       WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND c.membership_expires_at>${sqlNow()}
-      ORDER BY s.created_at,s.id LIMIT 100`)
+      ORDER BY s.created_at_ms,s.id LIMIT 100`)
       .bind(hash, at, at, at, hash, at, at).all<Space & ExpiryFacts & { id: string | null }>();
     const checkedAt = this.now();
     if (!rows.success || !rows.results.length || rows.results[0]!.credentialExpiresAt <= checkedAt) throw new MemoryDenied();
@@ -228,11 +235,11 @@ export class MemoryService {
     const hash = await tokenDigest(token);
     const at = this.now();
     const updated = await this.write(`
-      UPDATE memories SET body=?,source=CASE WHEN ? THEN ? ELSE source END,
-        revision=revision+1,updated_at=MAX(updated_at,?),
-        actor_credential_id=(SELECT id FROM active_credentials WHERE token_digest=?)
+      UPDATE memory_content.memories SET body=?,source=CASE WHEN ? THEN ? ELSE source END,
+        revision=revision+1,updated_at=greatest(updated_at,?),
+        actor_credential_id=(SELECT id FROM memory_identity.active_credentials WHERE token_digest=?)
       WHERE id=? AND space_id=? AND deleted_at IS NULL AND revision=? AND EXISTS (
-        SELECT 1 FROM spaces s CROSS JOIN active_credentials c
+        SELECT 1 FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c
         WHERE s.id=memories.space_id AND ${authority(true)}
       )`,
       [input.body, input.source === undefined ? 0 : 1, input.source ?? null, at, hash,
@@ -248,10 +255,10 @@ export class MemoryService {
     const hash = await tokenDigest(token);
     const at = this.now();
     const removed = await this.write(`
-      UPDATE memories SET deleted_at=MAX(updated_at,?),updated_at=MAX(updated_at,?),revision=revision+1,
-        actor_credential_id=(SELECT id FROM active_credentials WHERE token_digest=?)
+      UPDATE memory_content.memories SET deleted_at=greatest(updated_at,?),updated_at=greatest(updated_at,?),revision=revision+1,
+        actor_credential_id=(SELECT id FROM memory_identity.active_credentials WHERE token_digest=?)
       WHERE id=? AND space_id=? AND deleted_at IS NULL AND revision=? AND EXISTS (
-        SELECT 1 FROM spaces s CROSS JOIN active_credentials c
+        SELECT 1 FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c
         WHERE s.id=memories.space_id AND ${authority(true)}
       )`, [at, at, hash, memoryId, spaceId, expectedRevision, hash, at, at, at]);
     if (!removed) return this.conflict(hash, spaceId, memoryId, expectedRevision);
@@ -276,8 +283,8 @@ export class MemoryService {
     const hash = await tokenDigest(token);
     const at = this.now();
     const rows = await this.db.withSession('first-primary').prepare(`
-      SELECT ${memoryColumns},${expiryColumns()} FROM spaces s CROSS JOIN active_credentials c
-      LEFT JOIN memories r ON r.space_id=s.id AND r.deleted_at IS NULL
+      SELECT ${memoryColumns},${expiryColumns()} FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c
+      LEFT JOIN memory_content.memories r ON r.space_id=s.id AND r.deleted_at IS NULL
         AND (r.updated_at<? OR (r.updated_at=? AND r.id>?))
       WHERE s.id=? AND ${authority(false)}
       ORDER BY r.updated_at DESC,r.id ASC LIMIT ?`)
@@ -302,10 +309,10 @@ export class MemoryService {
     // A LEFT JOIN produces one empty sentinel row for an authorized Space with
     // no hits; zero rows always means denial. No separate stale auth pre-read.
     const rows = await this.db.withSession('first-primary').prepare(`
-      SELECT r.id,s.id AS spaceId,
-        substr(r.body,MAX(1,instr(lower(r.body),lower(?))-100),500) AS snippet,r.revision,r.source,${expiryColumns()}
-      FROM spaces s CROSS JOIN active_credentials c LEFT JOIN memories r
-        ON r.space_id=s.id AND r.deleted_at IS NULL AND instr(lower(r.body),lower(?))>0
+      SELECT r.id,s.id AS "spaceId",
+        substr(r.body,greatest(1,position(lower(?) in lower(r.body))-100),500) AS snippet,r.revision,r.source,${expiryColumns()}
+      FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c LEFT JOIN memory_content.memories r
+        ON r.space_id=s.id AND r.deleted_at IS NULL AND position(lower(?) in lower(r.body))>0
       WHERE s.id=? AND ${authority(false)} ORDER BY r.updated_at DESC,r.id ASC LIMIT ?`)
       .bind(input.query, input.query, spaceId, hash, at, at, at, limit)
       .all<MemoryHit & ExpiryFacts & { id: string | null; snippet: string | null }>();

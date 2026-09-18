@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {existsSync,readFileSync} from 'node:fs';
-import {fixture,at} from './db.mjs';
+import {fixture,at} from './db-sqlite.mjs';
 import {createDurableDatabase} from '../../src/durable-sql/client.ts';
 import {SqlDatabaseEngine} from '../../src/durable-sql/engine.ts';
 import {createSeoulProjectionPreparer} from '../../src/release/seoul-projection-preparer.ts';
@@ -11,24 +11,24 @@ const schema=new URL('../../seoul-projection-target-manifest-schema.sql',import.
 const uuid=n=>'00000000-0000-4000-8000-'+String(n).padStart(12,'0');
 const command=(n,expectedRevision=null,selected=true,spaceId='s1')=>({commandId:uuid(n),spaceId,expectedRevision,selected,operatorReference:'fixture:operator'});
 const tableNames=['release_seoul_authority_changes','release_seoul_authority_heads','release_seoul_targets','release_seoul_target_receipts','release_seoul_dirty_spaces','release_seoul_prepared_sources','release_seoul_projection_events','release_seoul_projection_deliveries','release_seoul_projection_lock','release_seoul_published_snapshots','release_seoul_target_attempt'];
-const rows=(f,name)=>f.raw.prepare('SELECT * FROM '+name+' ORDER BY rowid').all().map(r=>({...r}));
+const rows=async (f,name)=>(await f.raw.prepare('SELECT * FROM '+name+' ORDER BY rowid').all()).map(r=>({...r}));
 const snapshot=f=>Object.fromEntries(tableNames.map(n=>[n,rows(f,n)]));
 const oldMigrations=['0026_seoul-projection-schema.sql','0027_seoul-projection-capture-schema.sql','0028_seoul-projection-bootstrap-schema.sql','0029_seoul-projection-preparation-schema.sql','0030_seoul-projection-workspace-schema.sql','0031_seoul-projection-provider-schema.sql','0032_seoul-projection-command-schema.sql','0033_seoul-projection-provider-v1-schema.sql','0034_seoul-projection-target-schema.sql'];
 async function setup(t,recursive='ON',install=true,mode='durable-sql'){
  let now=at;const f=await fixture({clock:()=>now});t.after(()=>f.db.close());f.raw=f.db.raw;f.advance=ms=>{now+=ms;};
- for(const file of oldMigrations)f.raw.exec(readFileSync(new URL('../../migrations/'+file,import.meta.url),'utf8'));
- assert.equal(f.raw.prepare('SELECT version FROM release_meta').get().version,34);f.raw.exec('PRAGMA recursive_triggers='+recursive);f.calls=[];f.batches=0;f.reads=0;
+ for(const file of oldMigrations)(await f.raw.exec(readFileSync(new URL('../../migrations/'+file,import.meta.url),'utf8')));
+ assert.equal((await f.raw.prepare('SELECT version FROM release_meta').get()).version,34);(await f.raw.exec('PRAGMA recursive_triggers='+recursive));f.calls=[];f.batches=0;f.reads=0;
  if(!install)return f;
- assert.ok(existsSync(schema),'target schema file exists');assert.equal(readFileSync(migration,'utf8'),'-- Forward SaaS migration 35: seoul-projection-target-manifest-schema.sql\n'+readFileSync(schema,'utf8'));f.raw.exec(readFileSync(migration,'utf8'));assert.equal(f.raw.prepare('SELECT version FROM release_meta').get().version,35);
- const storage={sql:{exec(sql,...values){const statement=f.raw.prepare(sql),result=statement.all(...values),readonly=statement.columns().length>0&&/^(SELECT|WITH|PRAGMA)\b/i.test(sql.trim());return {rowsWritten:readonly?0:Number(f.raw.prepare('SELECT changes() n').get().n),toArray:()=>result,[Symbol.iterator]:()=>result[Symbol.iterator]()};}},transactionSync(fn){f.raw.exec('BEGIN IMMEDIATE');try{const r=fn();f.raw.exec('COMMIT');return r;}catch(e){f.raw.exec('ROLLBACK');throw e;}}};
- f.engine=new SqlDatabaseEngine(storage,{objectName:'sql:staging:control:1'});f.engine.initialize();f.raw.prepare('INSERT INTO durable_sql_state VALUES(1,?,?,?,?,?,?,?)').run('staging','control','control',1,'ready','a'.repeat(64),'b'.repeat(64));
+ assert.ok(existsSync(schema),'target schema file exists');assert.equal(readFileSync(migration,'utf8'),'-- Forward SaaS migration 35: seoul-projection-target-manifest-schema.sql\n'+readFileSync(schema,'utf8'));(await f.raw.exec(readFileSync(migration,'utf8')));assert.equal((await f.raw.prepare('SELECT version FROM release_meta').get()).version,35);
+ const storage={sql:{exec(sql,...values){const statement=(await f.raw.prepare(sql)),result=statement.all(...values),readonly=statement.columns().length>0&&/^(SELECT|WITH|PRAGMA)\b/i.test(sql.trim());return {rowsWritten:readonly?0:Number((await f.raw.prepare('SELECT changes() n').get()).n),toArray:()=>result,[Symbol.iterator]:()=>result[Symbol.iterator]()};}},transactionSync(fn){(await f.raw.exec('BEGIN IMMEDIATE'));try{const r=fn();(await f.raw.exec('COMMIT'));return r;}catch(e){(await f.raw.exec('ROLLBACK'));throw e;}}};
+ f.engine=new SqlDatabaseEngine(storage,{objectName:'sql:staging:control:1'});f.engine.initialize();(await f.raw.prepare('INSERT INTO durable_sql_state VALUES(1,?,?,?,?,?,?,?)').run('staging','control','control',1,'ready','a'.repeat(64),'b'.repeat(64)));
  const identity={deploymentId:'staging',databaseId:'control',kind:'control',epoch:1};
- const execute=async request=>{f.calls.push(structuredClone(request));const batch=request.statements.length>1;if(batch){f.batches++;await f.beforeBatch?.(request);}else{f.reads++;await f.beforeRead?.(request);}const result=mode==='durable-sql'?f.engine.execute(request):storage.transactionSync(()=>request.statements.map(s=>{const q=f.raw.prepare(s.sql),r=q.all(...s.values);return {success:true,results:r,meta:{changes:0}};}));f.maximumResponseBytes=Math.max(f.maximumResponseBytes??0,Buffer.byteLength(JSON.stringify(result)));if(batch)await f.afterCommit?.(request,result);else await f.afterRead?.(request,result);return result;};
- const owned=new WeakMap();function prepare(sql,values=[]){const statement={bind(...parameters){return prepare(sql,parameters);},async first(){return (await execute({identity,statements:[{sql,values,mode:'first'}]}))[0].results[0]??null;},async all(){return (await execute({identity,statements:[{sql,values,mode:'all'}]}))[0];},async run(){return this.all();}};owned.set(statement,{sql,values,mode:'all'});return statement;}
+ const execute=async request=>{f.calls.push(structuredClone(request));const batch=request.statements.length>1;if(batch){f.batches++;await f.beforeBatch?.(request);}else{f.reads++;await f.beforeRead?.(request);}const result=mode==='durable-sql'?f.engine.execute(request):storage.transactionSync(async ()=>request.statements.map(async s=>{const q=(await f.raw.prepare(s.sql)),r=q.all(...s.values);return {success:true,results:r,meta:{changes:0}};}));f.maximumResponseBytes=Math.max(f.maximumResponseBytes??0,Buffer.byteLength(JSON.stringify(result)));if(batch)await f.afterCommit?.(request,result);else await f.afterRead?.(request,result);return result;};
+ const owned=new WeakMap();async function prepare(sql,values=[]){const statement={bind(...parameters){return prepare(sql,parameters);},async first(){return (await execute({identity,statements:[{sql,values,mode:'first'}]}))[0].results[0]??null;},async all(){return (await execute({identity,statements:[{sql,values,mode:'all'}]}))[0];},async run(){return this.all();}};owned.set(statement,{sql,values,mode:'all'});return statement;}
  f.adapter=mode==='durable-sql'?createDurableDatabase({execute},identity):{prepare,batch(statements){return execute({identity,statements:statements.map(s=>owned.get(s))});},withSession(){return {prepare};}};assert.ok(existsSync(moduleUrl),'target writer module exists');const {createSeoulProjectionTargetWriter}=await import(moduleUrl);f.writer=createSeoulProjectionTargetWriter(f.adapter,mode);return f;
 }
-function clean(f){assert.deepEqual(rows(f,'release_seoul_target_manifest_attempt'),[]);assert.deepEqual(rows(f,'release_seoul_target_attempt'),[]);assert.deepEqual(f.raw.prepare('PRAGMA foreign_key_check').all(),[]);assert.equal(f.raw.prepare('SELECT state FROM release_seoul_projection_state').get().state,'backfill-required');}
-const sourceByEvent=(f,event)=>({...f.raw.prepare('SELECT revision,source_command_id,stream_kind,stream_key,event_id,record_bytes,created_at FROM release_seoul_authority_changes WHERE event_id=?').get(event)});
+async function clean(f){assert.deepEqual(rows(f,'release_seoul_target_manifest_attempt'),[]);assert.deepEqual(rows(f,'release_seoul_target_attempt'),[]);assert.deepEqual((await f.raw.prepare('PRAGMA foreign_key_check').all()),[]);assert.equal((await f.raw.prepare('SELECT state FROM release_seoul_projection_state').get()).state,'backfill-required');}
+const sourceByEvent=async (f,event)=>({...(await f.raw.prepare('SELECT revision,source_command_id,stream_kind,stream_key,event_id,record_bytes,created_at FROM release_seoul_authority_changes WHERE event_id=?').get(event))});
 
 
 const manifestTables=['manifests','manifest_members','manifest_control','manifest_pages','manifest_steps','manifest_seals','manifest_completions','manifest_cancellations','manifest_attempt'].map(s=>'release_seoul_target_'+s);
@@ -37,10 +37,10 @@ const ref=(n,generation=1)=>({manifestId:uuid(n),generation});
 async function coordinator(f,mode='durable-sql'){const {createSeoulProjectionTargetManifest}=await import('../../src/release/seoul-projection-target-manifest.ts');return createSeoulProjectionTargetManifest(f.adapter,mode);}
 
 test('additive0035 preserves all34 objects and rows and creates exactly nine inert manifest tables',async t=>{
- const f=await setup(t,'ON',false),objects=f.raw.prepare("SELECT name,type,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all(),before=new Map(objects.filter(o=>o.type==='table'&&!o.name.startsWith('release_fts')).map(o=>[o.name,rows(f,o.name)]));
- assert.ok(existsSync(schema),'manifest schema exists');assert.equal(readFileSync(migration,'utf8'),'-- Forward SaaS migration 35: seoul-projection-target-manifest-schema.sql\n'+readFileSync(schema,'utf8'));f.raw.exec(readFileSync(migration,'utf8'));
- for(const [name,data]of before)if(name!=='release_meta')assert.deepEqual(rows(f,name),data,name);for(const object of objects)assert.deepEqual(f.raw.prepare('SELECT name,type,sql FROM sqlite_master WHERE name=?').get(object.name),object,object.name);
- assert.equal(f.raw.prepare('SELECT version FROM release_meta').get().version,35);for(const name of manifestTables)assert.ok(f.raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name));
+ const f=await setup(t,'ON',false),objects=(await f.raw.prepare("SELECT name,type,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY name").all()),before=new Map(objects.filter(o=>o.type==='table'&&!o.name.startsWith('release_fts')).map(o=>[o.name,rows(f,o.name)]));
+ assert.ok(existsSync(schema),'manifest schema exists');assert.equal(readFileSync(migration,'utf8'),'-- Forward SaaS migration 35: seoul-projection-target-manifest-schema.sql\n'+readFileSync(schema,'utf8'));(await f.raw.exec(readFileSync(migration,'utf8')));
+ for(const [name,data]of before)if(name!=='release_meta')assert.deepEqual(rows(f,name),data,name);for(const object of objects)assert.deepEqual((await f.raw.prepare('SELECT name,type,sql FROM sqlite_master WHERE name=?').get(object.name)),object,object.name);
+ assert.equal((await f.raw.prepare('SELECT version FROM release_meta').get()).version,35);for(const name of manifestTables)assert.ok((await f.raw.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name=?").get(name)));
  assert.deepEqual(rows(f,'release_seoul_target_manifest_control'),[{singleton:1,current_generation:null}]);assert.deepEqual(rows(f,'release_seoul_targets'),[]);clean(f);
 });
 

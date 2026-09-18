@@ -115,6 +115,14 @@ BEGIN
 END
 $boundaries$;
 
+-- Derived space→pool mapping, identical to the regional view so the billing
+-- service can resolve a Space to its pool on either lineage.
+CREATE VIEW memory_ops.space_pools AS
+  SELECT s.id AS space_id,
+    CASE WHEN s.organization_id IS NULL THEN 'account:' || s.owner_account_id
+      ELSE 'org:' || s.organization_id END AS pool_id
+  FROM memory_control.spaces s;
+
 REVOKE ALL ON memory_control.pools, memory_control.checkout_requests,
   memory_ops.checkout_closures, memory_ops.billing_events, memory_ops.billing_lock,
   memory_ops.heartbeats, memory_ops.provider_budgets

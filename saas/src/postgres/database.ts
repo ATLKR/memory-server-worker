@@ -172,7 +172,11 @@ class PostgresDatabase implements Database {
         for (const s of statements as PostgresStatement[]) {
             if (s['done']) throw fail('postgres_statement_consumed');
         }
-        await this.execute('BEGIN', [], 'run');
+        // Inside a guarded operation the session already runs one transaction:
+        // the batch's atomicity is a savepoint, never nested BEGIN/COMMIT.
+        // Unguarded sessions (fixtures) still open their own transaction.
+        const ambient = this.session.inTransaction === true;
+        await this.execute(ambient ? 'SAVEPOINT memory_batch' : 'BEGIN', [], 'run');
         const out: Result<T>[] = [];
         try {
             for (const s of statements as PostgresStatement[]) {
@@ -180,7 +184,7 @@ class PostgresDatabase implements Database {
                 out.push(await this.execute(s.sql, s['params'], 'all') as Result<T>);
             }
         } catch (e) {
-            try { await this.session.query('ROLLBACK'); } catch { /* original error wins */ }
+            try { await this.session.query(ambient ? 'ROLLBACK TO SAVEPOINT memory_batch' : 'ROLLBACK'); } catch { /* original error wins */ }
             if (e instanceof PostgresBoundaryError) {
                 if (e.outcome === 'not_started') e.outcome = 'rolled_back';
                 throw e;
@@ -189,10 +193,10 @@ class PostgresDatabase implements Database {
             throw fail('postgres_operation_failed', 'rolled_back', state, e);
         }
         try {
-            await this.session.query('COMMIT');
+            await this.session.query(ambient ? 'RELEASE SAVEPOINT memory_batch' : 'COMMIT');
         } catch (e) {
             const state = e && typeof e === 'object' && 'code' in e ? String(e.code) : undefined;
-            throw fail('postgres_operation_failed', 'unknown', state, e);
+            throw fail('postgres_operation_failed', ambient ? 'rolled_back' : 'unknown', state, e);
         }
         return out;
     }

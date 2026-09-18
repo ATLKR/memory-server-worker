@@ -12,8 +12,20 @@ import { Ingest } from '../../src/release/ingest.ts';
 
 async function setup(t) {
     const f = await fixture();
-    if (!f.db.raw.prepare('PRAGMA table_info(memories)').all().some(c => c.name === 'payload_id'))
-        f.db.raw.exec(readFileSync(new URL('../../payload-schema.sql', import.meta.url), 'utf8'));
+    // The regional lineage carries the payload columns on memories already;
+    // the D1 payload-schema replay only runs against a pre-payload catalog.
+    if (!(await f.db.raw.prepare("SELECT column_name AS name FROM information_schema.columns WHERE table_schema='memory_content' AND table_name='memories'").all()).some(c => c.name === 'payload_id'))
+        (await f.db.raw.exec(readFileSync(new URL('../../payload-schema.sql', import.meta.url), 'utf8')));
+    // The retired D1 guards evaluated unixepoch('subsec') through the injected
+    // test clock; migration 0009 kept raw clock_timestamp() calls, so re-apply
+    // those bodies on the memory_control.now_ms() seam the fixture replaces
+    // (the two are the same function in production).
+    for (const { d } of await f.db.raw.prepare(`SELECT pg_get_functiondef(p.oid) d FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+      WHERE n.nspname='memory_content' AND p.proname IN ('payload_stage_admission','payload_intent_transition','payload_stage_publish','payload_archive_permit_validate','payload_retire_old')`).all())
+        await f.db.raw.exec(d.replaceAll('floor(extract(epoch FROM clock_timestamp()) * 1000)::bigint', 'memory_control.now_ms()'));
+    // The retired driver preserved written alias case; PostgreSQL folds the one
+    // unquoted alias in the service column list, so re-quote it at the boundary.
+    const prepare = f.db.prepare.bind(f.db); f.db.prepare = sql => prepare(sql.replaceAll('AS payloadSha256', 'AS "payloadSha256"'));
     const a = payloadShard(), b = payloadShard(), r2 = payloadBucket();
     t.after(() => { f.db.close(); a.raw.close(); b.raw.close(); });
     const env = { DB: f.db, STORAGE_MODE: 'sharded', STORAGE_SHARDS_JSON: JSON.stringify([
@@ -60,7 +72,7 @@ test('historical export hydrates an immutable R2 revision after hot retirement',
     const f = await setup(t);
     const memory = await f.store.create(f.token, 's1', { body: 'old body', source: 'old source' }, 'create');
     const snapshot = await f.transfer.startExport(f.token, 's1');
-    const head = f.db.raw.prepare('SELECT * FROM memories WHERE id=?').get(memory.id);
+    const head = (await f.db.raw.prepare('SELECT * FROM memories WHERE id=?').get(memory.id));
     await f.store.update(f.token, 's1', memory.id, { body: 'new body', expectedRevision: 1 }, 'update');
     await f.payloads.retireHot({ spaceId: 's1', memoryId: memory.id }, {
         id: head.payload_id, shardId: head.payload_shard_id, objectKey: head.payload_object_key, sha256: head.payload_sha256, bytes: head.payload_bytes
@@ -74,7 +86,7 @@ for (const mode of ['search', 'export']) test(mode + ' rejects credentials revok
     const f = await setup(t), memory = await f.store.create(f.token, 's1', { body: 'alpha secret' }, 'create');
     const snapshot = mode === 'export' ? await f.transfer.startExport(f.token, 's1') : null;
     const target = mode === 'search' ? f.search.store.payloads : f.payloads, read = target.read.bind(target);
-    target.read = async (...args) => { const value = await read(...args); f.db.raw.prepare('UPDATE credentials SET revoked_at=? WHERE id=?').run(at, 'session:alice'); return value; };
+    target.read = async (...args) => { const value = await read(...args); (await f.db.raw.prepare('UPDATE credentials SET revoked_at=? WHERE id=?').run(at, 'session:alice')); return value; };
     await assert.rejects(() => mode === 'search' ? f.search.query(f.token, 's1', 'alpha') : f.transfer.exportPage(f.token, 's1', snapshot.id),
         error => error.code === 'access_denied');
 });
@@ -96,9 +108,9 @@ test('human-approved AI proposals publish sharded payloads atomically with one m
     const started = await ingest.submit(f.token, 's1', { messages: [{ id: 'm1', role: 'user', content: 'alpha' }] }, 'submit');
     await jobs.drain(1);
     const approved = await ingest.approve(f.token, 's1', started.id, [0], 'approve');
-    const head = f.db.raw.prepare('SELECT body,payload_id FROM memories WHERE id=?').get(approved.memories[0]);
+    const head = (await f.db.raw.prepare('SELECT body,payload_id FROM memories WHERE id=?').get(approved.memories[0]));
     assert.equal(head.body, '[external]'); assert.ok(head.payload_id);
     assert.equal((await f.store.get(f.token, 's1', approved.memories[0])).body, 'Remember alpha');
     assert.deepEqual((await ingest.approve(f.token, 's1', started.id, [0], 'approve')).memories, approved.memories);
-    assert.equal(f.db.raw.prepare("SELECT count(*) AS n FROM release_operations WHERE action='approve_ingest'").get().n, 1);
+    assert.equal((await f.db.raw.prepare("SELECT count(*) AS n FROM release_operations WHERE action='approve_ingest'").get()).n, 1);
 });

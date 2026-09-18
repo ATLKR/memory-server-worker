@@ -487,13 +487,25 @@ BEGIN
     EXECUTE format('CREATE TRIGGER no_truncate BEFORE TRUNCATE ON %s FOR EACH STATEMENT EXECUTE FUNCTION memory_control.reject_mutation()', target);
   END LOOP;
   -- Append-only ledgers: audit/events/erasure/metering rows never change.
+  -- erasure_permits is transient authorization scratch (insert+delete in the
+  -- same erase batch), not a ledger.
   FOREACH target IN ARRAY ARRAY[
-    'memory_ops.memory_audit_events', 'memory_ops.release_events',
-    'memory_ops.erasure_permits', 'memory_ops.erasure_ledger'] LOOP
+    'memory_ops.memory_audit_events', 'memory_ops.release_events'] LOOP
     EXECUTE format('CREATE TRIGGER append_only BEFORE UPDATE OR DELETE ON %s FOR EACH ROW EXECUTE FUNCTION memory_control.reject_mutation()', target);
   END LOOP;
 END
 $boundaries$;
+-- erasure_ledger is append-only except its one-time vector_erased_at
+-- completion stamp, which the job service writes once every provider page is
+-- confirmed gone. Deleting the ledger or rewriting either timestamp is denied.
+CREATE TRIGGER erasure_ledger_completion BEFORE UPDATE ON memory_ops.erasure_ledger
+  FOR EACH ROW WHEN (
+    NEW.memory_id IS DISTINCT FROM OLD.memory_id OR NEW.space_id IS DISTINCT FROM OLD.space_id
+    OR NEW.erased_at IS DISTINCT FROM OLD.erased_at
+    OR (OLD.vector_erased_at IS NOT NULL AND NEW.vector_erased_at IS DISTINCT FROM OLD.vector_erased_at))
+  EXECUTE FUNCTION memory_control.reject_mutation();
+CREATE TRIGGER erasure_ledger_no_delete BEFORE DELETE ON memory_ops.erasure_ledger
+  FOR EACH ROW EXECUTE FUNCTION memory_control.reject_mutation();
 
 REVOKE ALL ON ALL TABLES IN SCHEMA memory_content FROM PUBLIC, memory_runtime, memory_background;
 REVOKE ALL ON ALL TABLES IN SCHEMA memory_jobs FROM PUBLIC, memory_runtime, memory_background;
