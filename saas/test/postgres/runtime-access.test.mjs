@@ -19,7 +19,8 @@ const REGIONAL = ['migrations/0001_private_namespaces.sql', 'migrations/0002_dep
     'migrations/0007_workspace_regional.sql', 'migrations/0008_regional_space.sql',
     'migrations/0009_payload_staging.sql', 'migrations/0010_execution_time_guards.sql',
     'migrations/0011_deferred_shares.sql', 'migrations/0012_scim_key_freeze.sql',
-    'migrations/0013_retrieval_progress.sql', 'migrations/0014_runtime_access.sql'];
+    'migrations/0013_retrieval_progress.sql', 'migrations/0014_runtime_access.sql',
+    'migrations/0015_queue_episode.sql'];
 const CONTROL = ['migrations/0001_private_namespaces.sql', 'migrations/0002_deployment_identity.sql',
     'control/0003_placement_directory.sql', 'control/0004_billing_catalog.sql',
     'control/0005_checkout_attempt_freeze.sql', 'control/0006_runtime_access.sql'];
