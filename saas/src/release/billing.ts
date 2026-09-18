@@ -188,8 +188,17 @@ export class Billing {
             customer = str(created.id, 100);
             if (!/^cus_[A-Za-z0-9_]+$/.test(customer))
                 fail(502, 'invalid_customer');
-            await db.prepare(`UPDATE memory_control.pools SET customer_id=? WHERE id=? AND customer_id IS NULL`)
-                .bind(customer, pool.id).run();
+            // The provider call may outlive the session's authority: re-check
+            // before the claim. Single-cluster deployments fold the regional
+            // authority predicate into the UPDATE itself (same pattern as the
+            // checkout claim); split clusters re-check after the claim below.
+            await this.authorize(token, spaceId);
+            const catalogClaim = !this.env.CONTROL_DB;
+            const catalogHash = catalogClaim ? await tokenHash(token) : '';
+            const catalogAt = this.clock();
+            await db.prepare(`UPDATE memory_control.pools SET customer_id=? WHERE id=? AND customer_id IS NULL
+                  ${catalogClaim ? `AND EXISTS(SELECT 1 FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c WHERE s.id=? AND ${authority('update')} AND ${recentSql()})` : ''}`)
+                .bind(customer, pool.id, ...(catalogClaim ? [id(spaceId), ...params(catalogHash, catalogAt, 'update'), catalogAt - 300000, catalogAt] : [])).run();
             const actual = await one<{
                 id: string;
             }>(db, 'SELECT customer_id AS id FROM memory_control.pools WHERE id=?', [pool.id]);

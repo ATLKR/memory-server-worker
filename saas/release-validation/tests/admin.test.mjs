@@ -1,14 +1,12 @@
 import test from 'node:test';import assert from 'node:assert/strict';import {fixture,at} from './db.mjs';
 import {MemoryStore} from '../../src/release/memory.ts';import {hmac} from '../../src/release/util.ts';
 let Admin;try{({Admin}=await import('../../src/release/admin.ts'));}catch{}
-// dns-proof is skipped: suspected src/schema defect. The PG FK
-// domain_verifications.domain_id -> domains.id is enforced at INSERT time, but
-// the domains row is only created by the domain_verification_apply AFTER
-// trigger (0007), so first-time verification of a new domain can never
-// succeed. SQLite tolerated this because FK enforcement was off. src/admin.ts
-// verifyDomain coalesce fallback assumes the domain may not exist yet, which
-// PG rejects before the trigger can create it.
-for(const name of ['key-scopes','key-space','step-up','step-up-session','dns-proof','dns-wrong','signed-revocation','bad-signature','scim-scope'])test(name,name==='dns-proof'?{skip:'suspected src/schema defect: domain_verifications.domain_id FK checked before the apply trigger creates the domains row'}:{},async()=>{
+// dns-proof previously skipped under a suspected src/schema defect: the PG FK
+// domain_verifications.domain_id -> domains.id was enforced at INSERT time
+// while the domains row is only created by the domain_verification_apply
+// AFTER trigger (0007). Migration 0014 makes that constraint DEFERRABLE
+// INITIALLY DEFERRED, so first-time verification of a new domain commits.
+for(const name of ['key-scopes','key-space','step-up','step-up-session','dns-proof','dns-wrong','signed-revocation','bad-signature','scim-scope'])test(name,async()=>{
  assert.ok(Admin,'admin implementation missing');const {db,token,other}=await fixture();let delivered;
  const fetcher=async(url,init)=>{return Response.json({Status:0,Answer:[{name:'_memory-verification.example.com.',type:16,data:'"'+(name==='dns-wrong'?'incorrect':proof)+'"'}]});};let proof='';
  const env={DB:db,PUBLIC_ORIGIN:'https://memory.example.com',EMAIL:{send:async message=>{delivered=message;return {messageId:'cf-test-mail'};}},MAIL_FROM:'memory@example.com',IDENTITY_WEBHOOK_SECRET:'s'.repeat(64),fetch:fetcher};const admin=new Admin(env,()=>at);const store=new MemoryStore(db,()=>at);

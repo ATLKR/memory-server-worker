@@ -74,20 +74,17 @@ test('lookup migration keeps canonical search-row ids stable and preserves retai
  }finally{db.close();}
 });
 
-// PORTING GAP: the SQLite lookup schema guarded release_fts_rows with
+// The SQLite lookup schema guarded release_fts_rows with
 // no_replace/no_update/no_delete triggers ('already exists' / 'immutable' /
-// 'retained'). The PostgreSQL lineage relies on UNIQUE(memory_id) plus the
-// IDENTITY column only, so direct row mutation is not blocked. Kept as a
-// skipped test so the missing invariant stays visible instead of silently
-// dropped; unskip if the guards are ported to postgres/**.
-test('search-row mapping rejects update, delete and duplicate identity',{
- skip:'postgres gap: memory_search.fts_rows has no immutability triggers (SQLite no_replace/no_update/no_delete were not ported)'
-},async()=>{
+// 'retained'). The PostgreSQL lineage covers it with UNIQUE(memory_id), the
+// IDENTITY column, and the fts_rows_immutable trigger (0014), which raises
+// memory_immutable_record on any update or delete.
+test('search-row mapping rejects update, delete and duplicate identity',async()=>{
  const {db}=await fixture();try{
   await db.raw.prepare("INSERT INTO memory_content.memories(id,space_id,body,revision,created_at,updated_at,actor_credential_id) VALUES('m1','s1','word',1,?,?,'session:alice')").run(at,at);
   const mapped=(await db.raw.prepare('SELECT id FROM memory_search.fts_rows WHERE memory_id=?').get('m1')).id;
-  await assert.rejects(async()=>(await db.raw.prepare('DELETE FROM memory_search.fts_rows WHERE id=?').run(mapped)),/retained/);
-  await assert.rejects(async()=>(await db.raw.prepare('UPDATE memory_search.fts_rows SET memory_id=memory_id WHERE id=?').run(mapped)),/immutable/);
+  await assert.rejects(async()=>(await db.raw.prepare('DELETE FROM memory_search.fts_rows WHERE id=?').run(mapped)),/memory_immutable_record/);
+  await assert.rejects(async()=>(await db.raw.prepare('UPDATE memory_search.fts_rows SET memory_id=memory_id WHERE id=?').run(mapped)),/memory_immutable_record/);
  }finally{db.close();}
 });
 

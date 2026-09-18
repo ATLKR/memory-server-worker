@@ -82,13 +82,12 @@ test('SCIM deletion checks issuer membership expiry after target lookup',async t
   assert.equal((await f.db.raw.prepare("SELECT revoked_at FROM memberships WHERE id='m2'").get()).revoked_at,null);
 });
 
-// Skipped: suspected src defect in src/release/billing.ts — the
-// `UPDATE memory_control.pools SET customer_id=?` write carries no authority
-// predicate, unlike the checkout claim UPDATE which folds in
-// authority('update') AND recentSql(). A session that expires during the
-// Stripe /customers call still persists customer_id. The SQLite lineage
-// guarded this write with an authority predicate + final timing check.
-test('customer creation response cannot update the pool or claim checkout after session expiry',{skip:'suspected src defect: billing.ts customer_id UPDATE lacks the authority/expiry predicate used by the checkout claim'},async t=>{
+// The `UPDATE memory_control.pools SET customer_id=?` claim re-checks
+// authority after the Stripe /customers call and folds the authority
+// predicate into the UPDATE on single-cluster deployments — the same pattern
+// as the checkout claim. A session expiring during the provider call cannot
+// persist customer_id or reach the checkout claim.
+test('customer creation response cannot update the pool or claim checkout after session expiry',async t=>{
   const f=await setup(t);let checkoutCalls=0;
   const billing=new Billing({DB:f.db,BACKGROUND_JOBS_ENABLED:'true',STRIPE_SECRET_KEY:'synthetic',STRIPE_WEBHOOK_SECRET:'w'.repeat(64),STRIPE_API_VERSION:'synthetic',BILLING_PRICES_JSON:JSON.stringify({price_test:{plan:'team',monthlyUnits:10000,storageBytes:1048576000}}),fetch:async url=>{if(String(url).endsWith('/customers')){f.advance();return Response.json({id:'cus_test'});}checkoutCalls++;return Response.json({id:'cs_test',url:'https://checkout.stripe.com/c/pay/test'});}},f.clock);
   await denied(()=>billing.checkout(f.token,'s1','price_test','expiry'));

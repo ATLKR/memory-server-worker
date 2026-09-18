@@ -15,11 +15,9 @@ for(const name of ['lexical','cross-space-vector','stale-vector','revoked-during
  if(name==='outbox-retry'){failUpsert=true;await jobs.drain(1);assert.equal((await db.raw.prepare('SELECT state FROM release_jobs').get()).state,'pending');failUpsert=false;now+=120000;await jobs.drain(1);assert.equal((await db.raw.prepare('SELECT state FROM release_jobs').get()).state,'done');assert.ok(vectors.size>0);}
  if(name==='index-rebuild'){await jobs.drain(1);vectors.clear();await search.rebuild(token,'s1');await jobs.drain(5);assert.ok(vectors.size>0);}
  if(name==='erasure-index'){await jobs.drain(1);await store.remove(token,'s1',m.id,1,'delete');await store.erase(token,'s1',m.id,2,m.id,'erase');await jobs.drain(10);assert.equal(vectors.size,0);
-  // Suspected migration defect (postgres/migrations/0008_regional_space.sql):
-  // the erasure_ledger append-only trigger rejects the designed
-  // vector_erased_at completion write in src/release/jobs.ts, so the marker
-  // stays null until the trigger exempts that column.
-  t.skip('suspected migration defect: erasure_ledger append-only trigger rejects the vector_erased_at completion update');return;}
+  // 0008's erasure_ledger completion trigger exempts the NULL→stamp
+  // vector_erased_at write; it is the only mutable column on the ledger.
+  assert.equal((await db.raw.prepare("SELECT vector_erased_at FROM erasure_ledger WHERE memory_id=?").get(m.id)).vector_erased_at!==null,true);return;}
  }finally{db.close();}
 });
 test('hybrid ranking counts a memory once despite multiple matching chunks',async()=>{

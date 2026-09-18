@@ -50,19 +50,16 @@ test('Cloudflare EMAIL binding sends proof mail and proof remains session-bound 
  await assert.rejects(()=>admin.completeReauth(token,challenge.id,proof),e=>e.status===403);
  }finally{db.close();}
 });
-// SKIPPED (suspected src defect): src/release/admin.ts startReauth cleans up a
-// failed challenge with `DELETE FROM memory_identity.reauth_challenges`, but
-// the PG schema (0007) forbids deletes on that table — only used_at may be
-// consumed (0010). The DELETE raises memory_immutable_record, which shadows
-// the real error code and leaves the challenge row behind.
-test('Cloudflare mail failure destroys the challenge and does not expose provider diagnostics',{skip:'suspected src defect: admin.ts reauth cleanup DELETEs reauth_challenges, which PG forbids (no_delete trigger)'},async()=>{
+// The reauth delete guard (0014) permits deleting an unused challenge — the
+// compensation path only touches rows the guard allows.
+test('Cloudflare mail failure destroys the challenge and does not expose provider diagnostics',async()=>{
  const {db,token}=await fixture();try{
  const admin=new Admin({DB:db,MAIL_FROM:'noreply@memory.allenlabs.org',EMAIL:{send:async()=>{throw Error('sensitive recipient and provider detail');}}},()=>at);
  await assert.rejects(()=>admin.startReauth(token,'e1'),e=>e.code==='mail_delivery_failed'&&!e.message.includes('sensitive'));
  assert.equal((await db.raw.prepare('SELECT count(*) AS n FROM release_reauth_challenges').get()).n,0);
  }finally{db.close();}
 });
-test('Cloudflare mail timeout destroys the challenge without retrying the uncertain send',{skip:'suspected src defect: admin.ts reauth cleanup DELETEs reauth_challenges, which PG forbids (no_delete trigger)'},async t=>{
+test('Cloudflare mail timeout destroys the challenge without retrying the uncertain send',async t=>{
  t.mock.timers.enable({apis:['setTimeout']});
  const {db,token}=await fixture();let calls=0;const deliveryStarted=Promise.withResolvers();
  try{
@@ -75,7 +72,7 @@ test('Cloudflare mail timeout destroys the challenge without retrying the uncert
  assert.equal(calls,1);assert.equal((await db.raw.prepare('SELECT count(*) AS n FROM release_reauth_challenges').get()).n,0);
  }finally{db.close();}
 });
-test('Cloudflare mail retains account daily budget and fails closed without EMAIL',{skip:'suspected src defect: admin.ts reauth cleanup DELETEs reauth_challenges, which PG forbids (no_delete trigger)'},async()=>{
+test('Cloudflare mail retains account daily budget and fails closed without EMAIL',async()=>{
  const {db,token}=await fixture();let calls=0;try{
  const admin=new Admin({DB:db,MAIL_FROM:'noreply@memory.allenlabs.org',EMAIL:{send:async()=>{calls++;return {messageId:'cf-test'};}}},()=>at);
  (await db.raw.prepare('INSERT INTO release_mail_budget(account_id,day,quantity) VALUES(?,?,?)').run('alice',new Date(at).toISOString().slice(0,10),20));

@@ -124,7 +124,7 @@ test('queue-episode trigger stamps inserts and done/dead restarts, preserving mi
   await db.raw.prepare("UPDATE release_jobs SET queued_at=NULL WHERE id='initial'").run();
   assert.equal((await db.raw.prepare("SELECT queued_at FROM release_jobs WHERE id='initial'").get()).queued_at, null);
   await insert.run('new', 'ingest', 'pending', 0, at, at); assert.equal((await db.raw.prepare("SELECT queued_at FROM release_jobs WHERE id='new'").get()).queued_at, now);
-  assert.equal((await db.raw.prepare('SELECT version FROM release_meta').get()).version, 15);
+  assert.equal((await db.raw.prepare('SELECT version FROM release_meta').get()).version, 16);
 });
 test('routine completed-delete reconciliation starts a fresh episode and retries preserve its real age', async t => {
   const f = await setup(t), store = new MemoryStore(f.db, () => at), memory = await store.create('a'.repeat(64), 's1', { body: 'completed content' }, 'episode-create');

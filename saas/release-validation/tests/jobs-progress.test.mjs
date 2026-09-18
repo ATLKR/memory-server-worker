@@ -43,16 +43,17 @@ test('erasure checkpoints bounded pages and daily sweeps restart with retained i
   for(let n=0;n<10&&p.vectors.size;n++){now+=60000;await p.jobs.drain(5);}
   assert.equal(p.vectors.size,0);assert.equal(p.deleted.length,2500);assert.equal(new Set(p.deleted).size,2500);
   assert.equal((await db.raw.prepare('SELECT count(*) n FROM release_vector_refs').get()).n,2500);
-  // Suspected migration defect (postgres/migrations/0008_regional_space.sql):
-  // memory_ops.erasure_ledger was classified append-only (BEFORE UPDATE OR
-  // DELETE reject_mutation), but vector_erased_at is a designed mutable
-  // completion marker - src/release/jobs.ts UPDATEs it after the last cleanup
-  // page and maintain() resweeps on it. The write fails with
-  // memory_immutable_record, so erase jobs can never reach 'done' and the
-  // daily vector_resweep assertions below are unreachable until the trigger
-  // exempts that column.
-  t.skip('suspected migration defect: erasure_ledger append-only trigger rejects the vector_erased_at completion update');
-  return;
+  // The erasure_ledger completion trigger (0016) permits only a strictly
+  // later vector_erased_at stamp — each confirmed resweep moves it forward.
+  const completedAt=(await db.raw.prepare('SELECT vector_erased_at FROM release_erasure_ledger').get()).vector_erased_at;
+  p.vectors.add('historical:001:0');now+=86400001;
+  // Each maintenance pass advances over at most 100 raw done jobs, including
+  // obsolete revisions, so this 252-revision history needs several passes.
+  for(let pass=0;pass<3;pass++)await p.jobs.maintain();
+  assert.equal((await db.raw.prepare('SELECT state FROM release_jobs WHERE id=?').get(jobId)).state,'pending');
+  assert.equal((await db.raw.prepare('SELECT cleanup_cursor FROM release_jobs WHERE id=?').get(jobId)).cleanup_cursor,'');
+  await finish(p.jobs,db,ms=>{now+=ms;},jobId);assert.equal(p.vectors.size,0);
+  assert.ok((await db.raw.prepare('SELECT vector_erased_at FROM release_erasure_ledger').get()).vector_erased_at>completedAt);
  }finally{db.close();}
 });
 
@@ -105,13 +106,8 @@ for(const failure of ['provider','replaced-lease'])test('cleanup checkpoint surv
   assert.equal(row.state,failure==='provider'?'pending':'leased');assert.equal(row.attempt,1);
   if(failure==='replaced-lease')assert.equal(row.lease_token,'replacement-worker');
   fail=false;now+=120001;await jobs.drain(1);
+  assert.equal((await db.raw.prepare('SELECT state FROM release_jobs WHERE id=?').get(jobId)).state,'done');
   assert.deepEqual(deleted,['vector-0000','vector-0100','vector-0200'],'A previously accepted page resumes confirmation without resubmitting its deletion');
-  // The resumed drain deletes the remaining page, then the same
-  // erasure_ledger append-only defect above rejects the completion write, so
-  // the job can never reach 'done'. The final state assertion stays skipped
-  // until the trigger exempts vector_erased_at.
-  t.skip('suspected migration defect: erasure_ledger append-only trigger rejects the vector_erased_at completion update');
-  return;
  }finally{db.close();}
 });
 

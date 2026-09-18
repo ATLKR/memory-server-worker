@@ -6,8 +6,8 @@ import { createRegionWorkerApp } from '../../src/postgres/region-app.ts';
 
 const CONFIG = { region: 'sg', processingPolicyId: 'standard-v1', schemaVersion: 2, prefix: 'MEMORY_SG', hyperdriveBinding: 'SG_HYPERDRIVE' };
 // The attestation pins the exact contiguous migration count per cluster:
-// 15 regional, 6 control. Bump when the lineage grows.
-const FULL_CONFIG = { ...CONFIG, schemaVersion: 15, controlSchemaVersion: 6 };
+// 16 regional, 6 control. Bump when the lineage grows.
+const FULL_CONFIG = { ...CONFIG, schemaVersion: 16, controlSchemaVersion: 6 };
 const ORIGIN = 'https://memory.test';
 const TARGET = JSON.stringify({ connectionMode: 'direct', database: 'postgres', deploymentId: 'memory-sg-0001',
     expectedRole: 'memory_runtime', host: 'ep-test.ap-southeast-1.aws.neon.tech', port: 5432, user: 'memory_runtime' });

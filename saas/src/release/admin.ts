@@ -469,7 +469,16 @@ export class Admin {
         expiresAt: number;
     }> {
         await this.orgAdmin(token, org);
-        const raw = 'scim_' + randomToken(), keyId = crypto.randomUUID(), hash = await tokenHash(token), keyHash = await tokenHash(raw), at = this.clock();
+        // A SCIM key is an org-administration grant: the actor and the
+        // organization must both hold a live enrollment in this region.
+        const hash = await tokenHash(token), at = this.clock();
+        const actor = await one<{ accountId: string }>(this.db,
+            `SELECT account_id AS "accountId" FROM memory_identity.active_credentials WHERE token_digest=? AND expires_at>${sqlNow()}`,
+            [hash, at]);
+        if (actor !== null && (!await accountGrantAdmission(this.db, this.env.CONTROL_DB, actor.accountId)
+            || !await organizationGrantAdmission(this.db, this.env.CONTROL_DB, org)))
+            fail(403, 'enrollment_required');
+        const raw = 'scim_' + randomToken(), keyId = crypto.randomUUID(), keyHash = await tokenHash(raw);
         const r = await this.db.prepare(`INSERT INTO memory_identity.scim_keys
             (id,organization_id,token_digest,creator_credential_id,expires_at,creator_membership_id,creator_email_id,created_at)
    SELECT ?,m.organization_id,?,c.id,?,m.id,m.email_id,? FROM memory_identity.active_credentials c JOIN memory_identity.active_memberships m ON m.account_id=c.account_id WHERE ${adminSql()}`).bind(keyId, keyHash, at + 30 * 86400000, at, ...adminValues(hash, at, org)).run();
