@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import type { PgSession } from './connection.ts';
+import type { PgSession, PgValue } from './connection.ts';
 
 /** Sealed-import primitives for the regional cutover rehearsal (P-6): an
  * exact consistent cut of named tables, a manifest of per-table row counts and
@@ -44,22 +44,35 @@ function canonical(value: unknown): string {
 }
 
 async function columnList(session: PgSession, table: string): Promise<string[]> {
-    const [schema, name] = table.split('.');
-    const r = await session.query(
+    const [schema, name] = table.split('.') as [string, string];
+    const r = await session.query<{ c: string }>(
         `SELECT column_name AS c FROM information_schema.columns
          WHERE table_schema=$1 AND table_name=$2 ORDER BY ordinal_position`, [schema, name]);
     if (!r.rows.length) throw new Error('cutover_table_missing');
-    return r.rows.map((row: { c: string }) => row.c);
+    return r.rows.map(row => row.c);
 }
 
 /** Writable columns only — generated columns recompute on the target and the
  * seal still covers them, so a wrong generation expression fails verify. */
 async function writableColumns(session: PgSession, table: string): Promise<string[]> {
-    const [schema, name] = table.split('.');
-    const r = await session.query(
+    const [schema, name] = table.split('.') as [string, string];
+    const r = await session.query<{ c: string }>(
         `SELECT column_name AS c FROM information_schema.columns
          WHERE table_schema=$1 AND table_name=$2 AND is_generated='NEVER' ORDER BY ordinal_position`, [schema, name]);
-    return r.rows.map((row: { c: string }) => row.c);
+    return r.rows.map(row => row.c);
+}
+
+/** Every base table in the regional memory_* schemas — the full cutover
+ * surface, so the rehearsal cannot silently miss a table added by a later
+ * migration. Copies run under session_replication_role='replica', which
+ * suppresses constraint triggers, so enumeration order is immaterial. */
+export async function listRegionalTables(session: PgSession): Promise<string[]> {
+    const r = await session.query<{ t: string }>(
+        `SELECT table_schema || '.' || table_name AS t FROM information_schema.tables
+         WHERE table_schema IN ('memory_control','memory_identity','memory_content','memory_jobs','memory_ops','memory_search')
+           AND table_type='BASE TABLE'
+           AND table_name NOT IN ('schema_migrations') ORDER BY 1`);
+    return r.rows.map(row => row.t);
 }
 
 /** Digest every row of `table` under the caller's snapshot/transaction. */
@@ -99,9 +112,23 @@ export async function copyTable(source: PgSession, target: PgSession, table: str
         let written = 0;
         for (const row of rows.rows) {
             const values = columns.map((_, i) => `$${i + 1}`).join(',');
-            await target.query(`INSERT INTO ${qualified}(${order}) VALUES(${values})`,
-                columns.map(c => { const v = row[c]; return v === null || v === undefined ? null : (typeof v === 'object' ? JSON.stringify(v) : v); }));
+            // OVERRIDING SYSTEM VALUE preserves GENERATED ALWAYS AS IDENTITY
+            // values — the cut carries the source's exact identifiers.
+            await target.query(`INSERT INTO ${qualified}(${order}) OVERRIDING SYSTEM VALUE VALUES(${values})`,
+                columns.map((c): PgValue => {
+                    const v = row[c];
+                    if (v === null || v === undefined) return null;
+                    if (typeof v === 'object') return v instanceof Uint8Array ? v : JSON.stringify(v);
+                    return v as PgValue;
+                }));
             written++;
+        }
+        // Resync identity/serial sequences so post-cut writes never reuse a
+        // copied id — pg_restore performs the same setval pass.
+        for (const c of columns) {
+            const seq = await target.query<{ s: string | null }>(`SELECT pg_get_serial_sequence($1,$2) AS s`, [qualified, c]);
+            if (seq.rows[0]?.s)
+                await target.query(`SELECT setval($1, coalesce((SELECT max("${c}") FROM ${qualified}),1))`, [seq.rows[0].s]);
         }
         return written;
     } finally { await target.query(`SET session_replication_role='origin'`); }

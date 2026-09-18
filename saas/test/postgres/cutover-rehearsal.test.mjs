@@ -3,7 +3,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { PGlite } from '@electric-sql/pglite';
 import { createPgliteSession } from './pg-database-fixture.mjs';
-import { copyTable, exportManifest, sealTable, verifyManifest } from '../../src/postgres/cutover.ts';
+import { copyTable, exportManifest, listRegionalTables, sealTable, verifyManifest } from '../../src/postgres/cutover.ts';
 
 const NOW = 1758000000000;
 // Regional tables with real seeded content — a representative cut, not the
@@ -39,6 +39,23 @@ async function regionalDb(t, seed = true) {
     }
     return { db, session: createPgliteSession(db) };
 }
+
+test('full-surface enumeration seals every regional table and re-verifies on a fresh target', async t => {
+    const { session: source } = await regionalDb(t);
+    const { session: target } = await regionalDb(t, false);
+    const all = await listRegionalTables(source);
+    assert.ok(all.length >= 50, 'the enumeration must cover the full regional surface, not a hand-picked subset');
+    const manifest = await exportManifest(source, 'memory-seoul', 'kr-seoul', all, NOW);
+    // Provision-seeded tables (maintenance_progress, payload_backfill_progress,
+    // ...) are reconciliation checks, not copy targets — the seal still
+    // verifies the target's seed matches the source's.
+    const provisionSeeded = [];
+    for (const table of all)
+        if ((await target.query(`SELECT 1 FROM ${table} LIMIT 1`)).rows.length) provisionSeeded.push(table);
+    assert.deepEqual(provisionSeeded.sort(), ['memory_ops.maintenance_progress', 'memory_ops.payload_backfill_progress']);
+    for (const table of all) if (!provisionSeeded.includes(table)) await copyTable(source, target, table);
+    assert.deepEqual(await verifyManifest(target, manifest), []);
+});
 
 test('sealed export reproduces byte-identical rows on a fresh target', async t => {
     const { session: source } = await regionalDb(t);
