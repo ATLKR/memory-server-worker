@@ -73,7 +73,9 @@ Postgres. The cut therefore runs a parallel object pass:
 ## Not yet covered
 
 - **Live rehearsal** on real Neon/Supabase instances, including measured
-  RPO/RTO, TLS-path verification, and the acceptance record.
-- **Operational runbook ordering** for a production cut: the freeze/unfreeze
-  caller (an operator command or worker-side quarantine flag), migration-
-  window sizing, and the rollback journal for post-activation regression.
+  RPO/RTO, TLS-path verification, and the acceptance record — the operator
+  procedure is written in
+  [2026-09-19-cutover-operator-runbook.md](2026-09-19-cutover-operator-runbook.md);
+  it needs real clusters to execute.
+- **Rollback journal** for post-activation regression — rebuild-not-merge is
+  rehearsed; a journaled operational record is an ops artifact, not code.
