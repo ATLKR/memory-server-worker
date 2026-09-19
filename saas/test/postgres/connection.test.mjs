@@ -161,11 +161,37 @@ test('transaction-pooler attestation and all timeout state stay inside one actua
    if(c.text==='BEGIN'){inTransaction=true;effects.push('BEGIN');return {rows:[],rowCount:null};}
    if(c.text==='COMMIT'||c.text==='ROLLBACK'){assert.equal(inTransaction,true);inTransaction=false;effects.push(c.text);return {rows:[],rowCount:null};}
    assert.equal(inTransaction,true,'pooler could switch backend outside BEGIN');
-   if(c.text.includes('set_config')){assert.equal(c.values[1],true,'session state must not survive the transaction');assert.ok(Number(c.values[0])>0);return {rows:[{}],rowCount:1};}
+   if(c.text.includes('set_config')){assert.equal(c.values[1],true,'session state must not survive the transaction');if(!c.text.includes('caller_region'))assert.ok(Number(c.values[0])>0);return {rows:[{}],rowCount:1};}
    if(c.text.includes('pg_roles'))return {rows:[role()],rowCount:1};
    effects.push(c.text);return {rows:[],rowCount:1};
   }}),verifyDeployment:async session=>{await session.query('SELECT deployment_metadata');return {region:'sg',deploymentId:'memory-sg-test'};}
  });
  await connection.withConnection(db=>db.query('UPDATE regional_row SET value=1'));
  assert.deepEqual(effects,['BEGIN','SELECT deployment_metadata','UPDATE regional_row SET value=1','COMMIT']);assert.equal(closed,1);
+});
+test('a denied statement recovers through its savepoint and the transaction still commits',async()=>{
+ // Real servers reject EVERY statement in an aborted transaction — including
+ // the ambient set_config preamble — until ROLLBACK TO reaches the server. A
+ // preamble on the recovery statement makes savepoint recovery unreachable
+ // (observed against the live Seoul Supabase pooler: postgres_transaction_failed).
+ let aborted=false;const effects=[];
+ const connection=mod.createPostgresConnection(target(),{
+  clientFactory:()=>({on(){return this;},async connect(){},async end(){},async query(c){
+   if(c.text==='BEGIN'||c.text==='COMMIT'||c.text==='ROLLBACK')return {rows:[],rowCount:null};
+   if(aborted&&!/^\s*ROLLBACK\s+TO\b/i.test(c.text))throw Object.assign(new Error('current transaction is aborted'),{code:'25P02'});
+   if(c.text.includes('set_config'))return {rows:[{}],rowCount:1};
+   if(c.text.includes('pg_roles'))return {rows:[role()],rowCount:1};
+   if(/^\s*ROLLBACK\s+TO\b/i.test(c.text)){aborted=false;effects.push(c.text);return {rows:[],rowCount:null};}
+   if(c.text==='SELECT 1 FROM pg_catalog.pg_authid LIMIT 1'){aborted=true;throw Object.assign(new Error('permission denied'),{code:'42501'});}
+   effects.push(c.text);return {rows:[{v:1}],rowCount:1};
+  }}),verifyDeployment:async()=>({region:'sg',deploymentId:'memory-sg-test'})});
+ const value=await connection.withConnection(async db=>{
+  await db.query('SAVEPOINT attest_probe');
+  await assert.rejects(db.query('SELECT 1 FROM pg_catalog.pg_authid LIMIT 1'),e=>e.code==='postgres_query_failed'&&e.sqlState==='42501');
+  await db.query('ROLLBACK TO attest_probe');
+  await db.query('RELEASE attest_probe');
+  return (await db.query('SELECT deployment_id')).rows;
+ });
+ assert.equal(value.length,1);
+ assert.deepEqual(effects,['SAVEPOINT attest_probe','ROLLBACK TO attest_probe','RELEASE attest_probe','SELECT deployment_id']);
 });

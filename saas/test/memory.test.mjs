@@ -14,7 +14,7 @@ async function fixture(t) {
   const service = new implementation.MemoryService(f.db, f.clock);
   const personal = await service.createSpace(tokens.alice, { name: 'Personal' });
   const organization = await service.createSpace(tokens.alice, { name: 'Organization', organizationId: 'org-one' });
-  f.raw.exec(`INSERT INTO memberships(id,organization_id,account_id,email_id,role)
+  await f.raw.exec(`INSERT INTO memory_identity.memberships(id,organization_id,account_id,email_id,role)
     VALUES ('m-bob','org-one','bob','e-bob','member')`);
   return { ...f, service, personal, organization, ...implementation };
 }
@@ -49,7 +49,7 @@ test('organization members read while current owner/admin roles write', async t 
   ]) await assert.rejects(action, f.MemoryDenied);
   const updated = await f.service.update(tokens.admin, f.organization.id, value.id, { body: 'Admin correction', expectedRevision: 1 });
   assert.equal(updated.revision, 2);
-  f.raw.prepare("UPDATE memberships SET role='member' WHERE id='m-admin'").run();
+  await f.raw.prepare("UPDATE memory_identity.memberships SET role='member' WHERE id='m-admin'").run();
   await assert.rejects(() => f.service.update(tokens.admin, f.organization.id, value.id, { body: 'Demoted', expectedRevision: 1 }), f.MemoryDenied);
   await assert.rejects(() => f.service.createSpace(tokens.bob, { name: 'Other', organizationId: 'org-two' }), f.MemoryDenied);
 });
@@ -78,7 +78,7 @@ test('email revocation immediately removes organization access without removing 
   const shared = await f.service.create(tokens.alice, f.organization.id, { body: 'Shared secret' });
   const personal = await f.service.create(tokens.alice, f.personal.id, { body: 'Personal survives' });
   await f.service.get(tokens.key, f.organization.id, shared.id);
-  f.raw.prepare('UPDATE account_emails SET revoked_at=? WHERE id=?').run(NOW, 'e-work');
+  await f.raw.prepare('UPDATE memory_identity.account_emails SET revoked_at=? WHERE id=?').run(NOW, 'e-work');
   for (const token of [tokens.alice, tokens.key]) {
     await assert.rejects(() => f.service.get(token, f.organization.id, shared.id), f.MemoryDenied);
     await assert.rejects(() => f.service.search(token, f.organization.id, { query: 'secret' }), f.MemoryDenied);
@@ -91,10 +91,10 @@ test('disabled accounts and organizations deny reads and writes immediately', as
   const f = await fixture(t);
   const shared = await f.service.create(tokens.alice, f.organization.id, { body: 'Shared' });
   const personal = await f.service.create(tokens.alice, f.personal.id, { body: 'Personal' });
-  f.raw.prepare("UPDATE organizations SET disabled_at=? WHERE id='org-one'").run(NOW);
+  await f.raw.prepare("UPDATE memory_control.organizations SET disabled_at=? WHERE id='org-one'").run(NOW);
   await assert.rejects(() => f.service.get(tokens.alice, f.organization.id, shared.id), f.MemoryDenied);
   await assert.rejects(() => f.service.create(tokens.admin, f.organization.id, { body: 'No' }), f.MemoryDenied);
-  f.raw.prepare("UPDATE accounts SET disabled_at=? WHERE id='alice'").run(NOW);
+  await f.raw.prepare("UPDATE memory_identity.accounts SET disabled_at=? WHERE id='alice'").run(NOW);
   await assert.rejects(() => f.service.get(tokens.alice, f.personal.id, personal.id), f.MemoryDenied);
   await assert.rejects(() => f.service.create(tokens.alice, f.personal.id, { body: 'No' }), f.MemoryDenied);
 });
@@ -102,14 +102,14 @@ test('disabled accounts and organizations deny reads and writes immediately', as
 test('credential and membership expiry use the injected current clock', async t => {
   const f = await fixture(t);
   const value = await f.service.create(tokens.alice, f.organization.id, { body: 'Expires' });
-  f.raw.prepare("UPDATE memberships SET expires_at=? WHERE id='m-work'").run(NOW + 100);
-  f.setNow(NOW + 100);
+  await f.raw.prepare("UPDATE memory_identity.memberships SET expires_at=? WHERE id='m-work'").run(NOW + 100);
+  await f.setNow(NOW + 100);
   for (const token of [tokens.alice, tokens.key]) {
     await assert.rejects(() => f.service.get(token, f.organization.id, value.id), f.MemoryDenied);
     await assert.rejects(() => f.service.create(token, f.organization.id, { body: 'Expired' }), f.MemoryDenied);
   }
   assert.deepEqual(await f.service.search(tokens.alice, f.personal.id, { query: 'anything' }), []);
-  f.setNow(NOW + 3_600_000);
+  await f.setNow(NOW + 3_600_000);
   await assert.rejects(() => f.service.search(tokens.alice, f.personal.id, { query: 'anything' }), f.MemoryDenied);
   await assert.rejects(() => f.service.createSpace(tokens.alice, { name: 'Expired' }), f.MemoryDenied);
 });
@@ -117,7 +117,7 @@ test('credential and membership expiry use the injected current clock', async t 
 test('optimistic updates preserve each prior version and prevent lost updates', async t => {
   const f = await fixture(t);
   const value = await f.service.create(tokens.alice, f.personal.id, { body: 'Original', source: 'original source' });
-  f.setNow(NOW + 10);
+  await f.setNow(NOW + 10);
   const outcomes = await Promise.allSettled([
     f.service.update(tokens.alice, f.personal.id, value.id, { body: 'Winner A', expectedRevision: 1 }),
     f.service.update(tokens.alice, f.personal.id, value.id, { body: 'Winner B', expectedRevision: 1 }),
@@ -129,7 +129,7 @@ test('optimistic updates preserve each prior version and prevent lost updates', 
   assert.equal(current.source, 'original source');
   assert.equal(current.createdAt, NOW);
   assert.equal(current.updatedAt, NOW + 10);
-  const history = f.raw.prepare('SELECT revision,body,source FROM memory_versions WHERE memory_id=? ORDER BY revision').all(value.id);
+  const history = await f.raw.prepare('SELECT revision,body,source FROM memory_content.memory_versions WHERE memory_id=? ORDER BY revision').all(value.id);
   assert.deepEqual(history.map(r => ({ ...r })), [{ revision: 1, body: 'Original', source: 'original source' }]);
   const next = await f.service.update(tokens.alice, f.personal.id, value.id, { body: 'Explicit null source', source: null, expectedRevision: 2 });
   assert.equal(next.source, null);
@@ -140,22 +140,22 @@ test('soft deletion saves history, hides get/search, and cannot be repeated', as
   const f = await fixture(t);
   const value = await f.service.create(tokens.alice, f.personal.id, { body: 'Find this secret' });
   await assert.rejects(() => f.service.remove(tokens.alice, f.personal.id, value.id, 2), f.MemoryConflict);
-  f.setNow(NOW + 5);
+  await f.setNow(NOW + 5);
   await f.service.remove(tokens.alice, f.personal.id, value.id, 1);
   await assert.rejects(() => f.service.get(tokens.alice, f.personal.id, value.id), f.MemoryDenied);
   await assert.rejects(() => f.service.remove(tokens.alice, f.personal.id, value.id, 2), f.MemoryDenied);
   await assert.rejects(() => f.service.update(tokens.alice, f.personal.id, value.id, { body: 'Revive', expectedRevision: 2 }), f.MemoryDenied);
   assert.deepEqual(await f.service.search(tokens.alice, f.personal.id, { query: 'secret' }), []);
-  const row = f.raw.prepare('SELECT body,revision,deleted_at FROM memories WHERE id=?').get(value.id);
+  const row = await f.raw.prepare('SELECT body,revision,deleted_at FROM memory_content.memories WHERE id=?').get(value.id);
   assert.deepEqual({ ...row }, { body: 'Find this secret', revision: 2, deleted_at: NOW + 5 });
-  assert.equal(f.raw.prepare('SELECT body FROM memory_versions WHERE memory_id=? AND revision=1').get(value.id).body, 'Find this secret');
+  assert.equal((await f.raw.prepare('SELECT body FROM memory_content.memory_versions WHERE memory_id=? AND revision=1').get(value.id)).body, 'Find this secret');
 });
 
 test('keyword search is bounded, deterministic, and returns snippets without full-body fields', async t => {
   const f = await fixture(t);
   const created = [];
   for (let i = 0; i < 12; i++) {
-    f.setNow(NOW + i);
+    await f.setNow(NOW + i);
     created.push(await f.service.create(tokens.alice, f.personal.id, { body: 'prefix '.repeat(100) + 'TARGET ' + 'suffix '.repeat(100), source: 'source-' + i }));
   }
   const hits = await f.service.search(tokens.alice, f.personal.id, { query: 'target' });
@@ -217,9 +217,9 @@ function intercept(f, beforeRun, afterRun) {
     statement.run = async () => {
       if (!armed) return run();
       armed = false;
-      beforeRun?.(sql);
+      await beforeRun?.(sql);
       const result = await run();
-      afterRun?.(sql);
+      await afterRun?.(sql);
       return result;
     };
     return statement;
@@ -229,53 +229,62 @@ function intercept(f, beforeRun, afterRun) {
 test('write-time authorization blocks state revoked after request begins', async t => {
   const f = await fixture(t);
   const value = await f.service.create(tokens.alice, f.organization.id, { body: 'Original' });
-  intercept(f, () => f.raw.prepare("UPDATE memberships SET revoked_at=? WHERE id='m-work'").run(NOW));
+  intercept(f, () => f.raw.prepare("UPDATE memory_identity.memberships SET revoked_at=? WHERE id='m-work'").run(NOW));
   await assert.rejects(() => f.service.update(tokens.alice, f.organization.id, value.id, { body: 'Unauthorized', expectedRevision: 1 }), f.MemoryDenied);
-  assert.equal(f.raw.prepare('SELECT body FROM memories WHERE id=?').get(value.id).body, 'Original');
-  assert.equal(f.raw.prepare('SELECT COUNT(*) AS count FROM memory_versions').get().count, 0);
+  assert.equal((await f.raw.prepare('SELECT body FROM memory_content.memories WHERE id=?').get(value.id)).body, 'Original');
+  assert.equal((await f.raw.prepare('SELECT COUNT(*) AS count FROM memory_content.memory_versions').get()).count, 0);
 });
 
 test('creation checks permission inside its insert after credential revocation', async t => {
   const f = await fixture(t);
-  intercept(f, () => f.raw.prepare("UPDATE credentials SET revoked_at=? WHERE id='s-alice'").run(NOW));
+  intercept(f, () => f.raw.prepare("UPDATE memory_identity.credentials SET revoked_at=? WHERE id='s-alice'").run(NOW));
   await assert.rejects(() => f.service.create(tokens.alice, f.personal.id, { body: 'Unauthorized' }), f.MemoryDenied);
-  assert.equal(f.raw.prepare('SELECT COUNT(*) AS count FROM memories').get().count, 0);
+  assert.equal((await f.raw.prepare('SELECT COUNT(*) AS count FROM memory_content.memories').get()).count, 0);
 });
 
 test('successful write rechecks authority before returning memory text', async t => {
   const f = await fixture(t);
   const value = await f.service.create(tokens.alice, f.personal.id, { body: 'Original' });
-  intercept(f, undefined, () => f.raw.prepare("UPDATE credentials SET revoked_at=? WHERE id='s-alice'").run(NOW));
+  intercept(f, undefined, () => f.raw.prepare("UPDATE memory_identity.credentials SET revoked_at=? WHERE id='s-alice'").run(NOW));
   await assert.rejects(() => f.service.update(tokens.alice, f.personal.id, value.id, { body: 'Written before revocation', expectedRevision: 1 }), f.MemoryDenied);
-  assert.equal(f.raw.prepare('SELECT revision FROM memories WHERE id=?').get(value.id).revision, 2);
+  assert.equal((await f.raw.prepare('SELECT revision FROM memory_content.memories WHERE id=?').get(value.id)).revision, 2);
 });
 
 test('history and identifier-only audit are immutable and roll back together on failure', async t => {
   const f = await fixture(t);
   const value = await f.service.create(tokens.alice, f.personal.id, { body: 'private body', source: 'private source' });
   await f.service.update(tokens.alice, f.personal.id, value.id, { body: 'updated private body', expectedRevision: 1 });
-  const audit = f.raw.prepare('SELECT * FROM memory_audit_events').all();
+  const audit = await f.raw.prepare('SELECT * FROM memory_ops.memory_audit_events').all();
   assert.ok(audit.length >= 4);
   assert.ok(!JSON.stringify(audit).includes('private'));
-  assert.throws(() => f.raw.exec("UPDATE memory_versions SET body='tampered'"));
-  assert.throws(() => f.raw.exec('DELETE FROM memory_versions'));
-  assert.throws(() => f.raw.exec("UPDATE memory_audit_events SET action='tampered'"));
-  assert.throws(() => f.raw.exec('DELETE FROM memory_audit_events'));
-  f.raw.exec(`CREATE TRIGGER fail_memory_audit BEFORE INSERT ON memory_audit_events
-    WHEN NEW.action='memory_updated' BEGIN SELECT RAISE(ABORT,'synthetic audit failure'); END`);
+  await assert.rejects(() => f.raw.exec("UPDATE memory_content.memory_versions SET body='tampered'"));
+  await assert.rejects(() => f.raw.exec('DELETE FROM memory_content.memory_versions'));
+  await assert.rejects(() => f.raw.exec("UPDATE memory_ops.memory_audit_events SET action='tampered'"));
+  await assert.rejects(() => f.raw.exec('DELETE FROM memory_ops.memory_audit_events'));
+  await f.raw.exec(`CREATE FUNCTION memory_ops.fail_memory_audit() RETURNS trigger
+    LANGUAGE plpgsql AS $$ BEGIN
+      IF NEW.action='memory_updated' THEN RAISE EXCEPTION 'synthetic audit failure'; END IF;
+      RETURN NEW; END $$;
+    CREATE TRIGGER fail_memory_audit BEFORE INSERT ON memory_ops.memory_audit_events
+      FOR EACH ROW EXECUTE FUNCTION memory_ops.fail_memory_audit()`);
   await assert.rejects(() => f.service.update(tokens.alice, f.personal.id, value.id, { body: 'must roll back', expectedRevision: 2 }));
-  assert.equal(f.raw.prepare('SELECT revision FROM memories WHERE id=?').get(value.id).revision, 2);
-  assert.equal(f.raw.prepare('SELECT COUNT(*) AS count FROM memory_versions WHERE memory_id=?').get(value.id).count, 1);
+  assert.equal((await f.raw.prepare('SELECT revision FROM memory_content.memories WHERE id=?').get(value.id)).revision, 2);
+  assert.equal((await f.raw.prepare('SELECT COUNT(*) AS count FROM memory_content.memory_versions WHERE memory_id=?').get(value.id)).count, 1);
 });
 
-test('REPLACE cannot overwrite canonical ownership, revisions, history, or audit when recursive triggers are disabled', async t => {
+test('conflict-path upserts cannot overwrite canonical ownership, revisions, history, or audit', async t => {
   const f = await fixture(t);
   const value = await f.service.create(tokens.alice, f.personal.id, { body: 'Original' });
   await f.service.update(tokens.alice, f.personal.id, value.id, { body: 'Updated', expectedRevision: 1 });
   await f.service.create(tokens.alice, f.personal.id, { body: 'Unmodified record' });
-  f.raw.exec('PRAGMA recursive_triggers=OFF');
-  for (const table of ['spaces', 'memories', 'memory_versions', 'memory_audit_events']) {
-    assert.throws(() => f.raw.exec(`INSERT OR REPLACE INTO ${table} SELECT * FROM ${table} ${table === 'memories' ? 'WHERE revision=1' : ''}`), undefined, table + ' must reject replacement');
+  for (const [table, tamper] of [
+    ['memory_control.spaces', "name='tampered'"],
+    ['memory_content.memories', 'revision=revision+100'],
+    ['memory_content.memory_versions', "body='tampered'"],
+    ['memory_ops.memory_audit_events', "action='tampered'"],
+  ]) {
+    await assert.rejects(() => f.raw.exec(`INSERT INTO ${table} SELECT * FROM ${table}
+      ON CONFLICT DO UPDATE SET ${tamper}`), undefined, table + ' must reject replacement');
   }
   assert.equal((await f.service.get(tokens.alice, f.personal.id, value.id)).revision, 2);
 });
@@ -304,9 +313,9 @@ for (const [position, value] of [['leading', '\u0000hidden'], ['interior', 'befo
         query: () => f.service.search(tokens.alice, f.personal.id, { query: value }),
       }[field];
       await assert.rejects(operation, f.MemoryInvalid);
-      assert.equal(f.raw.prepare('SELECT COUNT(*) AS count FROM spaces').get().count, 2);
-      assert.equal(f.raw.prepare('SELECT COUNT(*) AS count FROM memories').get().count, 0);
-      assert.equal(f.raw.prepare('SELECT COUNT(*) AS count FROM memory_audit_events').get().count, 2);
+      assert.equal((await f.raw.prepare('SELECT COUNT(*) AS count FROM memory_control.spaces').get()).count, 2);
+      assert.equal((await f.raw.prepare('SELECT COUNT(*) AS count FROM memory_content.memories').get()).count, 0);
+      assert.equal((await f.raw.prepare('SELECT COUNT(*) AS count FROM memory_ops.memory_audit_events').get()).count, 2);
     });
   }
 }
@@ -320,22 +329,27 @@ test('updates reject NUL body/source without changing revision or history', asyn
     }
   }
   assert.equal((await f.service.get(tokens.alice, f.personal.id, value.id)).revision, 1);
-  assert.equal(f.raw.prepare('SELECT COUNT(*) AS count FROM memory_versions').get().count, 0);
+  assert.equal((await f.raw.prepare('SELECT COUNT(*) AS count FROM memory_content.memory_versions').get()).count, 0);
 });
 
 test('storage constraints reject leading/interior NUL in names, bodies, and sources', async t => {
   const f = await fixture(t);
   for (const value of ['\u0000hidden', 'before\u0000hidden']) {
-    assert.throws(() => f.raw.prepare(`INSERT INTO spaces
-      (id,name,account_id,security_mode,created_at,actor_credential_id) VALUES (?,?,'alice','managed',?,'s-alice')`)
+    await assert.rejects(() => f.raw.prepare(`INSERT INTO memory_control.spaces
+      (id,owner_account_id,organization_id,deployment_id,data_policy,name,security_mode,
+       created_at_ms,actor_credential_id,source_byte_limit,message_limit)
+      SELECT ?, 'alice', NULL, d.deployment_id,
+        jsonb_build_object('policyVersion',1,'residency',d.storage_region),
+        ?, 'managed', ?, 's-alice', 67108864, 100000
+      FROM memory_control.deployment_identity d`)
       .run(crypto.randomUUID(), value, NOW));
     for (const [body, source] of [[value, null], ['Valid body', value]]) {
-      assert.throws(() => f.raw.prepare(`INSERT INTO memories
+      await assert.rejects(() => f.raw.prepare(`INSERT INTO memory_content.memories
         (id,space_id,body,source,revision,created_at,updated_at,actor_credential_id) VALUES (?,?,?,?,1,?,?,'s-alice')`)
         .run(crypto.randomUUID(), f.personal.id, body, source, NOW, NOW));
     }
   }
-  assert.equal(f.raw.prepare('SELECT COUNT(*) AS count FROM spaces').get().count, 2);
-  assert.equal(f.raw.prepare('SELECT COUNT(*) AS count FROM memories').get().count, 0);
-  assert.equal(f.raw.prepare('SELECT COUNT(*) AS count FROM memory_audit_events').get().count, 2);
+  assert.equal((await f.raw.prepare('SELECT COUNT(*) AS count FROM memory_control.spaces').get()).count, 2);
+  assert.equal((await f.raw.prepare('SELECT COUNT(*) AS count FROM memory_content.memories').get()).count, 0);
+  assert.equal((await f.raw.prepare('SELECT COUNT(*) AS count FROM memory_ops.memory_audit_events').get()).count, 2);
 });

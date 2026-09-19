@@ -2,6 +2,8 @@ import type { Extension, ReleaseEnv, Value } from './types.ts';
 import { MemoryStore, type CreateInput } from './memory.ts';
 import { PayloadStore } from './payloads.ts';
 import { admitSignIn } from './enrollment.ts';
+import { enrollAccount } from '../postgres/enrollment.ts';
+import { syncLifecycleJournal } from '../postgres/lifecycle-apply.ts';
 import { applyVerifiedLifecycle } from './lifecycle.ts';
 import { PayloadMaintenance } from './payload-maintenance.ts';
 import { LegacyBackfill } from './payload-backfill.ts';
@@ -47,7 +49,7 @@ function key(request: Request, input: Record<string, unknown>): string { const h
 function content(input: Record<string, unknown>): CreateInput { const { operationId, ...rest } = input; return rest as CreateInput; }
 /** Called only after original app.ts has authenticated the bearer/session. */
 export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Extension {
-    const clock = options.clock ?? Date.now, db = env.DB, payloads = new PayloadStore(env, clock), store = new MemoryStore(db, clock, payloads), search = new Search(env, clock), ingest = new Ingest(env, clock), transfers = new Transfers(db, clock, payloads), admin = new Admin(env, clock), billing = new Billing(env, clock), jobs = new Jobs(env, clock);
+    const clock = options.clock ?? Date.now, db = env.DB, payloads = new PayloadStore(env, clock), store = new MemoryStore(db, clock, payloads, env.CONTROL_DB), search = new Search(env, clock), ingest = new Ingest(env, clock), transfers = new Transfers(db, clock, payloads, env.CONTROL_DB), admin = new Admin(env, clock), billing = new Billing(env, clock), jobs = new Jobs(env, clock);
     jobs.ingest = j => ingest.process(j);
     const settings = readSettings(env), origin = settings.origin;
     const routingApi = createRoutingApi(env, { clock });
@@ -81,7 +83,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
         workspaceSpaceAccess: (hash, at) => ({ read: authority('read'), readValues: params(hash, at, 'read'),
             write: authority('update'), writeValues: params(hash, at, 'update'),
             readExpires: accessExpiry('read'), writeExpires: accessExpiry('update'),
-            additionalCandidates: `SELECT sh.space_id FROM account_emails recipient JOIN release_shares sh ON sh.recipient_email_id=recipient.id
+            additionalCandidates: `SELECT sh.space_id FROM memory_identity.runtime_account_emails recipient JOIN memory_identity.shares sh ON sh.recipient_email_id=recipient.id
                 WHERE recipient.account_id=c.account_id AND recipient.revoked_at IS NULL AND sh.accepted_at IS NOT NULL AND sh.revoked_at IS NULL` }),
         publicRoute(request) {
             return guarded(async () => {
@@ -229,8 +231,8 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                             const actor = await interactive(db, token, clock), hash = await tokenHash(token);
                             await requireSpace(db, token, s, 'create', clock);
                             const at = clock();
-                            await db.prepare(`UPDATE release_ingests SET ciphertext=NULL,proposals=NULL,state='cancelled' WHERE id=? AND space_id=? AND account_id=? AND state IN ('queued','review') AND EXISTS(SELECT 1 FROM spaces s CROSS JOIN active_credentials c WHERE s.id=release_ingests.space_id AND ${authority('create')})`).bind(ingestId, s, actor.accountId, ...params(hash, at, 'create')).run();
-                            const current = await one<{ state: string }>(db, 'SELECT state FROM release_ingests WHERE id=? AND space_id=? AND account_id=?', [ingestId, s, actor.accountId]);
+                            await db.prepare(`UPDATE memory_content.release_ingests SET ciphertext=NULL,proposals=NULL,state='cancelled' WHERE id=? AND space_id=? AND account_id=? AND state IN ('queued','review') AND EXISTS(SELECT 1 FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c WHERE s.id=release_ingests.space_id AND ${authority('create')})`).bind(ingestId, s, actor.accountId, ...params(hash, at, 'create')).run();
+                            const current = await one<{ state: string }>(db, 'SELECT state FROM memory_content.release_ingests WHERE id=? AND space_id=? AND account_id=?', [ingestId, s, actor.accountId]);
                             await interactive(db, token, clock);
                             await requireSpace(db, token, s, 'create', clock);
                             if (!current) fail(404, 'ingest_not_found');
@@ -245,7 +247,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                     if (tail === 'jobs' && requireMethod(request, 'GET')) {
                         await interactive(db, token, clock);
                         await requireSpace(db, token, s, 'update', clock);
-                        const values = await rows(db, 'SELECT id,kind,state,attempt,last_error AS lastError,created_at AS createdAt FROM release_jobs WHERE space_id=? ORDER BY created_at DESC,id LIMIT 100', [s]);
+                        const values = await rows(db, 'SELECT id,kind,state,attempt,last_error AS "lastError",created_at AS "createdAt" FROM memory_jobs.release_jobs WHERE space_id=? ORDER BY created_at DESC,id LIMIT 100', [s]);
                         await requireSpace(db, token, s, 'update', clock);
                         return json({ results: values });
                     }
@@ -253,10 +255,10 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                     if (job && requireMethod(request, 'POST')) {
                         await interactive(db, token, clock, true);
                         const hash = await tokenHash(token), at = clock();
-                        const updated = await db.prepare(`UPDATE release_jobs SET state='pending',attempt=0,available_at=${sqlNow()},last_error=NULL WHERE id=? AND space_id=? AND state='dead'
-                            AND (kind<>'ingest' OR EXISTS(SELECT 1 FROM release_ingests i WHERE i.id=release_jobs.id
+                        const updated = await db.prepare(`UPDATE memory_jobs.release_jobs SET state='pending',attempt=0,available_at=${sqlNow()},last_error=NULL WHERE id=? AND space_id=? AND state='dead'
+                            AND (kind<>'ingest' OR EXISTS(SELECT 1 FROM memory_content.release_ingests i WHERE i.id=release_jobs.id
                                 AND i.state='queued' AND i.ciphertext IS NOT NULL AND i.expires_at>${sqlNow()}))
-                            AND EXISTS(SELECT 1 FROM spaces s CROSS JOIN active_credentials c WHERE s.id=release_jobs.space_id AND ${authority('update')} AND ${recentSql()})`).bind(at, pathIdentifier(job[1]!), s, at, ...params(hash, at, 'update'), at - 300000, at).run();
+                            AND EXISTS(SELECT 1 FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c WHERE s.id=release_jobs.space_id AND ${authority('update')} AND ${recentSql()})`).bind(at, pathIdentifier(job[1]!), s, at, ...params(hash, at, 'update'), at - 300000, at).run();
                         if (!updated.meta.changes)
                             fail(409, 'job_not_retryable');
                         return json({ queued: true }, 202);
@@ -336,7 +338,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                     if (method === 'DELETE' && scimKey[2]) {
                         await admin.orgAdmin(token, org);
                         const hash = await tokenHash(token), at = clock();
-                        const revoked = await db.prepare(`UPDATE release_scim_keys SET revoked_at=${sqlNow()} WHERE id=? AND organization_id=? AND revoked_at IS NULL AND EXISTS(SELECT 1 FROM active_credentials c JOIN active_memberships m ON m.account_id=c.account_id WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${recentSql()} AND m.organization_id=release_scim_keys.organization_id AND m.role IN ('owner','admin') AND m.expires_at>${sqlNow()})`).bind(at, pathIdentifier(scimKey[2]!), org, hash, at, at - 300000, at, at).run();
+                        const revoked = await db.prepare(`UPDATE memory_identity.scim_keys SET revoked_at=${sqlNow()} WHERE id=? AND organization_id=? AND revoked_at IS NULL AND EXISTS(SELECT 1 FROM memory_identity.active_credentials c JOIN memory_identity.active_memberships m ON m.account_id=c.account_id WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${recentSql()} AND m.organization_id=scim_keys.organization_id AND m.role IN ('owner','admin') AND m.expires_at>${sqlNow()})`).bind(at, pathIdentifier(scimKey[2]!), org, hash, at, at - 300000, at, at).run();
                         if (!revoked.meta.changes) await admin.orgAdmin(token, org);
                         return json(null, 204);
                     }
@@ -352,6 +354,16 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
             });
         },
         async signedIn(_principal, session, external) {
+            // Explicit per-region enrollment: a sign-in at a regional endpoint
+            // registers the canonical account skeleton + live enrollment on the
+            // control plane. Idempotent; absent CONTROL_DB means single-cluster.
+            if (env.CONTROL_DB) {
+                const deployment = await db.prepare(
+                    `SELECT storage_region AS "region" FROM memory_control.deployment_identity`).bind()
+                    .first<{ region: string }>();
+                if (deployment?.region === 'sg' || deployment?.region === 'kr-seoul')
+                    await enrollAccount(env.CONTROL_DB, session.accountId, deployment.region, clock());
+            }
             if (!external)
                 return;
             // app.ts invokes this hook only AFTER the original JWT verifier and the
@@ -362,9 +374,13 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
             if (!caps.length)
                 fail(403, 'scope_denied');
             const hash = await tokenHash(session.token), at = clock();
-            await db.prepare(`INSERT INTO release_credential_policies(credential_id,capabilities,space_ids,verified_oauth) SELECT c.id,?,NULL,1 FROM active_credentials c WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND c.kind='session' AND c.id LIKE 'oauth:%' ON CONFLICT(credential_id) DO UPDATE SET capabilities=excluded.capabilities,verified_oauth=1 WHERE release_credential_policies.verified_oauth=0`).bind(canonical(caps), hash, at).run();
+            await db.prepare(`INSERT INTO memory_identity.credential_policies(credential_id,capabilities,space_ids,verified_oauth) SELECT c.id,?::jsonb,NULL,true FROM memory_identity.active_credentials c WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND c.kind='session' AND c.id LIKE 'oauth:%' ON CONFLICT(credential_id) DO UPDATE SET capabilities=excluded.capabilities,verified_oauth=true WHERE credential_policies.verified_oauth=false`).bind(canonical(caps), hash, at).run();
         },
         async scheduled() {
+            // Revocation propagation: pull the central lifecycle journal into
+            // the regional applied state before serving maintenance. Without a
+            // control handle the deployment is single-cluster and skips sync.
+            if (env.CONTROL_DB) await syncLifecycleJournal(env.CONTROL_DB, db);
             await jobs.maintain();
             await new PayloadMaintenance(env, payloads, clock).run();
             await new LegacyBackfill(env, store, clock).run();
@@ -372,7 +388,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                 await jobs.drain(5);
                 if (env.PAID_BILLING_ENABLED !== 'false') { await billing.reconcile(); await billing.drain(3); }
             }
-            await db.prepare("INSERT INTO release_heartbeats(name,last_success_at) VALUES('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at").bind(clock()).run();
+            await db.prepare("INSERT INTO memory_ops.heartbeats(name,last_success_at) VALUES('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at").bind(clock()).run();
         }
     };
 }

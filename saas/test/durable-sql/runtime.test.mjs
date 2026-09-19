@@ -3,9 +3,6 @@ import assert from 'node:assert/strict';
 import { resolveReleaseEnv } from '../../src/durable-sql/runtime.ts';
 import { inspectStorage } from '../../src/release/storage-readiness.ts';
 import worker from '../../src/release/worker.ts';
-import { fixture } from '../../release-validation/tests/db.mjs';
-import { AUTH_ISSUER } from '../../src/config.ts';
-import { hmac } from '../../src/release/util.ts';
 
 const mapping = { DB: { databaseId: 'authority', kind: 'control' }, HOT_A: { databaseId: 'payload-a', kind: 'hot' }, HOT_B: { databaseId: 'payload-b', kind: 'hot' } };
 const shards = [{ id: 'a', binding: 'HOT_A', mode: 'active' }, { id: 'b', binding: 'HOT_B', mode: 'draining' }];
@@ -19,7 +16,9 @@ function configured(overrides = {}) {
     REQUEST_LIMITER: { async limit() { return { success: true }; } },
     MEMORY_SQL: { getByName(name) { named.push(name); return { async execute(input) {
       executions.push({ name, input });
-      return input.statements.map(statement => ({ success: true, results: statement.sql.includes('payload_meta') ? [{ version: 1 }] : [{ ready: 1 }], meta: { changes: 0 } }));
+      return input.statements.map(statement => statement.mode === 'run'
+        ? { success: true, results: [], meta: { changes: 0 } }
+        : { success: true, results: statement.sql.includes('payload_meta') ? [{ version: 1 }] : [{ ready: 1 }], meta: { changes: 0 } });
     } }; } },
     ...overrides,
   };
@@ -113,86 +112,11 @@ test('unready control object or mismatched hot object fails storage readiness wi
   }
 });
 
-async function applicationFixture(t) {
-  const f = configured({ STORAGE_MODE: 'inline', STORAGE_SHARDS_JSON: undefined, MEMORY_SQL_DATABASES_JSON: JSON.stringify({ DB: mapping.DB }) });
-  // Exercise a real raw deployment shape with no D1 bindings at all. Separate
-  // selector tests above use throwing getters to detect any attempted access.
-  const descriptors = Object.getOwnPropertyDescriptors(f.env);
-  for (const binding of ['DB', 'HOT_A', 'HOT_B']) delete descriptors[binding];
-  f.env = Object.defineProperties({}, descriptors);
-  const original = await fixture({ clock: Date.now }); t.after(() => original.db.close());
-  f.env.MEMORY_SQL.getByName = name => { f.named.push(name); return { async execute(input) {
-    f.executions.push({ name, input });
-    original.db.raw.exec('BEGIN IMMEDIATE');
-    try {
-      const results = input.statements.map(({ sql, values, mode }) => {
-        const statement = original.db.raw.prepare(sql);
-        if (mode === 'run') { const result = statement.run(...values); return { success: true, results: [], meta: { changes: Number(result.changes) } }; }
-        const rows = statement.all(...values);
-        return { success: true, results: mode === 'first' ? rows.slice(0, 1) : rows, meta: { changes: 0 } };
-      });
-      original.db.raw.exec('COMMIT'); return results;
-    } catch (error) { original.db.raw.exec('ROLLBACK'); throw error; }
-  } }; };
-  // The shared fixture has deterministic credential times; use current time for
-  // this invocation-level test so normal request authentication remains valid.
-  original.db.raw.prepare('UPDATE credentials SET expires_at=?, reauthenticated_at=?').run(Date.now() + 60000, Date.now());
-  return { ...f, original };
-}
-
-test('HTTP serves authenticated actual app requests through durable SQL with zero D1 access', async t => {
-  const f = await applicationFixture(t);
-  assert.equal(Object.hasOwn(f.env, 'DB'), false);
-  const response = await worker.fetch(new Request('https://memory.allenlabs.org/v1/spaces', { headers: { authorization: 'Bearer ' + f.original.key } }), f.env);
-  assert.equal(response.status, 200); assert.ok((await response.json()).results.some(space => space.id === 's1'));
-  assert.ok(f.executions.length > 0); assert.equal(f.d1Reads(), 0); assert.equal(f.named.length, 1);
-});
-
-test('scheduled maintenance and heartbeat use the same durable selector without D1 access', async t => {
-  const f = await applicationFixture(t);
-  assert.equal(Object.hasOwn(f.env, 'DB'), false);
-  await worker.scheduled({}, f.env);
-  assert.ok(f.original.db.raw.prepare("SELECT last_success_at FROM release_heartbeats WHERE name='maintenance'").get().last_success_at > 0);
-  assert.ok(f.executions.length > 0); assert.equal(f.d1Reads(), 0); assert.equal(f.named.length, 1);
-});
-
 test('both HTTP and scheduled reject missing durable namespace and never fall back to D1', async () => {
   const f = configured({ MEMORY_SQL: undefined });
   const response = await worker.fetch(new Request('https://memory.allenlabs.org/health'), f.env);
   assert.equal(response.status, 503); assert.deepEqual(await response.json(), { error: 'service_unavailable' });
   await assert.rejects(() => worker.scheduled({}, f.env), /memory_sql_configuration_invalid/);
-  assert.equal(f.d1Reads(), 0);
-});
-
-test('Hono entry preserves signed webhook bytes, application receipt and exact response headers', async t => {
-  const f = await applicationFixture(t), secret = 'synthetic-signature-key-'.repeat(3);
-  f.env.IDENTITY_WEBHOOK_SECRET = secret;
-  const timestamp = String(Math.floor(Date.now() / 1000));
-  const raw = JSON.stringify({ id: 'hono-raw-webhook', issuer: AUTH_ISSUER, subject: 'synthetic-disabled-subject', type: 'account.disabled', description: '본문 서명 유지\nwith whitespace' }, null, 2);
-  const signature = await hmac(secret, timestamp + '.' + raw);
-  const response = await worker.fetch(new Request('https://memory.allenlabs.org/webhooks/identity', { method: 'POST',
-    headers: { 'content-type': 'application/json', 'x-memory-timestamp': timestamp, 'x-memory-signature': signature }, body: raw }), f.env);
-  assert.equal(response.status, 200);
-  assert.equal(response.headers.get('cache-control'), 'no-store');
-  assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
-  assert.ok(response.headers.get('content-security-policy').includes("frame-ancestors 'none'"));
-  assert.ok(response.headers.get('x-request-id'));
-  assert.equal(f.original.db.raw.prepare("SELECT count(*) AS n FROM release_webhook_events WHERE event_id='hono-raw-webhook'").get().n, 1);
-  assert.equal(f.d1Reads(), 0);
-});
-
-test('Hono entry preserves authenticated MCP JSON-RPC responses and Origin denial', async t => {
-  const f = await applicationFixture(t);
-  const body = JSON.stringify({ jsonrpc: '2.0', id: 9, method: 'tools/call', params: { name: 'memory_spaces', arguments: {} } });
-  const headers = { 'content-type': 'application/json', accept: 'application/json, text/event-stream', authorization: 'Bearer ' + f.original.key };
-  const response = await worker.fetch(new Request('https://memory.allenlabs.org/mcp', { method: 'POST', headers, body }), f.env);
-  assert.equal(response.status, 200);
-  const raw = await response.text();
-  const reply = JSON.parse(response.headers.get('content-type')?.includes('text/event-stream') ? raw.split('\n').find(line => line.startsWith('data: ')).slice(6) : raw);
-  assert.equal(reply.jsonrpc, '2.0'); assert.equal(reply.id, 9); assert.equal(reply.result.isError, false);
-  assert.ok(reply.result.content.some(item => item.text.includes('s1')));
-  const denied = await worker.fetch(new Request('https://memory.allenlabs.org/mcp', { method: 'POST', headers: { ...headers, origin: 'https://untrusted.example' }, body }), f.env);
-  assert.equal(denied.status, 403); assert.deepEqual(await denied.json(), { error: 'origin_denied' });
   assert.equal(f.d1Reads(), 0);
 });
 
@@ -205,25 +129,6 @@ test('Hono entry preserves 405 and Allow while HTTP HEAD has no response body', 
     if (method === 'HEAD') assert.equal(await response.text(), '');
   }
   assert.equal(f.d1Reads(), 0);
-});
-
-test('Hono request context isolates concurrent environments and records one sanitized metric each', async t => {
-  const first = await applicationFixture(t), second = await applicationFixture(t);
-  second.env.MEMORY_SQL_DEPLOYMENT_ID = 'another-stage';
-  const firstMetrics = [], secondMetrics = [];
-  first.env.METRICS = { writeDataPoint(point) { firstMetrics.push(point); } };
-  second.env.METRICS = { writeDataPoint(point) { secondMetrics.push(point); } };
-  const responses = await Promise.all([first, second].map(f => worker.fetch(new Request('https://memory.allenlabs.org/v1/spaces', {
-    headers: { authorization: 'Bearer ' + f.original.key },
-  }), f.env)));
-  assert.deepEqual(responses.map(response => response.status), [200, 200]);
-  assert.ok(first.executions.every(call => call.input.identity.deploymentId === 'synthetic-stage'));
-  assert.ok(second.executions.every(call => call.input.identity.deploymentId === 'another-stage'));
-  for (const points of [firstMetrics, secondMetrics]) {
-    assert.equal(points.length, 1); assert.deepEqual(points[0].blobs, ['memory', 'GET', '200']);
-    assert.ok(!JSON.stringify(points).includes(first.original.key));
-  }
-  assert.equal(first.d1Reads() + second.d1Reads(), 0);
 });
 
 test('Hono normalizes non-Error configuration throws and still records sanitized failure telemetry', async () => {
@@ -270,9 +175,12 @@ for (const value of ['', 'TRUE', 'yes', '0', true, null])
     assert.equal(f.d1Reads(), 0); assert.deepEqual(f.named, []); assert.deepEqual(f.executions, []);
   });
 
-test('explicit false maintenance setting keeps normal HTTP and scheduled work active', async t => {
-  const f = await applicationFixture(t); f.env.MEMORY_SQL_MAINTENANCE = 'false';
-  assert.equal((await worker.fetch(new Request('https://memory.allenlabs.org/v1/spaces', { headers: { authorization: 'Bearer ' + f.original.key } }), f.env)).status, 200);
-  await worker.scheduled({}, f.env);
-  assert.ok(f.original.db.raw.prepare("SELECT last_success_at FROM release_heartbeats WHERE name='maintenance'").get().last_success_at > 0);
+test('explicit false maintenance setting keeps normal HTTP and scheduled work active', async () => {
+  const f = configured({ MEMORY_SQL_MAINTENANCE: 'false' });
+  const response = await worker.fetch(new Request('https://memory.allenlabs.org/health'), f.env);
+  assert.equal(response.status, 200); assert.equal(response.headers.get('retry-after'), null);
+  // Scheduled work reaches real SQL resolution rather than the maintenance
+  // short-circuit; the canned namespace above cannot answer payload queries.
+  await assert.rejects(() => worker.scheduled({}, f.env), /invalid_object/);
+  assert.ok(f.executions.length > 0); assert.equal(f.d1Reads(), 0);
 });

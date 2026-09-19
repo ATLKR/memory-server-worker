@@ -45,7 +45,7 @@ export async function preparePayloads(db: Database, clock: () => number, storage
     const actor = await requireSpace(db, token, spaceId, input.cap, clock);
     const result: PreparedPayloads = { intentId: null, accountId: actor.accountId, spaceId, key: input.key, requestHash, items: [] };
     const lookup = () => one<{ id: string; memoryId: string | null; revision: number | null; requestHash: string }>(db,
-        'SELECT id,memory_id AS memoryId,committed_revision AS revision,request_hash AS requestHash FROM release_operations WHERE account_id=? AND space_id=? AND client_key=?', [actor.accountId, spaceId, input.key]);
+        'SELECT id,memory_id AS "memoryId",committed_revision AS revision,request_hash AS "requestHash" FROM memory_ops.release_operations WHERE account_id=? AND space_id=? AND client_key=?', [actor.accountId, spaceId, input.key]);
     const committed = await lookup();
     if (committed) {
         if (committed.requestHash !== requestHash) fail(409, 'idempotency_conflict');
@@ -53,7 +53,7 @@ export async function preparePayloads(db: Database, clock: () => number, storage
         return result;
     }
     try {
-        const find = () => one<Intent>(db, 'SELECT id,request_hash AS requestHash,expires_at AS expiresAt,item_count AS itemCount FROM release_payload_intents WHERE account_id=? AND space_id=? AND client_key=?', [actor.accountId, spaceId, input.key]);
+        const find = () => one<Intent>(db, 'SELECT id,request_hash AS "requestHash",expires_at AS "expiresAt",item_count AS "itemCount" FROM memory_content.payload_intents WHERE account_id=? AND space_id=? AND client_key=?', [actor.accountId, spaceId, input.key]);
         let intent = await find();
         if (!intent) {
             const intentId = crypto.randomUUID(), planned = [];
@@ -66,18 +66,21 @@ export async function preparePayloads(db: Database, clock: () => number, storage
             const admission = `${authority(input.cap)} ${input.additionalCap ? 'AND ' + authority(input.additionalCap) : ''} ${input.recent ? 'AND ' + recentSql() : ''}`;
             const values = [...params(hash, at, input.cap), ...(input.additionalCap ? params(hash, at, input.additionalCap) : []), ...(input.recent ? [at - 300000, at] : [])];
             try { await batch(db, [
-                stmt(db, `INSERT INTO release_payload_intents(id,account_id,space_id,client_key,request_hash,action,memory_id,expected_revision,item_count,reserved_bytes,created_at,expires_at)
-                  SELECT ?,c.account_id,s.id,?,?,?,?,?,?,?,${sqlNow()},${sqlNow()}+86400000 FROM spaces s CROSS JOIN active_credentials c
-                  WHERE s.id=? AND ${admission} AND NOT EXISTS(SELECT 1 FROM release_payload_intents old WHERE old.account_id=c.account_id AND old.space_id=s.id AND old.client_key=?)`,
+                stmt(db, `INSERT INTO memory_content.payload_intents(id,account_id,space_id,client_key,request_hash,action,memory_id,expected_revision,item_count,reserved_bytes,created_at,expires_at)
+                  SELECT ?,c.account_id,s.id,?,?,?,?,?,?,?,${sqlNow()},${sqlNow()}+86400000 FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c
+                  WHERE s.id=? AND ${admission} AND NOT EXISTS(SELECT 1 FROM memory_content.payload_intents old WHERE old.account_id=c.account_id AND old.space_id=s.id AND old.client_key=?)`,
                     [intentId, input.key, requestHash, input.action, input.memoryId, input.expectedRevision, contents.length, planned.reduce((n, item) => n + item.ref.bytes, 0), at, at, spaceId, ...values, input.key]),
-                stmt(db, `INSERT INTO release_payload_stages(id,intent_id,ordinal,memory_id,payload_shard_id,payload_object_key,payload_sha256,payload_bytes,logical_bytes,created_at)
-                  SELECT json_extract(item.value,'$.ref.id'),i.id,json_extract(item.value,'$.ordinal'),json_extract(item.value,'$.memoryId'),
-                    json_extract(item.value,'$.ref.shardId'),json_extract(item.value,'$.ref.objectKey'),json_extract(item.value,'$.ref.sha256'),
-                    json_extract(item.value,'$.ref.bytes'),json_extract(item.value,'$.logicalBytes'),i.created_at
-                  FROM release_payload_intents i,json_each(?) item WHERE i.id=? AND i.expires_at>${sqlNow()}`,
+                stmt(db, `INSERT INTO memory_content.payload_stages(id,intent_id,ordinal,memory_id,payload_shard_id,payload_object_key,payload_sha256,payload_bytes,logical_bytes,created_at)
+                  SELECT item.value->'ref'->>'id',i.id,(item.value->>'ordinal')::int,item.value->>'memoryId',
+                    item.value->'ref'->>'shardId',item.value->'ref'->>'objectKey',item.value->'ref'->>'sha256',
+                    (item.value->'ref'->>'bytes')::bigint,(item.value->>'logicalBytes')::bigint,i.created_at
+                  FROM memory_content.payload_intents i,jsonb_array_elements(?::jsonb) item WHERE i.id=? AND i.expires_at>${sqlNow()}`,
                     [canonical(planned), intentId, at])
             ]); } catch (error) {
-                if (error instanceof Error && error.message.includes('release_payload_budget')) fail(429, 'payload_staging_limit');
+                let budgetText = '';
+                for (let cursor: unknown = error; cursor instanceof Error && budgetText.length < 8192; cursor = (cursor as { cause?: unknown }).cause)
+                    budgetText += ' ' + cursor.message;
+                if (error instanceof Error && budgetText.includes('release_payload_budget')) fail(429, 'payload_staging_limit');
                 throw error;
             }
             intent = await find();
@@ -86,8 +89,8 @@ export async function preparePayloads(db: Database, clock: () => number, storage
         if (intent.requestHash !== requestHash || intent.itemCount !== contents.length) fail(409, 'idempotency_conflict');
         if (intent.expiresAt <= clock()) fail(409, 'payload_preparation_expired');
         result.intentId = intent.id;
-        const stages = await rows<Stage>(db, `SELECT id,memory_id AS memoryId,ordinal,payload_shard_id AS shardId,payload_object_key AS objectKey,
-            payload_sha256 AS sha256,payload_bytes AS bytes,logical_bytes AS logicalBytes,state FROM release_payload_stages WHERE intent_id=? ORDER BY ordinal`, [intent.id]);
+        const stages = await rows<Stage>(db, `SELECT id,memory_id AS "memoryId",ordinal,payload_shard_id AS "shardId",payload_object_key AS "objectKey",
+            payload_sha256 AS sha256,payload_bytes AS bytes,logical_bytes AS "logicalBytes",state FROM memory_content.payload_stages WHERE intent_id=? ORDER BY ordinal`, [intent.id]);
         if (stages.length !== contents.length) fail(503, 'payload_preparation_incomplete');
         for (const stage of stages) {
             if (!['staging', 'ready', 'published'].includes(stage.state)) fail(409, 'payload_preparation_expired');
@@ -98,13 +101,13 @@ export async function preparePayloads(db: Database, clock: () => number, storage
                 await requireSpace(db, token, spaceId, input.cap, clock);
                 await storage.stage({ spaceId, memoryId: stage.memoryId }, ref, value);
                 const at = clock();
-                const changed = await db.prepare(`UPDATE release_payload_stages SET state='ready' WHERE id=? AND state='staging'
-                  AND EXISTS(SELECT 1 FROM release_payload_intents i JOIN spaces s ON s.id=i.space_id CROSS JOIN active_credentials c
-                    WHERE i.id=release_payload_stages.intent_id AND i.account_id=c.account_id AND i.expires_at>${sqlNow()} AND ${authority(input.cap)}
+                const changed = await db.prepare(`UPDATE memory_content.payload_stages SET state='ready' WHERE id=? AND state='staging'
+                  AND EXISTS(SELECT 1 FROM memory_content.payload_intents i JOIN memory_control.spaces s ON s.id=i.space_id CROSS JOIN memory_identity.active_credentials c
+                    WHERE i.id=payload_stages.intent_id AND i.account_id=c.account_id AND i.expires_at>${sqlNow()} AND ${authority(input.cap)}
                       ${input.additionalCap ? 'AND ' + authority(input.additionalCap) : ''} ${input.recent ? 'AND ' + recentSql() : ''})`)
                     .bind(stage.id, at, ...params(hash, at, input.cap), ...(input.additionalCap ? params(hash, at, input.additionalCap) : []), ...(input.recent ? [at - 300000, at] : [])).run();
                 if (!changed.success || !changed.meta.changes) {
-                    const current = await one<{ state: string }>(db, 'SELECT state FROM release_payload_stages WHERE id=?', [stage.id]);
+                    const current = await one<{ state: string }>(db, 'SELECT state FROM memory_content.payload_stages WHERE id=?', [stage.id]);
                     if (!current || !['ready', 'published'].includes(current.state)) fail(403, 'access_denied');
                 }
             }
@@ -127,13 +130,13 @@ export function publishPayloadStatements(db: Database, prepared: PreparedPayload
     admission: { hash: string; at: number; cap: Capability; recent: boolean; additionalCap?: Capability }): Statement[] {
     if (!prepared.intentId) return [];
     return [
-        stmt(db, `UPDATE release_payload_stages SET state='published' WHERE intent_id=? AND state='ready'
-          AND EXISTS(SELECT 1 FROM release_operations o JOIN spaces s ON s.id=o.space_id CROSS JOIN active_credentials c
+        stmt(db, `UPDATE memory_content.payload_stages SET state='published' WHERE intent_id=? AND state='ready'
+          AND EXISTS(SELECT 1 FROM memory_ops.release_operations o JOIN memory_control.spaces s ON s.id=o.space_id CROSS JOIN memory_identity.active_credentials c
             WHERE o.id=? AND c.id=o.actor_credential_id AND ${authority(admission.cap)}
               ${admission.additionalCap ? 'AND ' + authority(admission.additionalCap) : ''} ${admission.recent ? 'AND ' + recentSql() : ''})`,
             [prepared.intentId, operationId, ...params(admission.hash, admission.at, admission.cap),
                 ...(admission.additionalCap ? params(admission.hash, admission.at, admission.additionalCap) : []), ...(admission.recent ? [admission.at - 300000, admission.at] : [])]),
-        stmt(db, `UPDATE release_payload_intents SET published_at=(SELECT created_at FROM release_operations WHERE id=?)
-          WHERE id=? AND published_at IS NULL AND EXISTS(SELECT 1 FROM release_operations WHERE id=?)`, [operationId, prepared.intentId, operationId])
+        stmt(db, `UPDATE memory_content.payload_intents SET published_at=(SELECT created_at FROM memory_ops.release_operations WHERE id=?)
+          WHERE id=? AND published_at IS NULL AND EXISTS(SELECT 1 FROM memory_ops.release_operations WHERE id=?)`, [operationId, prepared.intentId, operationId])
     ];
 }

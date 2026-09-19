@@ -13,7 +13,7 @@ export async function admitSignIn(env: ReleaseEnv, principal: unknown): Promise<
     if (!principal || typeof principal !== 'object' || Array.isArray(principal)) fail(403, 'invitation_required');
     const p = principal as Record<string, unknown>;
     if (typeof p.issuer !== 'string' || typeof p.subject !== 'string') fail(403, 'invitation_required');
-    const existing = await one<{ disabledAt: number | null }>(env.DB, `SELECT a.disabled_at AS disabledAt FROM provider_identities p JOIN accounts a ON a.id=p.account_id
+    const existing = await one<{ disabledAt: number | null }>(env.DB, `SELECT a.disabled_at AS "disabledAt" FROM provider_identities p JOIN accounts a ON a.id=p.account_id
         WHERE p.issuer=? AND p.subject=?`, [p.issuer, p.subject]);
     if (existing) {
         if (existing.disabledAt !== null) fail(403, 'invitation_required');

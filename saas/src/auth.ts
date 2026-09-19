@@ -189,9 +189,9 @@ export function createAuthController(
     const challenge = base64url(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(verifier))));
     const stateDigest = await digestToken(state);
     const browserDigest = await digestToken(binding);
-    await db.prepare('DELETE FROM auth_flows WHERE expires_at<=?').bind(now()).run();
+    await db.prepare('DELETE FROM memory_identity.auth_flows WHERE expires_at<=?').bind(now()).run();
     const at = now();
-    const inserted = await db.prepare(`INSERT INTO auth_flows
+    const inserted = await db.prepare(`INSERT INTO memory_identity.auth_flows
       (state_digest,browser_digest,verifier,issuer,client_id,redirect_uri,created_at,expires_at)
       VALUES (?,?,?,?,?,?,?,?)`).bind(stateDigest, browserDigest, verifier, settings.issuer,
       settings.clientId, callbackUri, at, at + FLOW_TTL).run();
@@ -216,13 +216,13 @@ export function createAuthController(
     const browserDigest = await digestToken(binding);
     const at = now();
     progress.phase = 'flow_claim';
-    const flow = await db.prepare(`UPDATE auth_flows SET consumed_at=?
+    const flow = await db.prepare(`UPDATE memory_identity.auth_flows SET consumed_at=?
       WHERE state_digest=? AND browser_digest=? AND consumed_at IS NULL AND expires_at>${sqlNow()}
         AND created_at<=? AND issuer=? AND client_id=? AND redirect_uri=?
-      RETURNING verifier,expires_at AS expiresAt`).bind(at, stateDigest, browserDigest, at, at,
+      RETURNING verifier,expires_at AS "expiresAt"`).bind(at, stateDigest, browserDigest, at, at,
       settings.issuer, settings.clientId, callbackUri).first<{ verifier: string | null; expiresAt: number }>();
     if (!flow?.verifier) throw new IdentityDenied();
-    const erased = await db.prepare('UPDATE auth_flows SET verifier=NULL WHERE state_digest=? AND consumed_at=?')
+    const erased = await db.prepare('UPDATE memory_identity.auth_flows SET verifier=NULL WHERE state_digest=? AND consumed_at=?')
       .bind(stateDigest, at).run();
     if (!erased.success || erased.meta.changes !== 1 || flow.expiresAt <= now()) throw new IdentityDenied();
     progress.phase = 'token_exchange';
@@ -251,9 +251,10 @@ export function createAuthController(
     const token = readCookie(request, SESSION_COOKIE);
     if (token) {
       const hash = await digestToken(token);
-      const revoked = await db.prepare(`UPDATE credentials SET revoked_at=?
-        WHERE token_digest=? AND kind='session' AND membership_id IS NULL AND revoked_at IS NULL`)
-        .bind(now(), hash).run();
+      // Session self-revocation goes through the owner-side command; the
+      // digest itself is the authority.
+      const revoked = await db.prepare('SELECT memory_identity.revoke_session(?,?)')
+        .bind(hash, now()).run();
       if (!revoked.success) throw new IdentityDenied();
     }
     const headers = new Headers({ Location: '/' });

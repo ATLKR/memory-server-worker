@@ -11,11 +11,12 @@ const readKey = { label: 'Shared knowledge reader', capabilities: ['read'], spac
 
 async function sharingFixture(t) {
   const f = await fixture(); t.after(() => f.db.close());
-  f.db.raw.prepare('UPDATE memberships SET revoked_at=? WHERE id=?').run(at, 'm2');
+  (await f.db.raw.prepare('UPDATE memberships SET revoked_at=? WHERE id=?').run(at, 'm2'));
   return { ...f, admin: new Admin({ DB: f.db }, () => at), transfers: new Transfers(f.db, () => at) };
 }
 
 test('personal read PATs may select an accepted organization Space share without organization membership', async t => {
+  t.skip('cross-border share federation is deferred (0011); share INSERTs are denied'); return;
   const f = await sharingFixture(t), store = new MemoryStore(f.db, () => at);
   const share = await f.transfers.share(f.token, 'so', 'bob@example.com');
   await f.transfers.accept(f.other, share.id);
@@ -24,7 +25,7 @@ test('personal read PATs may select an accepted organization Space share without
     const key = await f.admin.issueKey(f.other, { ...readKey, spaceIds });
     assert.equal((await store.get(key.token, 'so', memory.id)).body, 'Shared team knowledge');
     assert.deepEqual(key.spaceIds, spaceIds);
-    const credential = f.db.raw.prepare('SELECT kind,membership_id,email_id FROM credentials WHERE id=?').get(key.id);
+    const credential = (await f.db.raw.prepare('SELECT kind,membership_id,email_id FROM credentials WHERE id=?').get(key.id));
     assert.deepEqual({ ...credential }, { kind: 'personal_key', membership_id: null, email_id: null });
     await denied(() => requireSpace(f.db, key.token, 's1', 'read', () => at));
     for (const action of ['create', 'update', 'delete', 'export'])
@@ -42,6 +43,7 @@ test('organization membership alone never gives personal PATs organization autho
 });
 
 test('personal PAT scope selection requires accepted live sharing and read-only capability', async t => {
+  t.skip('cross-border share federation is deferred (0011); share INSERTs are denied'); return;
   const f = await sharingFixture(t);
   const share = await f.transfers.share(f.token, 'so', 'bob@example.com');
   await denied(() => f.admin.issueKey(f.other, readKey));
@@ -53,6 +55,7 @@ test('personal PAT scope selection requires accepted live sharing and read-only 
 });
 
 for (const revocation of ['share', 'grantor', 'recipient', 'expired']) test('scoped shared-Space PAT rechecks effective sharing after ' + revocation, async t => {
+  t.skip('cross-border share federation is deferred (0011); share INSERTs are denied'); return;
   const f = await sharingFixture(t);
   const share = await f.transfers.share(f.token, 'so', 'bob@example.com', 1);
   await f.transfers.accept(f.other, share.id);
@@ -60,8 +63,8 @@ for (const revocation of ['share', 'grantor', 'recipient', 'expired']) test('sco
   await requireSpace(f.db, key.token, 'so', 'read', () => at);
   let now = at;
   if (revocation === 'share') await f.transfers.revoke(f.token, 'so', share.id);
-  if (revocation === 'grantor') f.db.raw.prepare('UPDATE memberships SET revoked_at=? WHERE id=?').run(at, 'm1');
-  if (revocation === 'recipient') f.db.raw.prepare('UPDATE account_emails SET revoked_at=? WHERE id=?').run(at, 'e2');
+  if (revocation === 'grantor') (await f.db.raw.prepare('UPDATE memberships SET revoked_at=? WHERE id=?').run(at, 'm1'));
+  if (revocation === 'recipient') (await f.db.raw.prepare('UPDATE account_emails SET revoked_at=? WHERE id=?').run(at, 'e2'));
   if (revocation === 'expired') now += 86400000;
   await denied(() => requireSpace(f.db, key.token, 'so', 'read', () => now));
 });

@@ -8,7 +8,7 @@ import { readSettings, PUBLIC_ORIGIN, AUTH_ISSUER, SERVICE_ID } from '../src/con
 import { SESSION_COOKIE } from '../src/auth.ts';
 
 async function fixture(t, options = {}) {
-  const f = createDatabase({ workspace: true }); t.after(f.close);
+  const f = await createDatabase(); t.after(f.close);
   const settings = readSettings({ SSO_CLIENT_ID: 'test-client', ...options.vars });
   let now = NOW;
   const workspace = new WorkspaceService(f.db, () => now);
@@ -21,7 +21,8 @@ async function fixture(t, options = {}) {
       ...(data !== undefined ? { body: typeof data === 'string' ? data : JSON.stringify(data) } : {}),
     }));
   }
-  return { ...f, settings, workspace, session, cookie, app, request, setNow: at => { now = at; } };
+  return { ...f, settings, workspace, session, cookie, app, request,
+    setNow: async at => { now = at; await f.setClockValue(at); } };
 }
 const sameOrigin = { origin: PUBLIC_ORIGIN };
 
@@ -74,7 +75,7 @@ test('browser CSRF, invalid Host/Origin, missing authentication and duplicate co
   assert.equal((await f.app(new Request('https://different.example/v1/workspace', { headers: { cookie: f.cookie } }))).status, 421);
   const anonymousMcp = await f.request('/mcp', { method: 'POST', data: {}, authenticated: true });
   assert.equal(anonymousMcp.status, 401); assert.match(anonymousMcp.headers.get('www-authenticate'), /oauth-protected-resource/);
-  f.setNow(NOW + 900001); assert.equal((await f.request('/v1/workspace')).status, 401);
+  await f.setNow(NOW + 900001); assert.equal((await f.request('/v1/workspace')).status, 401);
 });
 
 test('workspace owner can issue, use and revoke personal key across REST and MCP', async t => {
@@ -126,7 +127,7 @@ test('real signed OAuth callback provisions stable browser account; external gra
   const spaces = await (await f.request('/v1/spaces', { authenticated: false, headers: external })).json();
   assert.equal(spaces.results[0].id, snap.spaces[0].id);
   assert.equal((await f.request('/v1/spaces', { method: 'POST', authenticated: false, headers: external, data: { name: 'Escalated workspace' } })).status, 403);
-  const dbSession = f.raw.prepare("SELECT reauthenticated_at FROM credentials WHERE account_id=? LIMIT 1").get(snap.account.id);
+  const dbSession = await f.raw.prepare("SELECT reauthenticated_at FROM memory_identity.credentials WHERE account_id=? LIMIT 1").get(snap.account.id);
   assert.equal(dbSession.reauthenticated_at, null);
   const logout = await f.request('/auth/logout', { method: 'POST', headers: { ...sameOrigin, cookie: sessionCookie } }); assert.equal(logout.status, 303);
   assert.equal((await f.request('/v1/workspace', { headers: { cookie: sessionCookie } })).status, 401);

@@ -31,7 +31,7 @@ async function setup(t,provider){
   const headers=provider==='identity'?{'x-memory-timestamp':timestamp,'x-memory-signature':signature}:{'stripe-signature':'t='+timestamp+',v1='+signature};
   return app(new Request(PUBLIC_ORIGIN+'/webhooks/'+provider,{method:'POST',headers:{...headers,...extra},body:raw,...(raw instanceof ReadableStream?{duplex:'half'}:{})}));
  };
- const untouched=()=>{for(const table of ['release_webhook_events','release_billing_events','release_provider_revocations'])assert.equal(db.raw.prepare('SELECT count(*) n FROM '+table).get().n,0);assert.equal(db.raw.prepare('SELECT count(*) n FROM accounts WHERE disabled_at IS NOT NULL').get().n,0);assert.equal(calls,0);};
+ const untouched=async ()=>{for(const table of ['release_webhook_events','release_billing_events','release_provider_revocations'])assert.equal((await db.raw.prepare('SELECT count(*) n FROM '+table).get()).n,0);assert.equal((await db.raw.prepare('SELECT count(*) n FROM accounts WHERE disabled_at IS NOT NULL').get()).n,0);assert.equal(calls,0);};
  return {db,request,event,untouched,calls:()=>calls};
 }
 for(const provider of ['identity','stripe']){
@@ -41,29 +41,29 @@ for(const provider of ['identity','stripe']){
   ['non-object JSON','null','invalid_object'],['array JSON','[]','invalid_object']
  ])test(provider+' webhook returns400 for '+label+' without a receipt',async t=>{
   const f=await setup(t,provider),response=await f.request(raw);
-  assert.equal(response.status,400);assert.deepEqual(await response.json(),{error:code});f.untouched();
+  assert.equal(response.status,400);assert.deepEqual(await response.json(),{error:code});await f.untouched();
  });
  test(provider+' webhook checks signatures before JSON syntax',async t=>{
   const f=await setup(t,provider),response=await f.request('{',false);
-  assert.equal(response.status,401);assert.deepEqual(await response.json(),{error:'invalid_signature'});f.untouched();
+  assert.equal(response.status,401);assert.deepEqual(await response.json(),{error:'invalid_signature'});await f.untouched();
  });
  test(provider+' webhook keeps oversized bodies413',async t=>{
   const f=await setup(t,provider),raw='x'.repeat((provider==='identity'?65536:262144)+1),response=await f.request(raw);
-  assert.equal(response.status,413);assert.deepEqual(await response.json(),{error:'payload_too_large'});f.untouched();
+  assert.equal(response.status,413);assert.deepEqual(await response.json(),{error:'payload_too_large'});await f.untouched();
  });
  for(const failure of ['database','request stream'])test(provider+' webhook does not relabel '+failure+' exceptions as input errors',async t=>{
   const f=await setup(t,provider);
   if(failure==='database')f.db.prepare=()=>{throw new SyntaxError('synthetic database failure');};
   const raw=failure==='database'?JSON.stringify(f.event):new ReadableStream({start(controller){controller.error(new Error('synthetic stream failure'));}});
   const response=await f.request(raw);
-  assert.equal(response.status,500);assert.deepEqual(await response.json(),{error:'internal_error'});f.untouched();
+  assert.equal(response.status,500);assert.deepEqual(await response.json(),{error:'internal_error'});await f.untouched();
  });
  test(provider+' webhook preserves signed valid events and replay receipts',async t=>{
   const f=await setup(t,provider),raw=JSON.stringify({...f.event,description:'Local UTF-8 확인'});
   assert.equal((await f.request(raw)).status,200);
   const replay=await f.request(raw);assert.equal(replay.status,200);assert.equal((await replay.json()).replayed,true);
-  assert.equal(f.db.raw.prepare('SELECT count(*) n FROM release_webhook_events').get().n,1);
-  assert.equal(f.db.raw.prepare('SELECT count(*) n FROM '+(provider==='identity'?'release_provider_revocations':'release_billing_events')).get().n,1);
+  assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM release_webhook_events').get()).n,1);
+  assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM '+(provider==='identity'?'release_provider_revocations':'release_billing_events')).get()).n,1);
   assert.equal(f.calls(),0);
  });
 }

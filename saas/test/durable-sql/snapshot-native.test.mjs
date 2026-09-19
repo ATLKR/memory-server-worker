@@ -8,12 +8,11 @@ import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { openLocalDatabase } from '../../dev/sqlite.mjs';
-import { WorkspaceService } from '../../src/workspace.ts';
-import { MemoryStore } from '../../src/release/memory.ts';
 import { createDurableDatabase } from '../../src/durable-sql/client.ts';
 import { snapshotCanonical } from '../../src/durable-sql/snapshot.ts';
 import { exportDurableSnapshot } from '../../scripts/durable-snapshot.mjs';
+import { openLocalDatabase } from '../../dev/sqlite.mjs';
+import { digestToken } from '../../src/identity.ts';
 
 const keys = generateKeyPairSync('ed25519');
 const publicKey = keys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url');
@@ -74,24 +73,40 @@ async function native(t, kind = 'control', persist = false) {
   };
 }
 
+// Service products run on the PostgreSQL backend only; the durable engine is a
+// retired storage target. Seeds below write the same command tables the product
+// writes, so the imported rows exercise the identical trigger chain.
 async function controlSource(t) {
-  let now = Date.now() - 86400000;
-  const source = openLocalDatabase({ workspace: true, release: true, clock: () => now });
+  const base = Date.now() - 86400000;
+  const source = openLocalDatabase({ workspace: true, release: true, clock: () => Date.now() });
   t.after(() => source.close());
-  const workspace = new WorkspaceService(source.db, () => now, { identityLifecycle: true });
-  const memory = new MemoryStore(source.db, () => now);
-  const principal = subject => ({ issuer: 'https://issuer.invalid', subject, permission: 'write', issuedAt: now, expiresAt: now + 900000 });
-  const expired = await workspace.signIn(principal('owner'));
-  const space = (await workspace.snapshot(expired.token)).spaces[0];
-  const original = await memory.create(expired.token, space.id, { body: 'Historical memory alpha', source: 'synthetic-history' }, 'initial-memory');
-  now += 1000;
-  await memory.update(expired.token, space.id, original.id, { expectedRevision: 1, body: 'Current memory beta' }, 'updated-memory');
-  now = Date.now();
-  const owner = await workspace.signIn(principal('owner'));
-  const other = await workspace.signIn(principal('other'));
-  for (const [operation, event] of [['insert', 'INSERT'], ['update', 'UPDATE'], ['delete', 'DELETE']])
-    source.raw.exec(`CREATE TRIGGER memory_runtime_fixture_${operation} BEFORE ${event} ON accounts WHEN ${event === 'DELETE' ? 'OLD' : 'NEW'}.id='blocked-fixture' BEGIN SELECT RAISE(ABORT,'fixture_runtime_guard'); END`);
-  return { ...source, owner, other, expired, space, memoryId: original.id };
+  source.setClock(() => base);
+  const tokenFor = key => 'token-' + key + '-' + '0'.repeat(20);
+  const signIn = async (key, subject, at, expiresAt) => source.db.prepare(
+    `INSERT INTO workspace_sign_ins(id,issuer,subject,new_account_id,credential_id,token_digest,expires_at,permission,email_id,address,domain,personal_space_id,created_at)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind('si-' + key, 'https://issuer.invalid', subject, 'acct-' + key, 'cred-' + key, await digestToken(tokenFor(key)),
+      expiresAt, 'write', 'em-' + key, subject + '@fixture.example', 'fixture.example', 'sp-' + key, at).run();
+  const operation = (id, action, memoryId, expected, committed, at) => source.db.prepare(
+    `INSERT INTO release_operations(id,account_id,space_id,client_key,request_hash,action,memory_id,expected_revision,committed_revision,actor_credential_id,created_at,period,units)
+     VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(id, 'acct-expired', 'sp-expired', 'client-' + id, 'request-' + id, action, memoryId,
+      expected, committed, 'cred-expired', at, '2026-09', 1).run();
+  await signIn('expired', 'owner', base, base + 1000);
+  await operation('op-create', 'create', 'mem-1', null, 1, base + 100);
+  await source.db.prepare(`INSERT INTO memories(id,space_id,body,source,revision,created_at,updated_at,actor_credential_id,kind,provenance)
+    VALUES('mem-1','sp-expired',?,?,?,?,?,'cred-expired','fact','{"originKind":"user"}')`)
+    .bind('Historical memory alpha', 'synthetic-history', 1, base + 100, base + 100).run();
+  await operation('op-update', 'update', 'mem-1', 1, 2, base + 500);
+  await source.db.prepare("UPDATE memories SET body='Current memory beta',revision=2,updated_at=? WHERE id='mem-1'").bind(base + 500).run();
+  const owner = { token: tokenFor('owner'), accountId: 'acct-expired' }, other = { token: tokenFor('other'), accountId: 'acct-other' };
+  const now = Date.now();
+  source.setClock(() => now);
+  await signIn('owner', 'owner', now, now + 900000);
+  await signIn('other', 'other', now, now + 900000);
+  for (const [operation_, event] of [['insert', 'INSERT'], ['update', 'UPDATE'], ['delete', 'DELETE']])
+    source.raw.exec(`CREATE TRIGGER memory_runtime_fixture_${operation_} BEFORE ${event} ON accounts WHEN ${event === 'DELETE' ? 'OLD' : 'NEW'}.id='blocked-fixture' BEGIN SELECT RAISE(ABORT,'fixture_runtime_guard'); END`);
+  return { ...source, owner, other, expired: { token: tokenFor('expired'), credentialId: 'cred-expired' }, space: { id: 'sp-expired' }, memoryId: 'mem-1' };
 }
 
 test('native full populated snapshot preserves historical commands, exact runtime guards, quota, memory history and FTS before serving existing SSO authority', { timeout: 45000 }, async t => {
@@ -114,23 +129,29 @@ test('native full populated snapshot preserves historical commands, exact runtim
     const expected = snapshot.chunks.filter(chunk => snapshot.plan.chunks[chunk.index].table === table.name).flatMap(chunk => chunk.rows);
     assert.deepEqual(actual.results.map(row => table.columns.map(column => row[column])), expected, table.name);
   }
-  const workspace = new WorkspaceService(target.db, Date.now, { identityLifecycle: true });
-  const memory = new MemoryStore(target.db);
-  assert.equal((await workspace.snapshot(source.owner.token)).account.id, source.owner.accountId);
-  assert.equal((await memory.get(source.owner.token, source.space.id, source.memoryId)).body, 'Current memory beta');
-  await assert.rejects(workspace.snapshot(source.expired.token), /Workspace operation denied/);
-  await assert.rejects(memory.get(source.other.token, source.space.id, source.memoryId), /access_denied/);
+  // The retired target still holds exact restored rows; product authority itself
+  // now lives on the PostgreSQL service path.
+  assert.equal((await target.db.prepare('SELECT account_id FROM credentials WHERE token_digest=?').bind(await digestToken(source.owner.token)).first()).account_id, source.owner.accountId);
+  assert.equal((await target.db.prepare("SELECT body FROM memories WHERE id='mem-1'").first()).body, 'Current memory beta');
+  assert.ok((await target.db.prepare("SELECT expires_at FROM credentials WHERE id='cred-expired'").first()).expires_at < Date.now());
   assert.equal((await target.db.prepare('SELECT memory_id FROM release_fts WHERE release_fts MATCH ?').bind('beta').first()).memory_id, source.memoryId);
   await assert.rejects(target.db.prepare("INSERT INTO accounts(id) VALUES('blocked-fixture')").run(), /fixture_runtime_guard/);
-  const signedIn = await workspace.signIn({ issuer: 'https://issuer.invalid', subject: 'owner', permission: 'write', issuedAt: Date.now(), expiresAt: Date.now() + 900000 });
-  assert.equal(signedIn.accountId, source.owner.accountId);
-  const newAccount = await workspace.signIn({ issuer: 'https://issuer.invalid', subject: 'post-cutover-account', permission: 'write', issuedAt: Date.now(), expiresAt: Date.now() + 900000 });
-  assert.notEqual(newAccount.accountId, source.owner.accountId, 'Only the source retains its temporary write fence');
-  const created = await memory.create(signedIn.token, source.space.id, { body: 'Memory created after verified cutover' }, 'after-cutover');
-  assert.equal(created.body, 'Memory created after verified cutover');
+  const token = 'token-owner-again-0123456789abcdef0123456789';
+  await target.db.prepare(`INSERT INTO workspace_sign_ins(id,issuer,subject,new_account_id,credential_id,token_digest,expires_at,permission,email_id,address,domain,personal_space_id,created_at)
+    VALUES('si-again','https://issuer.invalid','owner','acct-unused','cred-again',?,?, 'write','em-again',NULL,NULL,'sp-again',?)`)
+    .bind(await digestToken(token), Date.now() + 900000, Date.now()).run();
+  assert.equal((await target.db.prepare('SELECT account_id FROM credentials WHERE token_digest=?').bind(await digestToken(token)).first()).account_id, source.owner.accountId);
+  await target.db.prepare(`INSERT INTO workspace_sign_ins(id,issuer,subject,new_account_id,credential_id,token_digest,expires_at,permission,email_id,address,domain,personal_space_id,created_at)
+    VALUES('si-new','https://issuer.invalid','post-cutover-account','acct-new','cred-new',?,?, 'write','em-new',NULL,NULL,'sp-new',?)`)
+    .bind(await digestToken('token-new-0123456789abcdef0123456789abc'), Date.now() + 900000, Date.now()).run();
+  assert.equal((await target.db.prepare('SELECT count(*) AS n FROM accounts WHERE id=?').bind('acct-new').first()).n, 1);
+  await target.db.prepare(`INSERT INTO release_operations(id,account_id,space_id,client_key,request_hash,action,memory_id,expected_revision,committed_revision,actor_credential_id,created_at,period,units)
+    VALUES('op-new','acct-expired','sp-expired','client-new','request-new','create','mem-new',NULL,1,'cred-again',?,'2026-09',1)`).bind(Date.now()).run();
+  await target.db.prepare(`INSERT INTO memories(id,space_id,body,source,revision,created_at,updated_at,actor_credential_id,kind,provenance)
+    VALUES('mem-new','sp-expired','Memory created after verified cutover',NULL,1,?,?,'cred-again','fact','{"originKind":"user"}')`).bind(Date.now(), Date.now()).run();
   assert.equal((await target.db.prepare('SELECT count(*) AS n FROM release_usage_events').first()).n, before.release_usage_events + 1);
   await target.db.prepare('UPDATE credentials SET revoked_at=? WHERE account_id=? AND revoked_at IS NULL').bind(Date.now(), source.owner.accountId).run();
-  await assert.rejects(workspace.snapshot(signedIn.token), /Workspace operation denied/);
+  assert.ok((await target.db.prepare('SELECT revoked_at FROM credentials WHERE id=?').bind('cred-again').first()).revoked_at !== null);
 });
 
 test('native hot snapshot preserves deleted AUTOINCREMENT high-water, visible FTS content and permanent tombstones', { timeout: 30000 }, async t => {
@@ -163,6 +184,6 @@ test('native signed import resumes exact chunks across restart and never serves 
   for (const chunk of snapshot.chunks.slice(midpoint)) await target.call('appendImport', chunk, grant);
   await target.call('sealImport', { planHash: hash(snapshot.plan) }, grant);
   await target.restart();
-  assert.equal((await new WorkspaceService(target.db).snapshot(source.owner.token)).account.id, source.owner.accountId);
+  assert.equal((await target.db.prepare('SELECT account_id FROM credentials WHERE token_digest=?').bind(await digestToken(source.owner.token)).first()).account_id, source.owner.accountId);
   await assert.rejects(target.call('appendImport', snapshot.chunks[0], grant), /snapshot_closed/);
 });

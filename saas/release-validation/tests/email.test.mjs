@@ -39,7 +39,7 @@ test('Cloudflare EMAIL binding sends proof mail and proof remains session-bound 
  const {db,token,other}=await fixture();let sent;
  try {
  const admin=new Admin({DB:db,PRODUCT_NAME:'Future Brand',MAIL_FROM:'memory@allenlabs.org',EMAIL:{send:async message=>{sent=message;return {messageId:'cf-test-message'};}}},()=>at);
- db.raw.exec("UPDATE credentials SET reauthenticated_at=NULL WHERE id='session:alice'");
+ (await db.raw.exec("UPDATE credentials SET reauthenticated_at=NULL WHERE id='session:alice'"));
  const challenge=await admin.startReauth(token,'e1');
  assert.equal(sent.from,'memory@allenlabs.org');assert.equal(sent.to,'alice@example.com');assert.equal(sent.html,undefined);
  assert.match(sent.subject,/^Future Brand:/);assert.match(sent.text,/Future Brand 관리 화면/);
@@ -50,11 +50,13 @@ test('Cloudflare EMAIL binding sends proof mail and proof remains session-bound 
  await assert.rejects(()=>admin.completeReauth(token,challenge.id,proof),e=>e.status===403);
  }finally{db.close();}
 });
+// The reauth delete guard (0014) permits deleting an unused challenge — the
+// compensation path only touches rows the guard allows.
 test('Cloudflare mail failure destroys the challenge and does not expose provider diagnostics',async()=>{
  const {db,token}=await fixture();try{
  const admin=new Admin({DB:db,MAIL_FROM:'noreply@memory.allenlabs.org',EMAIL:{send:async()=>{throw Error('sensitive recipient and provider detail');}}},()=>at);
  await assert.rejects(()=>admin.startReauth(token,'e1'),e=>e.code==='mail_delivery_failed'&&!e.message.includes('sensitive'));
- assert.equal(db.raw.prepare('SELECT count(*) AS n FROM release_reauth_challenges').get().n,0);
+ assert.equal((await db.raw.prepare('SELECT count(*) AS n FROM release_reauth_challenges').get()).n,0);
  }finally{db.close();}
 });
 test('Cloudflare mail timeout destroys the challenge without retrying the uncertain send',async t=>{
@@ -67,17 +69,17 @@ test('Cloudflare mail timeout destroys the challenge without retrying the uncert
  // Advance the mocked deadline only after the provider call actually starts.
  await Promise.race([deliveryStarted.promise,denied]);
  assert.equal(calls,1);t.mock.timers.tick(10001);await denied;
- assert.equal(calls,1);assert.equal(db.raw.prepare('SELECT count(*) AS n FROM release_reauth_challenges').get().n,0);
+ assert.equal(calls,1);assert.equal((await db.raw.prepare('SELECT count(*) AS n FROM release_reauth_challenges').get()).n,0);
  }finally{db.close();}
 });
 test('Cloudflare mail retains account daily budget and fails closed without EMAIL',async()=>{
  const {db,token}=await fixture();let calls=0;try{
  const admin=new Admin({DB:db,MAIL_FROM:'noreply@memory.allenlabs.org',EMAIL:{send:async()=>{calls++;return {messageId:'cf-test'};}}},()=>at);
- db.raw.prepare('INSERT INTO release_mail_budget(account_id,day,quantity) VALUES(?,?,?)').run('alice',new Date(at).toISOString().slice(0,10),20);
+ (await db.raw.prepare('INSERT INTO release_mail_budget(account_id,day,quantity) VALUES(?,?,?)').run('alice',new Date(at).toISOString().slice(0,10),20));
  await assert.rejects(()=>admin.startReauth(token,'e1'),e=>e.code==='daily_email_limit');assert.equal(calls,0);
  const missing=new Admin({DB:db,MAIL_FROM:'noreply@memory.allenlabs.org'},()=>at);
  await assert.rejects(()=>missing.startReauth(token,'e1'),e=>e.code==='mail_not_configured');
- assert.equal(db.raw.prepare('SELECT count(*) AS n FROM release_reauth_challenges').get().n,0);
+ assert.equal((await db.raw.prepare('SELECT count(*) AS n FROM release_reauth_challenges').get()).n,0);
  }finally{db.close();}
 });
 test('Cloudflare mail binding controls readiness and failed email linking leaves no usable proof',async()=>{
@@ -89,7 +91,7 @@ test('Cloudflare mail binding controls readiness and failed email linking leaves
  const response=await extension.route(new Request(env.PUBLIC_ORIGIN+'/v1/account/emails',{method:'POST',headers:{'content-type':'application/json'},body:JSON.stringify({email:'new@example.com'})}),token);
  assert.equal(response.status,502);
  assert.equal((await response.json()).error,'mail_delivery_failed');
- const challenge=db.raw.prepare('SELECT id,invalidated_at FROM email_challenges WHERE address=?').get('new@example.com');
+ const challenge=(await db.raw.prepare('SELECT id,invalidated_at FROM email_challenges WHERE address=?').get('new@example.com'));
  assert.equal(challenge.invalidated_at,at);
  await assert.rejects(()=>identity.completeEmailLink(token,challenge.id,attempted.text.match(/Proof: ([A-Za-z0-9_-]+)/)[1]));
  const unavailable=createRelease({...env,EMAIL:undefined},{clock:()=>at});
