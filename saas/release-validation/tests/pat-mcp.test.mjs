@@ -20,6 +20,7 @@ async function fixture(t){
   // SQLite lineage had no journal). Seed a fresh apply head so the OAuth
   // fixture's authority checks exercise the same grants as before.
   await db.raw.prepare('INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES(?,0,?)').run(AUTH_ISSUER,at);
+  await db.raw.prepare("INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES('memory:control',0,?)").run(at);
   // The PG toolResponse manifest check casts a JSONB boolean to int; rewrite
   // the two non-PostgreSQL fragments to equivalent predicates (same approach
   // as auth-r8) without weakening assertions.

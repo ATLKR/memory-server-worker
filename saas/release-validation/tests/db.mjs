@@ -245,7 +245,7 @@ export async function fixture({clock=()=>at}={}){
  -- The lifecycle-journal staleness gate denies credentials whose issuer has no
  -- fresh apply-head; tests that exercise staleness overwrite this head.
  INSERT INTO memory_ops.lifecycle_apply_head(issuer, applied_sequence, applied_at_ms)
-  VALUES('https://auth-api.allen.company',0,9007199254740991)
+  VALUES('https://auth-api.allen.company',0,9007199254740991),('memory:control',0,9007199254740991)
   ON CONFLICT (issuer) DO NOTHING;`);
  return {db,token,other,key};
 }

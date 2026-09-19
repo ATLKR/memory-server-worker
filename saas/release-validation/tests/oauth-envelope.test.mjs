@@ -17,6 +17,8 @@ test('real OAuth verification narrows migration policies before routing and agai
  // does not exercise staleness.
  (await db.raw.prepare('INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES(?,?,?)')
   .run(AUTH_ISSUER,0,9007199254740991));
+ (await db.raw.prepare("INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES('memory:control',0,?)")
+  .run(9007199254740991));
  const {privateKey,publicKey}=await generateKeyPair('RS256');
  const token=await new SignJWT({token_use:'access',scope:'memory:read memory:write memory:delete',client_id:'external-agent-client',azp:'external-agent-client',banned:false})
  .setProtectedHeader({alg:'RS256',typ:'at+jwt'}).setIssuer(AUTH_ISSUER).setAudience(PUBLIC_ORIGIN).setSubject('external-review')

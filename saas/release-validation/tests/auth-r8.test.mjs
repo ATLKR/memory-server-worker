@@ -72,6 +72,7 @@ async function oauthFixture(t,scope){let now=at;const db=new DB(()=>now);(await 
  // SQLite lineage had no journal). Seed a fresh apply head so the OAuth
  // fixture's authority checks exercise the same grants as before.
  await db.raw.prepare('INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES(?,0,?)').run(AUTH_ISSUER,at);
+ await db.raw.prepare("INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES('memory:control',0,?)").run(at);
  const token=await new SignJWT({token_use:'access',scope,client_id:'agent-client',azp:'agent-client'}).setProtectedHeader({alg:'RS256',typ:'at+jwt'}).setIssuer(AUTH_ISSUER).setAudience(PUBLIC_ORIGIN).setSubject('oauth-r8').setJti(crypto.randomUUID()).setIssuedAt(at/1000).setExpirationTime(at/1000+900).sign(keys.privateKey);
  const env={DB:db,SSO_CLIENT_ID:'browser-client',PUBLIC_ORIGIN,REQUEST_LIMITER:{limit:async()=>({success:true})}},release=createRelease(env,{clock:()=>now}),app=createApplication(db,readSettings(env),{clock:()=>now,auth:{jwks:async()=>keys.publicKey},release});
  await app(new Request(PUBLIC_ORIGIN+'/v1/spaces',{headers:{authorization:'Bearer '+token}}));

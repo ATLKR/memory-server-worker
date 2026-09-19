@@ -72,6 +72,7 @@ async function fixture(t,options={}) {
     // Issuer watermark before the first event: provider-bound accounts fail
     // closed while lifecycle_apply_head is missing or stale.
     (await db.raw.prepare('INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES(?,?,?)').run(issuer,0,9007199254740991));
+    (await db.raw.prepare("INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES('memory:control',0,?)").run(9007199254740991));
     const clock=()=>now, workspace=new WorkspaceService(db,clock,{identityLifecycle:true});
     const principal=(subject='alice',extra={})=>({issuer,subject,email:subject+'@example.com',emailVerified:true,issuedAt:now,expiresAt:now+900000,permission:'write',...extra});
     const old=await workspace.signIn(principal()), bob=await workspace.signIn(principal('bob'));

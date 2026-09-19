@@ -5,22 +5,41 @@ export const INTERACTIVE = "c.kind='session' AND c.id NOT LIKE 'oauth:%'";
 /** Revocation propagation bound: an issuer whose central lifecycle journal has
  * not been applied within the budget denies fail-closed. */
 export const LIFECYCLE_STALENESS_MS = 900000;
-/** Aliases c=credential. Denies when any bound issuer's apply-head is missing
- * or stale — region-only accounts (no provider binding) are unaffected. */
+/** Enrollment denial probe: the regional applied state converged from control
+ * journal rows; a present 'enrollment.removed' head means currently removed.
+ * scope is a closed union — never request-derived. idExpr is a trusted SQL
+ * column expression (e.g. owner.id), interpolated not bound. */
+export function enrolledSql(scope: 'account' | 'organization', idExpr: string): string {
+    return `NOT EXISTS(SELECT 1 FROM memory_ops.enrollment_applied_state enrollment
+        WHERE enrollment.scope='${scope}' AND enrollment.subject_id=${idExpr} AND enrollment.kind='enrollment.removed')`;
+}
+/** Aliases c=credential. Denies when any bound issuer's apply-head — or the
+ * shared control channel's — is missing or stale: an attached region cut off
+ * from control denies bound accounts within the budget. Region-only accounts
+ * (no provider binding) are unaffected. */
 function lifecycleFreshnessSql(): string {
     // DB wall clock, not a bound parameter — authority() placeholder order is fixed.
+    // Each bound identity requires TWO fresh heads: its issuer's and the control
+    // channel's. The LATERAL VALUES expands both requirements without row
+    // multiplication on the heads themselves.
     return `NOT EXISTS(SELECT 1 FROM memory_identity.runtime_provider_identities pi
-      LEFT JOIN memory_ops.lifecycle_apply_head h ON h.issuer=pi.issuer
+      JOIN LATERAL (VALUES (pi.issuer),('memory:control')) required(issuer) ON true
+      LEFT JOIN memory_ops.lifecycle_apply_head h ON h.issuer=required.issuer
       WHERE pi.account_id=c.account_id
         AND (h.applied_at_ms IS NULL OR h.applied_at_ms <= memory_control.now_ms()-${LIFECYCLE_STALENESS_MS}))`;
 }
 /** An account's resumable lifecycle is separate from terminal disabled_at.
- * Use the same current primary snapshot as the grant or provider admission. */
+ * Use the same current primary snapshot as the grant or provider admission.
+ * A binding tombstoned by subject.unlinked no longer denies the account — its
+ * residual suspension dies with the binding, not the account. */
 export function liveAccountSql(account: 'owner' | 'grantor_account' | 'a'): string {
     return `${account}.disabled_at IS NULL AND NOT EXISTS(
         SELECT 1 FROM memory_identity.runtime_provider_identities lifecycle_identity JOIN memory_ops.lifecycle_applied_state lifecycle
           ON lifecycle.issuer=lifecycle_identity.issuer AND lifecycle.subject=lifecycle_identity.subject AND lifecycle.address=''
-        WHERE lifecycle_identity.account_id=${account}.id AND lifecycle.kind<>'account.resumed')`;
+        WHERE lifecycle_identity.account_id=${account}.id AND lifecycle.kind<>'account.resumed'
+          AND NOT EXISTS(SELECT 1 FROM memory_ops.provider_revocations u WHERE u.issuer=lifecycle_identity.issuer
+            AND u.subject=lifecycle_identity.subject AND u.kind='subject.unlinked'))
+      AND ${enrolledSql('account', `${account}.id`)}`;
 }
 /** Aliases sh=share, s=source Space. One timestamp binding. The immutable
  * browser credential identifies the grantor account, not the grant's lifetime. */
@@ -50,7 +69,7 @@ export function authority(action: Capability): string {
   AND s.data_policy->>'residency' = (SELECT storage_region FROM memory_control.deployment_identity)
   AND ${lifecycleFreshnessSql()}
   AND (s.owner_account_id IS NULL OR EXISTS(SELECT 1 FROM memory_identity.runtime_accounts owner WHERE owner.id=s.owner_account_id AND ${liveAccountSql('owner')}))
-  AND (s.organization_id IS NULL OR EXISTS(SELECT 1 FROM memory_control.runtime_organizations owner WHERE owner.id=s.organization_id AND owner.disabled_at IS NULL)) AND (
+  AND (s.organization_id IS NULL OR EXISTS(SELECT 1 FROM memory_control.runtime_organizations owner WHERE owner.id=s.organization_id AND owner.disabled_at IS NULL AND ${enrolledSql('organization', 'owner.id')})) AND (
    (${INTERACTIVE} AND ${cap === 'read' ? 'TRUE' : "c.permission='write'"})
    OR EXISTS(SELECT 1 FROM memory_identity.credential_policies p,jsonb_array_elements_text(p.capabilities) a WHERE p.credential_id=c.id AND a='${cap}'
      AND (p.space_ids IS NULL OR EXISTS(SELECT 1 FROM jsonb_array_elements_text(p.space_ids) z WHERE z=s.id))))

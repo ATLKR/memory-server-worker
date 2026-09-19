@@ -59,6 +59,7 @@ export async function suspendedOwnerFixture(db,clock,options={}) {
  // Issuer watermark before the first event: authority() denies provider-bound
  // accounts while lifecycle_apply_head is missing or stale.
  await db.prepare('INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES(?,?,?)').bind(issuer,0,9007199254740991).run();
+ await db.prepare("INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES('memory:control',0,?)").bind(9007199254740991).run();
  const workspace=new WorkspaceService(db,clock,{identityLifecycle:true}),users={};
  for(const subject of ['alice','bob','carol']) users[subject]=await workspace.signIn({issuer,subject,email:subject+'@example.com',emailVerified:true,issuedAt:clock(),expiresAt:clock()+900000,permission:'write'});
  await db.prepare("UPDATE credentials SET reauthenticated_at=? WHERE kind='session'").bind(clock()).run();

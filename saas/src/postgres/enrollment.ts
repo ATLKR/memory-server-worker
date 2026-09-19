@@ -1,6 +1,6 @@
 import type { Database } from '../release/types.ts';
 import type { PostgresRegion } from './connection.ts';
-import { id } from '../release/util.ts';
+import { id, str } from '../release/util.ts';
 
 /** Control-plane regional-enrollment commands. The canonical id registry and
  * enrollment directory live on the control cluster; regional identity rows are
@@ -9,6 +9,7 @@ import { id } from '../release/util.ts';
 
 export type EnrollmentOutcome = Readonly<{ kind: 'enrolled' | 'already_enrolled' }>;
 export type RemovalOutcome = Readonly<{ kind: 'removed' | 'not_enrolled' }>;
+export type UnlinkOutcome = Readonly<{ kind: 'unlinked' | 'already_unlinked' }>;
 
 function failure(code: string): Error & { code: string } {
     return Object.assign(new Error(code), { code });
@@ -57,6 +58,16 @@ export async function removeOrganizationEnrollment(control: Database, organizati
     const result = await control.prepare('SELECT memory_control.remove_organization_enrollment(?,?,?) AS applied')
         .bind(key, region, at).first<{ applied: boolean }>();
     return Object.freeze({ kind: result?.applied ? 'removed' : 'not_enrolled' });
+}
+
+/** Console/admin origin for severing an SSO binding: stamps the binding's
+ * unlinked_at_ms and appends a control-channel subject.unlinked journal event
+ * in the same transaction. Idempotent — a binding already unlinked reports
+ * 'already_unlinked' rather than failing. */
+export async function unlinkSubject(control: Database, issuer: string, subject: string, at: number): Promise<UnlinkOutcome> {
+    const result = await control.prepare('SELECT memory_control.unlink_subject(?,?,?) AS applied')
+        .bind(str(issuer, 2048), str(subject, 512), at).first<{ applied: boolean }>();
+    return Object.freeze({ kind: result?.applied ? 'unlinked' : 'already_unlinked' });
 }
 
 export async function accountEnrolled(control: Database, accountId: string, region: PostgresRegion): Promise<boolean> {

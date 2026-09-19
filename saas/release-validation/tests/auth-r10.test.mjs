@@ -15,6 +15,7 @@ async function oauth(t,releaseEnabled=true){let now=at;const db=new DB(()=>now);
  // OAuth sign-in records a provider identity; the lifecycle staleness gate
  // denies credentials whose issuer has no fresh apply head.
  await db.raw.prepare('INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES(?,0,?)').run(AUTH_ISSUER,9007199254740991);
+ await db.raw.prepare("INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES('memory:control',0,?)").run(9007199254740991);
  const token=await new SignJWT({token_use:'access',client_id:'agent',azp:'agent',scope:'memory:read memory:write memory:delete'}).setProtectedHeader({alg:'RS256',typ:'at+jwt'}).setIssuer(AUTH_ISSUER).setAudience(PUBLIC_ORIGIN).setSubject('r10').setJti('r10').setIssuedAt(at/1000).setExpirationTime(at/1000+900).sign(keys.privateKey);
  const env={DB:db,SSO_CLIENT_ID:'browser',REQUEST_LIMITER:{limit:async()=>({success:true})}},app=createApplication(db,readSettings(env),{clock:()=>now,auth:{jwks:async()=>keys.publicKey},...(releaseEnabled?{release:createRelease(env,{clock:()=>now})}:{})});
  const request=(bearer=token,name='memory_add',args={},version='2025-11-25')=>app(new Request(PUBLIC_ORIGIN+'/mcp',{method:'POST',headers:{...(bearer?{authorization:'Bearer '+bearer}:{}),'content-type':'application/json',accept:'application/json, text/event-stream','mcp-protocol-version':version,...(version==='2026-07-28'?{'mcp-method':'tools/call','mcp-name':name}:{})},body:JSON.stringify({jsonrpc:'2.0',id:1,method:'tools/call',params:{name,arguments:args,...(version==='2026-07-28'?{_meta:{'io.modelcontextprotocol/protocolVersion':version,'io.modelcontextprotocol/clientInfo':{name:'r10',version:'1'},'io.modelcontextprotocol/clientCapabilities':{}}}:{})}})}));
@@ -85,6 +86,7 @@ test('PostgreSQL lineage carries the migration-15 account index, erasure cursor 
  // the check is structural: objects present, cursor seeded, index used.
  const db=new DB();(await db.migrate());t.after(()=>db.close());
  await db.raw.prepare('INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES(?,0,?)').run(AUTH_ISSUER,9007199254740991);
+ await db.raw.prepare("INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES('memory:control',0,?)").run(9007199254740991);
  const workspace=new WorkspaceService(db,()=>at),session=await workspace.signIn({issuer:AUTH_ISSUER,subject:'retained15',email:'retained15@example.com',emailVerified:true,permission:'write',expiresAt:at+900000});
  (await db.raw.prepare('UPDATE memory_identity.credentials SET reauthenticated_at=? WHERE account_id=?').run(at,session.accountId));
  const account=(await workspace.snapshot(session.token)).account;

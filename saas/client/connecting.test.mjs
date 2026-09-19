@@ -80,7 +80,7 @@ test('SSO template requests scopes that permit memory writes after a read-only c
     // apply-head. Production stamps it from the scheduled journal sync; this
     // fixture has no control plane, so seed the "synced, nothing pending" head.
     await db.raw.exec(`INSERT INTO memory_ops.lifecycle_apply_head(issuer, applied_sequence, applied_at_ms)
-      VALUES('${AUTH_ISSUER}',0,9007199254740991)`);
+      VALUES('${AUTH_ISSUER}',0,9007199254740991),('memory:control',0,9007199254740991)`);
     const server = read('./claude.sso.json').mcpServers[SERVICE_ID];
     const origin = new URL(server.url).origin;
     const { privateKey, publicKey } = await generateKeyPair('RS256');

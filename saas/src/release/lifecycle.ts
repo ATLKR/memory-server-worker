@@ -9,7 +9,7 @@ function lifecycleEvent(event: Record<string, unknown>, timestamp: number) {
     if (event.version !== 2 || event.issuer !== 'https://auth-api.allen.company') fail(400, 'unsupported_identity_event');
     const eventId = id(event.id), subject = str(event.subject, 512), kind = str(event.type, 64);
     const sequence = integer(event.sequence, 1, Number.MAX_SAFE_INTEGER), occurredAt = integer(event.occurredAt, 0, Number.MAX_SAFE_INTEGER);
-    if (!['account.suspended', 'account.resumed', 'account.deleted', 'email.revoked', 'email.verified'].includes(kind)
+    if (!['account.suspended', 'account.resumed', 'account.deleted', 'email.revoked', 'email.verified', 'subject.unlinked'].includes(kind)
         || occurredAt > timestamp + 300000) fail(400, 'unsupported_identity_event');
     let address = '';
     if (kind.startsWith('email.')) {

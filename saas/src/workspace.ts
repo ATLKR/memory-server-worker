@@ -143,7 +143,7 @@ export class WorkspaceService {
           SELECT c.account_id AS "accountId",c.expires_at AS "expiresAt",c.revoked_at AS "revokedAt",c.kind,
             c.permission,c.id,a.disabled_at AS "disabledAt",p.account_id AS "mappedAccountId"
           FROM memory_identity.runtime_credentials c JOIN memory_identity.runtime_accounts a ON a.id=c.account_id
-          LEFT JOIN memory_identity.runtime_provider_identities p ON p.issuer=? AND p.subject=? AND p.account_id=c.account_id
+          LEFT JOIN memory_identity.active_provider_identities p ON p.issuer=? AND p.subject=? AND p.account_id=c.account_id
           WHERE c.token_digest=?`).bind(issuer, subject, digest).first<{
             accountId: string; expiresAt: number; revokedAt: number | null; kind: string;
             permission: string; id: string; disabledAt: number | null; mappedAccountId: string | null;
@@ -176,7 +176,7 @@ export class WorkspaceService {
       } else await this.write(sql, values);
       const created = await this.db.withSession('first-primary').prepare(`
         SELECT c.account_id AS "accountId",c.expires_at AS "expiresAt" FROM memory_identity.active_credentials c
-        JOIN memory_identity.runtime_provider_identities p ON p.account_id=c.account_id AND p.issuer=? AND p.subject=?
+        JOIN memory_identity.active_provider_identities p ON p.account_id=c.account_id AND p.issuer=? AND p.subject=?
         WHERE c.token_digest=? AND c.kind='session' AND c.expires_at>${sqlNow()} AND c.permission=?`)
         .bind(issuer, subject, digest, this.now(), granted).first<{ accountId: string; expiresAt: number }>();
       if (!created || created.expiresAt <= this.now()) throw new WorkspaceError(401, 'unauthorized');

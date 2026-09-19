@@ -15,6 +15,8 @@ async function fixture(t){
   // issuer has no fresh apply-head; these tests do not exercise lifecycle.
   await f.raw.prepare('INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES(?,0,?)')
     .run('https://auth-api.allen.company',9007199254740991);
+  await f.raw.prepare("INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES('memory:control',0,?)")
+    .run(9007199254740991);
   const workspace=new WorkspaceService(f.db,()=>NOW),owner=await workspace.signIn(principal('owner'));
   (await f.raw.prepare('UPDATE credentials SET reauthenticated_at=? WHERE token_digest=?').run(NOW,await digest(owner.token)));
   const snapshot=await workspace.snapshot(owner.token),org=await workspace.createOrganization(owner.token,{name:'Root',emailId:snapshot.account.emails[0].id});

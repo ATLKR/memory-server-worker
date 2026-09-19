@@ -41,7 +41,7 @@ async function regionalDb(t, { deployment = 'kr-seoul' } = {}) {
             await db.query(`INSERT INTO memory_identity.account_emails(id, account_id, address, domain, verified_at)
                 VALUES ($1, $2, $3, 'example.com', $4)`, [`em:${accountId}`, accountId, `${accountId}@example.com`, NOW]);
             await db.query(`INSERT INTO memory_ops.lifecycle_apply_head(issuer, applied_sequence, applied_at_ms)
-                VALUES ($1, 1, $2) ON CONFLICT (issuer) DO NOTHING`, [ISSUER, NOW]);
+                VALUES ($1, 1, $2), ('memory:control', 1, $2) ON CONFLICT (issuer) DO NOTHING`, [ISSUER, NOW]);
         }
     };
     return { db, region, boundAccount };
