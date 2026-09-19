@@ -19,20 +19,46 @@ activates a region — activation is a separate signed acceptance step.
 - The object store for the region (R2 bucket / S3 prefix) with a fetcher
   credential scoped to it.
 
-### Known live target: kr-seoul
+### Known live targets (attested 2026-09-19)
 
-The existing Supabase project `dnhcszbgdzgjpsktjaxn` (MemoryServiceDB,
-`ap-northeast-2`, pooler `aws-0-ap-northeast-2.pooler.supabase.com` — direct
-`db.*` hostnames do not resolve on this project, so `connectionMode` must be
-`session-pooler` or `transaction-pooler`, and `user` must be
-`memory_runtime.dnhcszbgdzgjpsktjaxn`). Two gaps before it can host the cut:
+**kr-seoul** — Supabase project `dnhcszbgdzgjpsktjaxn` (MemoryServiceDB,
+`ap-northeast-2`, pooler `aws-0-ap-northeast-2.pooler.supabase.com`; direct
+`db.*` does not resolve, `connectionMode` must be `session-pooler`, and the
+pooler user is `<login>.dnhcszbgdzgjpsktjaxn`). Regional lineage 0001–0016
+applied, `deployment_identity` = `memory-seoul`/`kr-seoul`/
+`kr-primary-storage-v1`, runtime login `memory_seoul_runtime` (member of
+`memory_runtime`), `postgres-attest` → `attested:true, allDenialsHeld:true`,
+61 regional tables.
 
-- It currently runs the **old projection schema** (0001–0005 series); the
-  regional `postgres/migrations` 0001–0016 have never been applied there.
-- Its provisioned runtime login is `memory_seoul_runtime`; the new
-  migrations grant to `memory_runtime` — either create the new role or
-  rename before applying 0014's grants, otherwise the attested role has no
-  privileges.
+**sg** — Neon project `memoryservice-nonseoul`, endpoint
+`ep-lingering-pine-azosommb.c-3.ap-southeast-1.aws.neon.tech`, database
+`memoryservice-nonseoul` (`connectionMode` `direct`; Neon forbids
+`session-pooler` here). Full lineage 0001–0016 applied 2026-09-19,
+`deployment_identity` = `memory-sg`/`sg`/`sg-primary-storage-v1`, runtime
+login `memory_sg_runtime`, `postgres-attest` → `attested:true,
+allDenialsHeld:true`, 61 regional tables.
+
+### Provisioning notes learned from the live run
+
+- Migration logins need `CREATEROLE` (0004/0005 create roles) plus
+  membership in `memory_owner`/`memory_lifecycle`/`memory_commands`/
+  `memory_background` **granted `WITH SET TRUE`** — a plain membership
+  cannot `SET ROLE` on PG ≥16. `postgres` on Supabase has ADMIN on the
+  memory roles but `SET FALSE`, so it cannot run migrations directly;
+  `memory_migrator` (Seoul) / `memory_sg_migrator` (sg) were provisioned
+  for this and their credentials stored in the vault.
+- Supabase pooler reports a `VALID UNTIL`-expired login as
+  `(EAUTHQUERY) unsupported or invalid secret format` — when rotating a
+  runtime password also `ALTER ROLE ... VALID UNTIL 'infinity'` (or a new
+  expiry), not just `PASSWORD`.
+- On a provider owner connection (Neon `*_owner`), `CREATE SCHEMA
+  ... AUTHORIZATION memory_owner` needs the owner to hold `memory_owner`
+  with `SET TRUE` — grant it after `0001`'s role creation before running
+  the schema section.
+- Savepoint recovery inside a failed transaction requires the recovery
+  statement to reach the server unprefaced — the runtime session's
+  `set_config` preamble previously made `ROLLBACK TO` unreachable
+  (fixed in `0bf2272`).
 
 ### Serving precondition: lifecycle journal sync
 
