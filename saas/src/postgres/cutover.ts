@@ -64,8 +64,8 @@ async function writableColumns(session: PgSession, table: string): Promise<strin
 
 /** Every base table in the regional memory_* schemas — the full cutover
  * surface, so the rehearsal cannot silently miss a table added by a later
- * migration. Copies run under session_replication_role='replica', which
- * suppresses constraint triggers, so enumeration order is immaterial. */
+ * migration. Copies run under DISABLE TRIGGER USER in copyOrder() sequence —
+ * see copyOrder for the cycle-breaking constraint plan. */
 export async function listRegionalTables(session: PgSession): Promise<string[]> {
     const r = await session.query<{ t: string }>(
         `SELECT table_schema || '.' || table_name AS t FROM information_schema.tables
@@ -82,13 +82,31 @@ export async function listRegionalTables(session: PgSession): Promise<string[]> 
  * error-prone. `unfreezeRuntime` restores login exactly. */
 export async function freezeRuntime(admin: PgSession, role = 'memory_runtime'): Promise<void> {
     if (!/^[a-z_][a-z0-9_]{0,62}$/.test(role)) throw new Error('cutover_role_invalid');
+    // Serving logins are members of the group role; NOLOGIN on the group does
+    // not fence them, and pg_stat_activity.usename reports the member login.
+    // Only serving memberships count — admin-option holders (the operator role
+    // running the freeze) must not be fenced.
+    const members = (await admin.query<{ name: string }>(
+        `SELECT m.member::regrole::text AS name FROM pg_auth_members m
+         WHERE m.roleid=$1::regrole AND (m.set_option OR m.inherit_option)
+           AND m.member <> current_user::regrole`,
+        [role])).rows.map(r => r.name).filter(n => /^[a-z_][a-z0-9_]{0,62}$/.test(n));
+    for (const member of members) await admin.query(`ALTER ROLE ${member} NOLOGIN`);
     await admin.query(`ALTER ROLE ${role} NOLOGIN`);
-    await admin.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE usename=$1`, [role]);
+    const usernames = [role, ...members];
+    await admin.query(`SELECT pg_terminate_backend(pid) FROM pg_stat_activity
+        WHERE usename IN (${usernames.map((_, i) => `$${i + 1}`).join(',')})`, usernames);
 }
 
 /** Restore the runtime role's login after a verified or abandoned cut. */
 export async function unfreezeRuntime(admin: PgSession, role = 'memory_runtime'): Promise<void> {
     if (!/^[a-z_][a-z0-9_]{0,62}$/.test(role)) throw new Error('cutover_role_invalid');
+    const members = (await admin.query<{ name: string }>(
+        `SELECT m.member::regrole::text AS name FROM pg_auth_members m
+         WHERE m.roleid=$1::regrole AND (m.set_option OR m.inherit_option)
+           AND m.member <> current_user::regrole`,
+        [role])).rows.map(r => r.name).filter(n => /^[a-z_][a-z0-9_]{0,62}$/.test(n));
+    for (const member of members) await admin.query(`ALTER ROLE ${member} LOGIN`);
     await admin.query(`ALTER ROLE ${role} LOGIN`);
 }
 
@@ -121,10 +139,13 @@ export async function copyTable(source: PgSession, target: PgSession, table: str
     const targetColumns = await writableColumns(target, qualified);
     if (canonical(columns) !== canonical(targetColumns)) throw new Error('cutover_schema_mismatch');
     if ((await target.query(`SELECT 1 FROM ${qualified} LIMIT 1`)).rows.length) throw new Error('cutover_target_not_empty');
-    // Suppress target-side triggers during the bulk load — derived rows (job
-    // outbox, fts mapping) are carried by the cut itself, not regenerated.
-    // Same mechanism pg_restore uses; restored to 'origin' before returning.
-    await target.query(`SET session_replication_role='replica'`);
+    // Suppress target-side user triggers during the bulk load — derived rows
+    // (job outbox, fts mapping) are carried by the cut itself, not regenerated.
+    // DISABLE TRIGGER USER needs only table ownership — unlike
+    // session_replication_role, which managed providers do not grant (Neon
+    // rejects it for neon_superuser). Constraint triggers still fire, so the
+    // caller must copy in copyOrder() order — FK violations are caught live.
+    await target.query(`ALTER TABLE ${qualified} DISABLE TRIGGER USER`);
     try {
         let written = 0;
         for (const row of rows.rows) {
@@ -148,7 +169,67 @@ export async function copyTable(source: PgSession, target: PgSession, table: str
                 await target.query(`SELECT setval($1, coalesce((SELECT max("${c}") FROM ${qualified}),1))`, [seq.rows[0].s]);
         }
         return written;
-    } finally { await target.query(`SET session_replication_role='origin'`); }
+    } finally { await target.query(`ALTER TABLE ${qualified} ENABLE TRIGGER USER`); }
+}
+
+export interface CyclicConstraint { table: string; name: string; def: string }
+
+/** Parents-first copy order for `tables`, plus the intra-SCC foreign keys that
+ * must be dropped and re-added to break reference cycles (archives ↔
+ * lifecycle_receipts exists today). Managed providers grant no way to defer or
+ * suspend RI triggers, so the cyclic edge is removed for the load window and
+ * re-added afterwards — re-adding validates every row against the copied data.
+ * Tables not in `tables` (or not FK-linked) keep their input order. */
+export async function copyOrder(session: PgSession, tables: string[]):
+    Promise<{ order: string[]; cyclicConstraints: CyclicConstraint[] }> {
+    const wanted = new Set(tables);
+    const edges = (await session.query<{ child: string; parent: string; con: string; def: string }>(
+        `SELECT DISTINCT tc.table_schema || '.' || tc.table_name AS child,
+                ccu.table_schema || '.' || ccu.table_name AS parent,
+                tc.constraint_name AS con, pg_get_constraintdef(pgc.oid) AS def
+         FROM information_schema.table_constraints tc
+         JOIN information_schema.key_column_usage kcu ON tc.constraint_name = kcu.constraint_name
+         JOIN information_schema.constraint_column_usage ccu ON tc.constraint_name = ccu.constraint_name
+         JOIN pg_namespace pn ON pn.nspname = tc.table_schema
+         JOIN pg_class pc ON pc.relname = tc.table_name AND pc.relnamespace = pn.oid
+         JOIN pg_constraint pgc ON pgc.conname = tc.constraint_name
+             AND pgc.connamespace = pn.oid AND pgc.conrelid = pc.oid
+         WHERE tc.constraint_type = 'FOREIGN KEY'`)).rows
+        .map(e => ({ child: e.child, parent: e.parent, con: e.con, def: e.def }))
+        .filter(e => wanted.has(e.child) && wanted.has(e.parent) && e.child !== e.parent);
+    // Kahn's algorithm: emit parents first. On a stall the leftover set still
+    // contains a cycle — drop one constraint whose endpoints can still reach
+    // each other (same SCC) and continue. Dependents of cyclic tables are not
+    // cyclic themselves, so they emit normally once the cycle is broken.
+    const remaining = new Set(tables);
+    const order: string[] = [];
+    const cyclicConstraints: CyclicConstraint[] = [];
+    const deps = new Map<string, Map<string, CyclicConstraint>>();
+    for (const e of edges)
+        (deps.get(e.child) ?? deps.set(e.child, new Map()).get(e.child)!)
+            .set(e.parent, { table: e.child, name: e.con, def: e.def });
+    const reaches = (from: string, to: string): boolean => {
+        const seen = new Set<string>([from]); const q = [from];
+        while (q.length)
+            for (const p of deps.get(q.shift()!)?.keys() ?? [])
+                if (p === to) return true; else if (remaining.has(p) && !seen.has(p)) { seen.add(p); q.push(p); }
+        return false;
+    };
+    while (remaining.size) {
+        const ready = [...remaining].filter(t => ![...(deps.get(t)?.keys() ?? [])].some(p => remaining.has(p)));
+        if (!ready.length) {
+            const hit = [...remaining].flatMap(child => [...(deps.get(child)?.entries() ?? [])]
+                .filter(([parent]) => remaining.has(parent) && reaches(parent, child))
+                .map(([parent, c]) => ({ child, parent, c })))[0];
+            if (!hit) throw new Error('cutover_cycle_unresolvable');
+            cyclicConstraints.push(hit.c);
+            deps.get(hit.child)!.delete(hit.parent);
+            continue;
+        }
+        ready.sort();
+        for (const t of ready) { remaining.delete(t); order.push(t); }
+    }
+    return { order, cyclicConstraints };
 }
 
 /** Recompute every seal on the target; returns the tables that differ. */

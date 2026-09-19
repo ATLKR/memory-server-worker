@@ -21,22 +21,26 @@ activates a region — activation is a separate signed acceptance step.
 
 ### Known live targets (attested 2026-09-19)
 
-**kr-seoul** — Supabase project `dnhcszbgdzgjpsktjaxn` (MemoryServiceDB,
-`ap-northeast-2`, pooler `aws-0-ap-northeast-2.pooler.supabase.com`; direct
-`db.*` does not resolve, `connectionMode` must be `session-pooler`, and the
-pooler user is `<login>.dnhcszbgdzgjpsktjaxn`). Regional lineage 0001–0016
+**kr-seoul** — Supabase project `dnhcszbgdzgjpsktjaxn` (the deployment
+database is `postgres`; `ap-northeast-2`, pooler
+`aws-0-ap-northeast-2.pooler.supabase.com`; direct `db.*` does not resolve,
+`connectionMode` must be `session-pooler`, and the pooler user is
+`<login>.dnhcszbgdzgjpsktjaxn`; the pooler CA chain is self-signed — pin it
+via `MEMORY_KR_SEOUL_TLS_CA`/`PGSSLROOTCERT`). Regional lineage 0001–0017
 applied, `deployment_identity` = `memory-seoul`/`kr-seoul`/
 `kr-primary-storage-v1`, runtime login `memory_seoul_runtime` (member of
-`memory_runtime`), `postgres-attest` → `attested:true, allDenialsHeld:true`,
-61 regional tables.
+`memory_runtime`). Live cut rehearsal 2026-09-19: 79 tables, 198 rows,
+15.2s freeze→verify, 0 mismatches; post-cut `postgres-attest` →
+`attested:true, allDenialsHeld:true`.
 
 **sg** — Neon project `memoryservice-nonseoul`, endpoint
 `ep-lingering-pine-azosommb.c-3.ap-southeast-1.aws.neon.tech`, database
 `memoryservice-nonseoul` (`connectionMode` `direct`; Neon forbids
-`session-pooler` here). Full lineage 0001–0016 applied 2026-09-19,
+`session-pooler` here). Full lineage 0001–0017 applied 2026-09-19,
 `deployment_identity` = `memory-sg`/`sg`/`sg-primary-storage-v1`, runtime
-login `memory_sg_runtime`, `postgres-attest` → `attested:true,
-allDenialsHeld:true`, 61 regional tables.
+login `memory_sg_runtime`. Live cut rehearsal 2026-09-19: 79 tables, 37
+rows, 104.9s freeze→verify, 0 mismatches; post-cut `postgres-attest` →
+`attested:true, allDenialsHeld:true`.
 
 ### Provisioning notes learned from the live run
 
@@ -59,6 +63,17 @@ allDenialsHeld:true`, 61 regional tables.
   statement to reach the server unprefaced — the runtime session's
   `set_config` preamble previously made `ROLLBACK TO` unreachable
   (fixed in `0bf2272`).
+- Neither provider grants `session_replication_role` or
+  `DISABLE TRIGGER ALL` to non-superusers — the copy path uses
+  `DISABLE TRIGGER USER` + `copyOrder` (parents-first, cyclic FKs
+  dropped/re-added) instead.
+- `pg_auth_members` holds admin-option rows for the operator logins —
+  freeze/unfreeze filter on `set_option OR inherit_option` and skip
+  `current_user`, or the cut fences the operator itself.
+- `postgres-rehearse.mjs --seed` writes a `rehearsal-`-prefixed fixture
+  (2 accounts, org, spaces, memories, payload chain, jobs); it is
+  idempotent and safe to re-run. The fixture rows persist on the source
+  — boundary tables reject deletes by design.
 
 ### Serving precondition: lifecycle journal sync
 
@@ -85,22 +100,27 @@ leaks. Record the JSON outputs as cutover evidence.
 
 ## 2. Freeze (admin session, target untouched)
 
-`freezeRuntime(admin, 'memory_runtime')` — `ALTER ROLE ... NOLOGIN` +
-`pg_terminate_backend` for its sessions. Every serving connection dies;
-there is no in-flight write to race the seal. The operator session is a
-different role and unaffected.
+`freezeRuntime(admin, 'memory_runtime')` — `ALTER ROLE ... NOLOGIN` on the
+group **and every serving member login** (admin-option holders excluded so
+the operator cannot fence itself), plus `pg_terminate_backend` for their
+sessions. Every serving connection dies; there is no in-flight write to race
+the seal. The operator session is a different role and unaffected.
 
 ## 3. Seal + copy + payload objects
 
 1. `listRegionalTables(source)` — full surface, not a hand list.
 2. `exportManifest(source, deploymentId, region, tables, at)` — the cut.
-3. `copyTable(source, target, table)` for every enumerated table **except**
-   provision-seeded ones (detected live: tables non-empty on a fresh
-   target — today `memory_ops.maintenance_progress`,
+3. `copyOrder(target, tables)` — parents-first plan plus the intra-cycle FKs
+   to drop (today `archives` ↔ `lifecycle_receipts`). Drop those constraints,
+   then `copyTable(source, target, table)` in plan order for every enumerated
+   table **except** provision-seeded ones (detected live: tables non-empty on
+   a fresh target — today `memory_ops.maintenance_progress`,
    `memory_ops.payload_backfill_progress`; `schema_migrations` is never in
-   the enumeration). The importer writes `OVERRIDING SYSTEM VALUE` and
-   resyncs sequences; constraint triggers stay suppressed for the whole
-   load so ordering does not matter.
+   the enumeration). Each copy runs under `DISABLE TRIGGER USER` — managed
+   providers grant no way to suspend constraint triggers, so order + the
+   dropped cycle edge is the mechanism. The importer writes `OVERRIDING
+   SYSTEM VALUE` and resyncs sequences. Re-add the dropped constraints after
+   the load — their validation is the FK-integrity proof.
 4. `sealPayloadObjects(source, fetcher)` — fetch every live object
    (memories + versions + non-terminal stages), verify sha256/bytes, and
    re-home the bytes to the target region's store.

@@ -1,27 +1,38 @@
 # Regional cutover rehearsal (P-6)
 
-Status: **rehearsed at the database layer** on PGlite. Live provider cutover
-remains unexecuted; this document is the procedure and its evidence so far.
+Status: **rehearsed live on both clusters** (2026-09-19) — Neon `sg` and
+Supabase `kr-seoul`, sealed → copied → verified → unfrozen against a fresh
+target database, with post-cut attestation passing as the runtime login.
+See the live evidence section below.
 
 ## Model
 
 One consistent cut, sealed, copied, verified — never dual writers.
 
-1. **Freeze**: `freezeRuntime` revokes the runtime role's `LOGIN` and
-   terminates its backends — every serving path dies while the operator
-   session running the seal is unaffected. Read-only transactions are
-   session-bypassable and grant replay is error-prone; `NOLOGIN` is airtight
-   and exactly reversible with `unfreezeRuntime`. The seal is a consistent
+1. **Freeze**: `freezeRuntime` revokes `LOGIN` from the runtime group role
+   **and every serving member login** (e.g. `memory_sg_runtime`,
+   `memory_seoul_runtime` — group `NOLOGIN` does not fence member sessions)
+   and terminates their backends — every serving path dies while the operator
+   session running the seal is unaffected. Admin-option holders of the role
+   (the operator) are excluded so the freeze cannot lock itself out. Read-only
+   transactions are session-bypassable and grant replay is error-prone;
+   `NOLOGIN` is airtight and exactly reversible with `unfreezeRuntime`. The seal is a consistent
    snapshot of named tables (per-table row count + SHA-256 over canonical
    ordered row dumps + schema-inventory digest). `src/postgres/cutover.ts`.
-2. **Copy**: INSERT-only into an empty target with
-   `session_replication_role='replica'` (the pg_restore pattern) — user and
-   constraint triggers are suppressed, so derived rows (job outbox, fts
-   mapping, audit) are carried verbatim by the cut instead of regenerated.
-   `OVERRIDING SYSTEM VALUE` preserves `GENERATED ALWAYS AS IDENTITY` values;
-   sequences are resynced (`setval(max)`) after load so post-cut inserts never
-   reuse copied ids. Generated columns are excluded from the insert list and
-   still sealed — a wrong generation expression fails verification.
+2. **Copy**: INSERT-only into an empty target under
+   `ALTER TABLE ... DISABLE TRIGGER USER` — derived-row triggers (job outbox,
+   fts mapping, audit) are suppressed so those rows are carried verbatim by
+   the cut instead of regenerated, while **constraint triggers stay live**:
+   neither Neon nor Supabase grants `session_replication_role` or
+   `DISABLE TRIGGER ALL` (the RI constraint triggers are system triggers), so
+   `copyOrder` topologically sorts parents-first and drops the one intra-cycle
+   FK (`archives` ↔ `lifecycle_receipts`) for the load window, re-adding it
+   afterwards where the `ADD CONSTRAINT` validation itself proves the copied
+   data is consistent. `OVERRIDING SYSTEM VALUE` preserves `GENERATED ALWAYS
+   AS IDENTITY` values; sequences are resynced (`setval(max)`) after load so
+   post-cut inserts never reuse copied ids. Generated columns are excluded
+   from the insert list and still sealed — a wrong generation expression fails
+   verification.
 3. **Provision-seeded tables** (`memory_ops.maintenance_progress`,
    `memory_ops.payload_backfill_progress`, `memory_control.schema_migrations`)
    are never copied; they are reconciliation checks — the seal verifies the
@@ -50,6 +61,48 @@ One consistent cut, sealed, copied, verified — never dual writers.
 - The freeze flips `memory_runtime`'s `rolcanlogin` at the authority and
   restores it; unsafe role names are rejected before any DDL runs.
 
+### Live evidence (2026-09-19)
+
+`postgres-rehearse.mjs --run` against the real clusters, target = fresh
+`memory_rehearsal_cutover` database on the same cluster (both sealed the same
+fixture lineage 1–17; manifest digest identical across providers):
+
+| | sg (Neon `ep-lingering-pine`) | kr-seoul (Supabase pooler) |
+|---|---|---|
+| tables enumerated | 79 | 79 |
+| rows copied | 37 | 198 |
+| provision-seeded | deployment_identity, maintenance_progress, payload_backfill_progress | same |
+| cyclic FK dropped+re-added | `archives_erasure_actor_credential_id_erasure_operation_id_fkey` | same |
+| mismatches | 0 | 0 |
+| manifest sha256 | `ea1038b3…fe417bddc` | identical |
+| freeze→verify total | 104.9s | 15.2s |
+| RPO | 0 (sealed cut) | 0 |
+| runtime unfrozen | true | true |
+
+Post-cut attestation on each target as the runtime login
+(`postgres-attest.mjs --schema-version 17`): `attested:true`,
+`allDenialsHeld:true` — the runtime login on the copied database still cannot
+read auth tables, run DDL, COPY OUT, or ALTER SYSTEM. Evidence JSONs are held
+outside the repository with the ops artifacts.
+
+### Provider constraints discovered live
+
+- `SET session_replication_role='replica'` is denied on Neon and Supabase
+  (`42501`) — neither grants it to any non-superuser role.
+- `ALTER TABLE ... DISABLE TRIGGER ALL` is denied on Neon (`42501`, RI
+  constraint triggers are system triggers); `DISABLE TRIGGER USER` is the
+  portable mechanism.
+- Role membership: ADMIN alone does not satisfy `SET ROLE`; the owner needs
+  `WITH SET TRUE`/`INHERIT TRUE` on the memory roles (Supabase `postgres`
+  self-grants; Neon uses `memory_sg_migrator`).
+- Supabase: direct `db.<ref>.supabase.co` does not resolve on this project —
+  the session pooler (`aws-0-ap-northeast-2.pooler.supabase.com:5432`,
+  `<login>.<ref>` user) is the operator path, and its CA chain is
+  self-signed (pinned TOFU for the rehearsal; the dashboard CA download is
+  the production source).
+- Seoul's deployment database is `postgres` (the project name
+  `MemoryServiceDB` was never a database name).
+
 ## Payload/object layer
 
 Row cuts carry only `(payload_shard_id, payload_object_key, payload_sha256,
@@ -72,10 +125,18 @@ Postgres. The cut therefore runs a parallel object pass:
 
 ## Not yet covered
 
-- **Live rehearsal** on real Neon/Supabase instances, including measured
-  RPO/RTO, TLS-path verification, and the acceptance record — the operator
-  procedure is written in
-  [2026-09-19-cutover-operator-runbook.md](2026-09-19-cutover-operator-runbook.md);
-  it needs real clusters to execute.
+- **Payload object re-home** — the object-store pass reported `skipped` on
+  both live runs (no object store configured in the rehearsal env); the row
+  inventory sealed one 64 KiB external-payload reference but the bytes were
+  not physically re-homed. Needs a real shard credential.
+- **Cross-cluster target** — the rehearsal used a fresh database on the same
+  cluster (`--roles-exist` handles cluster-global role collisions). A real
+  migration to a *new* cluster/provider exercises the full 0001 provisioning
+  path including `CREATE ROLE`.
+- **Fixture residue** — `rehearsal-`-prefixed seed rows remain on both source
+  databases; boundary tables reject deletes by design. Re-sealing before a
+  real cut absorbs them.
 - **Rollback journal** for post-activation regression — rebuild-not-merge is
   rehearsed; a journaled operational record is an ops artifact, not code.
+- **Production-scale RTO** — measured numbers are for the fixture +
+  pre-existing data (37–198 rows); the real cut's RTO scales with row volume.

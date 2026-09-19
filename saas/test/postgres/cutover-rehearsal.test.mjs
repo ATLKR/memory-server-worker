@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { PGlite } from '@electric-sql/pglite';
 import { createPgliteSession } from './pg-database-fixture.mjs';
 import { createHash } from 'node:crypto';
-import { copyTable, exportManifest, freezeRuntime, listRegionalTables, payloadInventory,
+import { copyOrder, copyTable, exportManifest, freezeRuntime, listRegionalTables, payloadInventory,
     sealPayloadObjects, sealTable, unfreezeRuntime, verifyManifest, verifyPayloadObjects } from '../../src/postgres/cutover.ts';
 
 const NOW = 1758000000000;
@@ -55,7 +55,19 @@ test('full-surface enumeration seals every regional table and re-verifies on a f
     for (const table of all)
         if ((await target.query(`SELECT 1 FROM ${table} LIMIT 1`)).rows.length) provisionSeeded.push(table);
     assert.deepEqual(provisionSeeded.sort(), ['memory_ops.maintenance_progress', 'memory_ops.payload_backfill_progress']);
-    for (const table of all) if (!provisionSeeded.includes(table)) await copyTable(source, target, table);
+    // Constraint triggers still fire under DISABLE TRIGGER USER, so the load
+    // follows the parents-first plan; the archives↔lifecycle_receipts cycle is
+    // broken by dropping the intra-cycle FK and re-adding it (validated).
+    const plan = await copyOrder(target, all);
+    // Exactly one edge breaks the archives↔lifecycle_receipts cycle.
+    assert.equal(plan.cyclicConstraints.length, 1);
+    assert.ok(['archives_erasure_actor_credential_id_erasure_operation_id_fkey',
+        'lifecycle_receipts_space_id_archive_id_fkey'].includes(plan.cyclicConstraints[0].name));
+    for (const c of plan.cyclicConstraints)
+        await target.query(`ALTER TABLE ${c.table} DROP CONSTRAINT "${c.name}"`);
+    for (const table of plan.order) if (!provisionSeeded.includes(table)) await copyTable(source, target, table);
+    for (const c of plan.cyclicConstraints)
+        await target.query(`ALTER TABLE ${c.table} ADD CONSTRAINT "${c.name}" ${c.def}`);
     assert.deepEqual(await verifyManifest(target, manifest), []);
 });
 

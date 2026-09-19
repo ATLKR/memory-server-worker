@@ -50,6 +50,18 @@ let env;
 try {
     const parsed = JSON.parse(await readFile(envFile, 'utf8'));
     if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('shape');
+    // "env:NAME" values resolve from the process environment so secrets can be
+    // injected (e.g. pass-cli run) without ever sitting in the file on disk;
+    // "file:PATH" reads a local file (CA PEMs and other non-secret assets).
+    for (const [k, v] of Object.entries(parsed))
+        if (typeof v === 'string' && v.startsWith('env:')) {
+            const resolved = process.env[v.slice(4)];
+            if (!resolved) { process.stderr.write(`Env indirection ${v} for ${k} resolved to nothing.\n`); process.exit(2); }
+            parsed[k] = resolved;
+        } else if (typeof v === 'string' && v.startsWith('file:')) {
+            try { parsed[k] = await readFile(v.slice(5), 'utf8'); }
+            catch { process.stderr.write(`File indirection ${v} for ${k} is unreadable.\n`); process.exit(2); }
+        }
     env = parsed;
 } catch {
     usage('Cannot read the env file or it is not a JSON object.');
