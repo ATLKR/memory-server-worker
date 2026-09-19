@@ -34,6 +34,17 @@ The existing Supabase project `dnhcszbgdzgjpsktjaxn` (MemoryServiceDB,
   rename before applying 0014's grants, otherwise the attested role has no
   privileges.
 
+### Serving precondition: lifecycle journal sync
+
+The regional staleness gate (`lifecycleFreshnessSql` in
+`src/release/authority.ts`) denies every credential whose bound issuer has
+no fresh `memory_ops.lifecycle_apply_head`. A serving region therefore
+**must** run the scheduled `syncLifecycleJournal` against its control
+target — `syncLifecycleJournal` now stamps the head even for issuers whose
+journal is empty, but only when it actually executes. A region deployed
+without `CONTROL_DB` never syncs, and every OAuth-bound account there
+fails closed permanently.
+
 ## 1. Attest both ends first
 
 ```powershell

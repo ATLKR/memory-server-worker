@@ -92,6 +92,17 @@ test('sync applies journal events in order and suspends the subject regionally',
     assert.equal((await regionDb.query(`SELECT count(*) n FROM memory_identity.active_credentials`)).rows[0].n, 1);
 });
 
+test('an empty journal still stamps the issuer apply-head', async t => {
+    const { region } = await regionalDb(t);
+    const { control } = await controlDb(t);
+    // The bound issuer has no pending events; without a stamped head the
+    // staleness gate would deny its accounts indefinitely.
+    assert.equal((await syncLifecycleJournal(control, region)).applied, 0);
+    const head = (await region.prepare(`SELECT applied_sequence AS n, applied_at_ms AS at
+        FROM memory_ops.lifecycle_apply_head WHERE issuer=?`).bind(ISSUER).first());
+    assert.deepEqual(head, { n: 0, at: NOW });
+});
+
 test('email-scoped events apply under their own address key', async t => {
     const { region } = await regionalDb(t);
     const { db: ctl, control } = await controlDb(t);

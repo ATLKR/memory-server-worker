@@ -80,11 +80,21 @@ export async function syncLifecycleJournal(control: Database, region: Database,
         const events = (await control.prepare(`SELECT id, issuer, subject, sequence, kind, address,
                 occurred_at_ms AS "occurredAtMs" FROM memory_ops.lifecycle_events_after(?,?,?)`)
             .bind(issuer, after, limit).all()).results.map(row => event(row));
+        let issuerHead = after;
         for (const e of events) {
             await applyLifecycleEvent(region, e);
             applied += 1;
+            issuerHead = Math.max(issuerHead, e.sequence);
             head = Math.max(head, e.sequence);
         }
+        // A successful empty read is itself the catch-up watermark: an issuer
+        // with no pending events still gets a fresh apply-head, otherwise every
+        // account bound to it would be denied by the staleness gate forever.
+        // A journal read failure propagates before this stamp.
+        await region.prepare(`INSERT INTO memory_ops.lifecycle_apply_head(issuer, applied_sequence, applied_at_ms)
+            VALUES (?,?,memory_control.now_ms())
+            ON CONFLICT (issuer) DO UPDATE SET applied_at_ms = EXCLUDED.applied_at_ms`)
+            .bind(issuer, issuerHead).run();
     }
     return { applied, head };
 }
