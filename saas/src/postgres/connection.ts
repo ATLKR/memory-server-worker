@@ -365,8 +365,14 @@ export function createPostgresConnection(input: PostgresTarget, options: Connect
             if (!Array.isArray(values) || values.some(x => x !== null && !['string', 'number', 'boolean', 'bigint'].includes(typeof x) && !(x instanceof Uint8Array))) throw error('postgres_parameter_invalid');
             numericSafety(values); busy = true;
             try {
-                const statementMs = Math.max(1, Math.floor(Math.min(target.statementTimeoutMs, deadline - performance.now())));
-                await native("SELECT pg_catalog.set_config('statement_timeout',$1,$2), pg_catalog.set_config('lock_timeout',$1,$2)", [String(statementMs), true]);
+                // Savepoint recovery is itself the statement that restores a
+                // failed transaction: it must reach the server without the
+                // ambient timeout preamble, which the aborted transaction
+                // would otherwise reject before the ROLLBACK TO ever ran.
+                if (!rollbackTo) {
+                    const statementMs = Math.max(1, Math.floor(Math.min(target.statementTimeoutMs, deadline - performance.now())));
+                    await native("SELECT pg_catalog.set_config('statement_timeout',$1,$2), pg_catalog.set_config('lock_timeout',$1,$2)", [String(statementMs), true]);
+                }
                 check(); outcome = 'unknown';
                 const value = result<Row>(await native(text, [...values]));
                 if (rollbackTo) transactionFailed = false;
