@@ -29,16 +29,22 @@ Evidence: `residency-sg.json` (ops evidence store, outside repository).
 
 ### kr-seoul — Supabase project `dnhcszbgdzgjpsktjaxn`
 
-Evidence: `residency-seoul.json`.
+Evidence: `residency-seoul.json` + Management API facts (2026-09-19,
+personal-account PAT from the vault).
 
-- **Compute in ap-northeast-2 (Seoul).** Session pooler
-  `aws-0-ap-northeast-2.pooler.supabase.com`; the project region was fixed
-  at creation. The `postgres` database is the deployment database.
-- **WAL archiving is active in-region path**: `archive_mode on`,
-  `archive_command /usr/bin/admin-mgr wal-push` (WAL-G → Supabase-managed
-  object storage). The archive *destination* region is a console item —
-  see gaps.
-- `ssl on` at the compute, `data_checksums on`, `wal_level logical`.
+- **Compute in ap-northeast-2 (Seoul).** Management API: project region
+  `ap-northeast-2`, `ACTIVE_HEALTHY`, created 2026-09-11. Session pooler
+  `aws-0-ap-northeast-2.pooler.supabase.com`. The `postgres` database is
+  the deployment database.
+- **Backup residency proven via API**: `database/backups` reports
+  `region: ap-northeast-2`, `walg_enabled: true`, `pitr_enabled: false`
+  (free tier — no PITR). In-band: `archive_mode on`,
+  `archive_command /usr/bin/admin-mgr wal-push` — consistent.
+- **Cost**: organization `Allen Labs` plan `free` → $0/month for the
+  Supabase tier.
+- `ssl on` at the compute, `data_checksums on`, `wal_level logical`;
+  `ssl_enforcement` API reports enforcement `false` — non-TLS conns are
+  not rejected provider-side (our connections are verify-full).
 - Pooler CA is self-signed — pinned TOFU for rehearsal; production
   evidence needs the dashboard CA download.
 - Database `postgres`, 15 MB. PostgreSQL 17.6 x86_64.
@@ -63,18 +69,26 @@ Post-cut attestation as the runtime login on each target:
 
 ## Not yet evidenced (GA blockers)
 
-1. **Backup/object-store residency** — Neon durable tier region and
-   Supabase WAL-G/PITR destination region are provider-side facts; the
-   in-band probe proves the *pageserver/archiver path* but not the S3
-   bucket region. Needs console screenshot or provider API output.
-2. **Logs residency** — provider log pipelines (Neon logs, Supabase
-   Logflare/drain config) are not SQL-visible. Needs console evidence.
-3. **Cost ≤ $50/month** — neither project's plan/billing tier is
-   SQL-visible. Needs billing-console or API evidence for: Neon plan +
-   compute/storage sizing, Supabase plan, Cloudflare Workers plan.
-4. **Control-plane placement** — open decision 4 in the re-platform plan
+1. **Neon durable-tier region** — the in-band probe proves the
+   *pageserver* is in `ap-southeast-1` (WAL and base backups go there),
+   but Neon's S3 cold-storage region is console/API-only. Needs a Neon
+   API key (console.neon.tech → Account → API keys — not yet in vault).
+2. **Neon plan/cost** — plan tier is not SQL-visible; needs the same
+   API key or console evidence.
+3. **Logs residency** — provider log pipelines (Neon logs, Supabase
+   Logflare/drain config) are not SQL-visible on either side.
+   Needs console evidence.
+4. **Cloudflare Workers plan** — the $50/month budget includes the
+   Workers tier; account billing facts need the CF dashboard or API.
+5. **Control-plane placement** — open decision 4 in the re-platform plan
    (which region hosts it) is undecided; residency proof for the control
    tier can't start until then.
-5. **Supabase PAT** — the vault's `SUPABASE_PAT` field holds a corrupted
-   value (Korean label artifact); Management API evidence needs a fresh
-   token.
+6. **Supabase dashboard CA** — the pinned pooler CA should be replaced
+   with the dashboard-downloaded certificate for production attestation.
+
+### Resolved since first draft
+
+- ~~Supabase PAT~~ — personal-account PAT added to the vault resolves a
+  valid `sbp_` token; Management API evidence collected 2026-09-19.
+- ~~Supabase backup region + plan~~ — `backups.region: ap-northeast-2`,
+  `walg_enabled: true`, org plan `free` ($0/month).
