@@ -6,17 +6,19 @@ billing is still required before GA acceptance can be signed.
 
 ## What is proven in-band (SQL-observable, no console needed)
 
-### sg — Neon `memoryservice-nonseoul`
+### sg — Neon `memoryservicedb-nonseoul` (project `hidden-credit-77904433`)
 
-Evidence: `residency-sg.json` (ops evidence store, outside repository).
+Evidence: `residency-sg.json` + `neon-api-evidence.json` (ops evidence
+store, outside repository).
 
-- **Compute + durable storage in ap-southeast-1.** The endpoint hostname is
-  `ep-lingering-pine-azosommb.c-3.ap-southeast-1.aws.neon.tech` and —
-  stronger — `neon.pageserver_connstring` reports
-  `pageserver-2.cell-3.ap-southeast-1.aws.neon.tech`: the pageserver that
-  owns WAL and base backups is in the Singapore region. WAL never leaves
-  the region in the Neon architecture (compute → regional pageserver →
-  regional object storage).
+- **Project region `aws-ap-southeast-1` (API)** — Neon pins the entire
+  project (compute, pageserver storage, WAL history, S3 durable tier) to
+  the project region; `region_id` is the residency record.
+- **Pageserver in ap-southeast-1 (in-band)** — `neon.pageserver_connstring`
+  reports `pageserver-2.cell-3.ap-southeast-1.aws.neon.tech`: the tier
+  that owns WAL and base backups is in the Singapore region.
+- **Cost**: organization `MemoryServiceDB` plan `free` → $0/month.
+- `history_retention_seconds: 21600` (6 h PITR window, free tier).
 - `branch_id br-silent-term-azdcvcc3`, `compute_id compute-icy-bonus-azem2fg8`,
   `endpoint_id ep-lingering-pine-azosommb` — stable identifiers for the
   console record.
@@ -69,21 +71,20 @@ Post-cut attestation as the runtime login on each target:
 
 ## Not yet evidenced (GA blockers)
 
-1. **Neon durable-tier region** — the in-band probe proves the
-   *pageserver* is in `ap-southeast-1` (WAL and base backups go there),
-   but Neon's S3 cold-storage region is console/API-only. Needs a Neon
-   API key (console.neon.tech → Account → API keys — not yet in vault).
-2. **Neon plan/cost** — plan tier is not SQL-visible; needs the same
-   API key or console evidence.
-3. **Logs residency** — provider log pipelines (Neon logs, Supabase
-   Logflare/drain config) are not SQL-visible on either side.
-   Needs console evidence.
-4. **Cloudflare Workers plan** — the $50/month budget includes the
-   Workers tier; account billing facts need the CF dashboard or API.
-5. **Control-plane placement** — open decision 4 in the re-platform plan
+1. **Logs residency** — provider log pipelines (Neon compute logs,
+   Supabase Logflare/drain config) are not SQL-visible on either side.
+   Neon keeps logs inside the project region by architecture; Supabase
+   in-dashboard logs follow the project region — console confirmation
+   still required for the record.
+2. **Cloudflare Workers plan** — the $50/month budget includes the
+   Workers tier. The vault's Workers deploy token can list the 63 scripts
+   on account `9f9fdfcf` (incl. `memory-server`, `memory-api`,
+   `memory-ui`) but lacks billing scope — subscription facts need the CF
+   dashboard or an account-scoped token.
+3. **Control-plane placement** — open decision 4 in the re-platform plan
    (which region hosts it) is undecided; residency proof for the control
    tier can't start until then.
-6. **Supabase dashboard CA** — the pinned pooler CA should be replaced
+4. **Supabase dashboard CA** — the pinned pooler CA should be replaced
    with the dashboard-downloaded certificate for production attestation.
 
 ### Resolved since first draft
@@ -92,3 +93,6 @@ Post-cut attestation as the runtime login on each target:
   valid `sbp_` token; Management API evidence collected 2026-09-19.
 - ~~Supabase backup region + plan~~ — `backups.region: ap-northeast-2`,
   `walg_enabled: true`, org plan `free` ($0/month).
+- ~~Neon durable-tier region + plan~~ — Neon API: project `region_id
+  aws-ap-southeast-1` covers compute, storage, WAL and the S3 durable
+  tier; org `MemoryServiceDB` plan `free` ($0/month).
