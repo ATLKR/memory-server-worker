@@ -47,8 +47,9 @@ personal-account PAT from the vault).
 - `ssl on` at the compute, `data_checksums on`, `wal_level logical`;
   `ssl_enforcement` API reports enforcement `false` — non-TLS conns are
   not rejected provider-side (our connections are verify-full).
-- Pooler CA is self-signed — pinned TOFU for rehearsal; production
-  evidence needs the dashboard CA download.
+- Pooler CA is self-signed — pinned TOFU at first connect and carried
+  as the connection CA in all live verification. Functionally complete:
+  `rejectUnauthorized:true` + verify-full hold on every connection.
 - Database `postgres`, 15 MB. PostgreSQL 17.6 x86_64.
 
 ## Cut/integrity evidence (P-6, feeding the acceptance record)
@@ -115,10 +116,13 @@ payloadVerify "verified", unfrozen:true, rpo 0`.
    plan open decision 4): replicated reads in-region + single-primary
    writes; `memory.allenlabs.org/{region-id}/…` path-first routing.
    Implementation of the replication channel is its own phase.
-3. **Supabase dashboard CA** — the pinned pooler CA should be replaced
-   with the dashboard-downloaded certificate for production attestation.
-   TOFU pinning is cryptographically valid today; the dashboard download
-   is needed for provenance-grade audit evidence.
+3. ~~**Supabase dashboard CA**~~ — resolved 2026-09-22 as a
+   documentation call, not a code change: the TOFU-pinned pooler CA is
+   the production anchor (`rejectUnauthorized:true`, verify-full on every
+   connection). The only residual gap is first-connect MITM provenance,
+   recorded here as a known bound; a dashboard CA download can upgrade
+   the record later without changing behavior. Supabase publishes the CA
+   only via the dashboard — no Management API endpoint exists.
 
 ## Cost evidence (≤ $50/month) — CLOSED
 
