@@ -15,17 +15,20 @@
 // --seed inserts a small idempotent 'rehearsal-'-prefixed fixture into SOURCE
 // (memory_control.deployment_identity is provision-seeded and never written).
 // --run freezes the source runtime role, seals the full regional surface,
-// INSERT-copies every non-provision-seeded table into an empty target, runs
-// the payload-object pass with a null fetcher (recorded as skipped — no object
-// store is configured), verifies the manifest on the target, then always
-// unfreezes. Evidence is one JSON object; failures print a bounded
-// {"rehearsed":false,"code":...} line and exit 1.
+// INSERT-copies every non-provision-seeded table into an empty target, then
+// handles the payload-object pass: with PAYLOAD_SRC_*/PAYLOAD_TGT_* Supabase
+// Storage config it seals against real object bytes, re-homes each sealed
+// object into the target store, and verifies target-served digests; without
+// it the pass is recorded as skipped. Verifies the manifest on the target,
+// then always unfreezes. Evidence is one JSON object; failures print a
+// bounded {"rehearsed":false,"code":...} line and exit 1.
 
 import { createHash } from 'node:crypto';
 import pg from 'pg';
 import { copyOrder, copyTable, exportManifest, freezeRuntime, listRegionalTables, payloadInventory,
     sealPayloadObjects, unfreezeRuntime, verifyManifest, verifyPayloadObjects }
     from '../src/postgres/cutover.ts';
+import { objectStoreFromEnv } from './postgres-object-store.mjs';
 
 function usage(message) {
     if (message) process.stderr.write(message + '\n');
@@ -163,7 +166,16 @@ async function seed() {
         fail('seeded', e);
     }
     await client.end().catch(() => {});
-    process.stdout.write(JSON.stringify({ seeded: true }) + '\n');
+    // When an object store is configured, the fixture's external payload is
+    // a real object — the seal/re-home pass then exercises actual bytes.
+    const store = objectStoreFromEnv(process.env, 'SRC');
+    if (store) {
+        try {
+            await store.ensureBucket();
+            await store.put('rehearsal/object-1', Buffer.alloc(65536, 0x61));
+        } catch (e) { fail('seeded', e); }
+    }
+    process.stdout.write(JSON.stringify({ seeded: true, payloadObjectUploaded: !!store }) + '\n');
 }
 
 // --run ----------------------------------------------------------------------
@@ -210,8 +222,10 @@ async function run() {
             phase = 'seal';
             const manifest = await exportManifest(source, sdep.d, sdep.r, tables, Date.now());
             const inventory = await payloadInventory(source);
-            const nullFetcher = async () => null;
-            const seal = await sealPayloadObjects(source, nullFetcher);
+            const srcStore = objectStoreFromEnv(process.env, 'SRC');
+            const tgtStore = objectStoreFromEnv(process.env, 'TGT');
+            const srcFetch = srcStore ? (_shard, key) => srcStore.get(key) : async () => null;
+            const seal = await sealPayloadObjects(source, srcFetch);
             const tSeal = Date.now();
             let copiedRows = 0;
             phase = 'copy';
@@ -236,7 +250,21 @@ async function run() {
             if (copyError) throw copyError;
             const tCopy = Date.now();
             phase = 'verify';
-            await verifyPayloadObjects(seal, nullFetcher);
+            // Re-home sealed objects into the target store, then verify what
+            // the target actually serves against the seal digests.
+            let payloadObjectsCopied = 0;
+            if (tgtStore && seal.objects.length) {
+                await tgtStore.ensureBucket();
+                for (const o of seal.objects) {
+                    const body = await srcFetch(o.shard, o.key);
+                    if (!body) throw new Error('payload_source_unavailable');
+                    await tgtStore.put(o.key, body);
+                    payloadObjectsCopied += 1;
+                }
+            }
+            const payloadMismatches = tgtStore
+                ? await verifyPayloadObjects(seal, (_s, key) => tgtStore.get(key))
+                : seal.unresolved;
             const mismatches = await verifyManifest(target, manifest);
             const tVerify = Date.now();
             report = {
@@ -247,7 +275,11 @@ async function run() {
                 manifestSha256: manifest.schemaDigest,
                 mismatches: mismatches.map(m => m.table),
                 payloadObjects: inventory.length,
-                payloadVerify: 'skipped', payloadVerifyDetail: 'no object store configured',
+                payloadSealed: seal.objects.length, payloadUnresolved: seal.unresolved.length,
+                payloadObjectsCopied,
+                payloadVerify: !tgtStore ? 'skipped' : payloadMismatches.length ? 'mismatch' : 'verified',
+                payloadVerifyDetail: !tgtStore ? 'no target object store configured'
+                    : payloadMismatches.length ? `${payloadMismatches.length} object(s) mismatched` : 'all digests match',
                 timings: { freezeMs: tFreeze - t0, enumerateMs: tEnumerate - tFreeze,
                     sealMs: tSeal - tEnumerate, copyMs: tCopy - tSeal, verifyMs: tVerify - tCopy,
                     totalMs: tVerify - t0 },
@@ -260,7 +292,7 @@ async function run() {
         }
         report.unfrozen = !frozen;
         process.stdout.write(JSON.stringify(report) + '\n');
-        if (report.mismatches.length || frozen) process.exitCode = 1;
+        if (report.mismatches.length || report.payloadVerify === 'mismatch' || frozen) process.exitCode = 1;
     } catch (e) {
         process.stdout.write(JSON.stringify({ rehearsed: false, code: boundedCode(e), phase, unfrozen: !frozen }) + '\n');
         process.exitCode = 1;
