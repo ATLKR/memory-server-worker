@@ -76,16 +76,23 @@ Post-cut attestation as the runtime login on each target:
    Neon keeps logs inside the project region by architecture; Supabase
    in-dashboard logs follow the project region — console confirmation
    still required for the record.
-2. **Cloudflare Workers plan** — the $50/month budget includes the
-   Workers tier. The vault's Workers deploy token can list the 63 scripts
-   on account `9f9fdfcf` (incl. `memory-server`, `memory-api`,
-   `memory-ui`) but lacks billing scope — subscription facts need the CF
-   dashboard or an account-scoped token.
-3. **Control-plane placement** — open decision 4 in the re-platform plan
+2. **Control-plane placement** — open decision 4 in the re-platform plan
    (which region hosts it) is undecided; residency proof for the control
    tier can't start until then.
-4. **Supabase dashboard CA** — the pinned pooler CA should be replaced
+3. **Supabase dashboard CA** — the pinned pooler CA should be replaced
    with the dashboard-downloaded certificate for production attestation.
+
+## Cost evidence (≤ $50/month) — CLOSED
+
+| Provider | Evidence | Monthly |
+| --- | --- | --- |
+| Supabase `MemoryServiceDB` (kr-seoul) | API org plan `free` | $0 |
+| Neon `memoryservicedb-nonseoul` (sg) | API org plan `free` | $0 |
+| Cloudflare account `9f9fdfcf` | API subscriptions: `workers_paid` $5/mo, all others $0 (r2, teams, images, free tiers) | $5 |
+| **Total** | | **$5 ≤ $50** |
+
+CF evidence gathered with `CF Billing Evidence Token` (Billing Read on
+the account, minted via the profile token, stored in the vault).
 
 ### Resolved since first draft
 
@@ -96,3 +103,5 @@ Post-cut attestation as the runtime login on each target:
 - ~~Neon durable-tier region + plan~~ — Neon API: project `region_id
   aws-ap-southeast-1` covers compute, storage, WAL and the S3 durable
   tier; org `MemoryServiceDB` plan `free` ($0/month).
+- ~~Cloudflare Workers plan~~ — API subscriptions: `workers_paid`
+  $5/month is the only paid subscription on the account.
