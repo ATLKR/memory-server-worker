@@ -69,18 +69,56 @@ Post-cut attestation as the runtime login on each target:
 `attested:true`, `allDenialsHeld:true` (denials: `pg_authid`,
 `pg_shadow`, public-schema DDL, `COPY TO STDOUT`, `ALTER SYSTEM`).
 
+### Payload object re-home — CLOSED 2026-09-22
+
+`scripts/postgres-object-store.mjs` adds a Supabase Storage REST adapter
+(storage is pinned to the project region). With `PAYLOAD_SRC_*`/
+`PAYLOAD_TGT_*` envs the rehearsal seals real object bytes, re-homes
+each sealed object into the target store, and verifies target-served
+digests; without config the pass records `skipped`.
+
+- kr-seoul: same project (`dnhcszbgdzgjpsktjaxn`, ap-northeast-2),
+  buckets `rehearsal-src`/`rehearsal-tgt`.
+- sg: storage-only Supabase project `zlwvsdgdrbdicgaltxeb` created in
+  `ap-southeast-1` via Management API (Neon has no object tier); buckets
+  `rehearsal-src`/`rehearsal-tgt`.
+
+Live result on both regions (2026-09-22):
+`payloadObjects 1, sealed 1, copied 1, verify "verified" — all digests
+match`, alongside `tables 79, mismatches [], unfrozen true`.
+
+### Cross-cluster fresh-cluster rehearsal — CLOSED 2026-09-22
+
+`rehearse-cross.mjs` (ops store) created a fresh Neon project
+`snowy-mud-13267409` (`aws-ap-southeast-1`, PG 18), provisioned it
+end-to-end — role pre-creation + owner grant (fresh clusters need
+`SET`-capable membership before `CREATE SCHEMA ... AUTHORIZATION` and
+`ALTER DEFAULT PRIVILEGES FOR ROLE` succeed), `--roles-exist` lineage,
+deployment-identity provision — then ran the sealed cut from the live sg
+cluster (`ep-lingering-pine`) to the fresh cluster
+(`ep-super-scene-azppq4wx`):
+
+`rehearsed:true, tables 79, copiedRows 37, mismatches [],
+payloadVerify "verified", unfrozen:true, rpo 0`.
+
 ## Not yet evidenced (GA blockers)
 
-1. **Logs residency** — provider log pipelines (Neon compute logs,
-   Supabase Logflare/drain config) are not SQL-visible on either side.
-   Neon keeps logs inside the project region by architecture; Supabase
-   in-dashboard logs follow the project region — console confirmation
-   still required for the record.
-2. **Control-plane placement** — open decision 4 in the re-platform plan
-   (which region hosts it) is undecided; residency proof for the control
-   tier can't start until then.
+1. **Logs residency** — probed via provider APIs 2026-09-22: Supabase
+   `analytics/endpoints/logs.all` responds 200 on both projects (log
+   analytics infra is provisioned, project-scoped — Supabase runs it
+   project-local), but ad-hoc queries error on the free tier and no
+   dedicated log-drain/log-region endpoint exists (404s). Neon exposes
+   no log API on the free tier — residency rests on its architecture
+   (project region pins compute/storage/logs). Console/support record
+   still required for the final GA record.
+2. ~~**Control-plane placement**~~ — resolved 2026-09-22 (re-platform
+   plan open decision 4): replicated reads in-region + single-primary
+   writes; `memory.allenlabs.org/{region-id}/…` path-first routing.
+   Implementation of the replication channel is its own phase.
 3. **Supabase dashboard CA** — the pinned pooler CA should be replaced
    with the dashboard-downloaded certificate for production attestation.
+   TOFU pinning is cryptographically valid today; the dashboard download
+   is needed for provenance-grade audit evidence.
 
 ## Cost evidence (≤ $50/month) — CLOSED
 
