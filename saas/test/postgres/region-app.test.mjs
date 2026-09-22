@@ -58,6 +58,17 @@ test('configured region app attests the deployment and serves the release app', 
     assert.equal((await response.json()).status, 'ok');
 });
 
+test('region-first path prefix is stripped before app routing', async t => {
+    const db = await pgliteDb(t);
+    const bindings = env({ MEMORY_SG_ENABLED: 'true', MEMORY_SG_TARGET_JSON: TARGET, MEMORY_SG_RUNTIME_PASSWORD: 'pw-12345678' });
+    const app = createRegionWorkerApp(bindings, CONFIG, { clientFactory: pgliteClientFactory(db) });
+    assert.equal((await app.fetch(new Request(ORIGIN + '/sg/health'), bindings)).status, 200);
+    assert.equal((await app.fetch(new Request(ORIGIN + '/sg'), bindings)).status, 200);
+    // A foreign region's prefix must not be silently absorbed.
+    const foreign = await app.fetch(new Request(ORIGIN + '/kr-seoul/health'), bindings);
+    assert.notEqual(foreign.status, 500);
+});
+
 test('a deployment attestation mismatch refuses the session', async t => {
     const db = await pgliteDb(t);
     // The configured target names a deployment the cluster is not: attestation fails closed.

@@ -237,5 +237,20 @@ export function createRegionWorkerApp(env: WorkerEnv, config: RegionDeploymentCo
             return control.withConnection(async controlSession => run(db, createPostgresDatabase(controlSession)));
         });
     };
-    return { fetch: (request: Request, bindings: WorkerEnv) => http.fetch(request, bindings), scheduled };
+    /** Region-first URL routing: `memory.allenlabs.org/{region-id}/…`
+     * routes to this worker by path pattern; strip the own-region prefix
+     * before the app sees the path. Non-prefixed requests (workers.dev,
+     * per-region hostnames) pass through untouched. */
+    const fetch = async (request: Request, bindings: WorkerEnv): Promise<Response> => {
+        if (ready) {
+            const url = new URL(request.url);
+            const prefix = `/${config.region}`;
+            if (url.pathname === prefix) url.pathname = '/';
+            else if (url.pathname.startsWith(prefix + '/')) url.pathname = url.pathname.slice(prefix.length);
+            else return http.fetch(request, bindings);
+            return http.fetch(new Request(url, request), bindings);
+        }
+        return http.fetch(request, bindings);
+    };
+    return { fetch, scheduled };
 }
