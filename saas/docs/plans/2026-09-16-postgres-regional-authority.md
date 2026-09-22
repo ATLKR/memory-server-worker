@@ -278,9 +278,27 @@ activated before its own gate.
 3. ~~**SSO/session placement**~~ — **resolved 2026-09-16:** central SSO
    subject resolution + regional session minting/evaluation against the
    regional account row and enrollment state.
-4. **Control-plane location/provider:** which region hosts it, and does any
-   customer's residency declaration ever cover control-plane rows
-   (org metadata is itself residency-sensitive for strict customers)?
+4. ~~**Control-plane location/provider**~~ — **resolved 2026-09-22:**
+   replicated, not homed. The control-plane read surface (enrollment
+   directory, placement directory, canonical id registry, billing
+   catalog, minimal `memory_control` skeletons) is replicated into every
+   active region's `memory_control` schema via the same
+   journal→apply-head machinery as the lifecycle journal (P-5). Writes —
+   enrollment commands, SSO subject bindings, billing operations, journal
+   appends — stay on a single primary control cluster (one ordering
+   authority). On primary outage, regions keep serving reads inside the
+   existing staleness bound and writes fail closed. Strict-customer
+   caveat: control rows are deliberately minimal by classification, but
+   `provider_identities` subject bindings replicated to all regions is a
+   declared boundary — flag it in residency evidence per region.
+   URL routing decision rides along: region is the first path segment,
+   using the region id verbatim —
+   `memory.allenlabs.org/{region-id}/…` via Cloudflare route patterns
+   (`/kr-seoul/*` → kr-seoul worker, `/sg/*` → sg worker, `/control/*` or
+   unprefixed → control-plane worker). The app strips the prefix before
+   Hono routing. Honest bound: the prefix selects which Worker serves —
+   residency itself is enforced by the attested regional cluster
+   connection, not edge geography.
 5. **Backup/WAL residency evidence** per provider — which managed Postgres
    (Supabase, Neon, others) can actually prove in-region backups and
    operator-access bounds for each tier.
