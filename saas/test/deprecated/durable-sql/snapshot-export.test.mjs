@@ -2,9 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { createHash } from 'node:crypto';
-import { snapshotCanonical, snapshotHash } from '../../src/durable-sql/snapshot.ts';
+import { snapshotCanonical, snapshotHash } from '../../../src/deprecated-durable-sql/snapshot.ts';
 
-const implementation = await import('../../scripts/durable-snapshot.mjs').catch(error => {
+const implementation = await import('../../../scripts/durable-snapshot.mjs').catch(error => {
   if (error.code === 'ERR_MODULE_NOT_FOUND') return {};
   throw error;
 });

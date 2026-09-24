@@ -5,8 +5,8 @@ import { fixture, at } from './db-sqlite.mjs';
 import { createSeoulProjectionPreparer } from '../../src/release/seoul-projection-preparer.ts';
 import { prepareSeoulHeadCandidate } from '../../src/release/seoul-projection-source-codec.ts';
 import { decodeSeoulHeadEvent } from '../../src/release/seoul-projection-head-codec.ts';
-import { createDurableDatabase } from '../../src/durable-sql/client.ts';
-import { SqlDatabaseEngine } from '../../src/durable-sql/engine.ts';
+import { createDurableDatabase } from '../../src/deprecated-durable-sql/client.ts';
+import { SqlDatabaseEngine } from '../../src/deprecated-durable-sql/engine.ts';
 
 const schema = new URL('../../seoul-projection-preparation-schema.sql', import.meta.url);
 const migration = new URL('../../migrations/0029_seoul-projection-preparation-schema.sql', import.meta.url);

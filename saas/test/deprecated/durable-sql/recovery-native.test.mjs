@@ -8,12 +8,12 @@ import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { openLocalDatabase } from '../../dev/sqlite.mjs';
-import { digestToken } from '../../src/identity.ts';
-import { createDurableDatabase } from '../../src/durable-sql/client.ts';
-import { validateSnapshotPlan } from '../../src/durable-sql/snapshot.ts';
-import { encryptSnapshotBackup, decryptSnapshotBackup } from '../../src/durable-sql/backup.ts';
-import { exportDurableSnapshot } from '../../scripts/durable-snapshot.mjs';
+import { openLocalDatabase } from '../../../dev/sqlite.mjs';
+import { digestToken } from '../../../src/identity.ts';
+import { createDurableDatabase } from '../../../src/deprecated-durable-sql/client.ts';
+import { validateSnapshotPlan } from '../../../src/deprecated-durable-sql/snapshot.ts';
+import { encryptSnapshotBackup, decryptSnapshotBackup } from '../../../src/deprecated-durable-sql/backup.ts';
+import { exportDurableSnapshot } from '../../../scripts/durable-snapshot.mjs';
 
 const importKeys = generateKeyPairSync('ed25519'), recoveryKeys = generateKeyPairSync('ed25519');
 const publicKey = keys => keys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url');
@@ -59,7 +59,7 @@ async function bundle(source) {
     sourcefile: 'recovery-native-operator.mjs' }, bundle: true, write: false, format: 'esm', platform: 'neutral',
     target: 'es2022', external: ['cloudflare:workers'] })).outputFiles[0].text;
 }
-const script = await bundle("export {MemorySqlDatabase} from '../../src/durable-sql/object.ts';\n");
+const script = await bundle("export {MemorySqlDatabase} from '../../../src/deprecated-durable-sql/object.ts';\n");
 
 async function native(t, { persist = false, recoveryPublicKey = publicKey(recoveryKeys), initialScript = script } = {}) {
   const path = persist ? await mkdtemp(join(tmpdir(), 'memory-recovery-native-')) : undefined;
@@ -333,7 +333,7 @@ test('native both HOT objects preserve post-import permanent erasure, sparse row
   for (const [number, databaseId] of ['hot-01', 'hot-02'].entries()) {
     const source = f.object(identity(databaseId, 'hot')), target = f.object(identity('restored-' + databaseId, 'hot', 2));
     const raw = new DatabaseSync(':memory:'); t.after(() => raw.close());
-    raw.exec(await readFile(new URL('../../shard-migrations/0001_payloads.sql', import.meta.url), 'utf8'));
+    raw.exec(await readFile(new URL('../../../d1-shard-migrations/0001_payloads.sql', import.meta.url), 'utf8'));
     const content = JSON.stringify({ body: 'Synthetic searchable survivor', source: null, provenance: { originKind: 'user' } });
     const values = id => [id, 'space', id, content, bytesHash(content), Buffer.byteLength(content), Date.now()];
     const insert = 'INSERT INTO payloads(id,space_id,memory_id,content,sha256,bytes,created_at) VALUES(?,?,?,?,?,?,?)';
@@ -533,7 +533,7 @@ export class MemorySqlDatabase extends DurableObject {
 
 test('native deferred freeze can commit after early absence but cannot commit after a source-validated expiry barrier', { timeout: 45000 }, async t => {
   const gatedScript = await bundle(`
-import {MemorySqlDatabase as ActualMemorySqlDatabase} from '../../src/durable-sql/object.ts';
+import {MemorySqlDatabase as ActualMemorySqlDatabase} from '../../../src/deprecated-durable-sql/object.ts';
 const realNow=Date.now.bind(Date),realVerify=crypto.subtle.verify.bind(crypto.subtle);
 let currentTime=null,holdNext=false,held=false,resumeVerification,notifyHeld;
 Date.now=()=>currentTime??realNow();

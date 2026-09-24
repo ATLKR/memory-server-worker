@@ -3,13 +3,13 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { WorkspaceService } from '../src/workspace.ts';
-import { IdentityService } from '../src/identity.ts';
-import { Admin } from '../src/release/admin.ts';
-import { Jobs } from '../src/release/jobs.ts';
-import { createRelease } from '../src/release/extension.ts';
-import { hmac } from '../src/release/util.ts';
-import { applySql } from './apply-sql.mjs';
+import { WorkspaceService } from '../../src/workspace.ts';
+import { IdentityService } from '../../src/identity.ts';
+import { Admin } from '../../src/release/admin.ts';
+import { Jobs } from '../../src/release/jobs.ts';
+import { createRelease } from '../../src/release/extension.ts';
+import { hmac } from '../../src/release/util.ts';
+import { applySql } from '../apply-sql.mjs';
 
 const origin = 'https://memory.example.test', issuer = 'https://auth-api.allen.company';
 const webhookSecret = 'synthetic-native-domain-webhook-secret-'.repeat(2);
@@ -47,9 +47,9 @@ test('native D1 domain verification commands and provider proof revocation', { t
   t.after(() => mf.dispose());
   const db = await mf.getD1Database('DB'), parser = new DatabaseSync(':memory:');
   try {
-    const files = readdirSync(new URL('../migrations/', import.meta.url)).filter(name => /^\d{4}_.*\.sql$/.test(name) && Number(name.slice(0, 4)) <= 21).sort();
+    const files = readdirSync(new URL('../../d1-migrations/', import.meta.url)).filter(name => /^\d{4}_.*\.sql$/.test(name) && Number(name.slice(0, 4)) <= 21).sort();
     assert.equal(files.at(-1), '0021_domain-retention-schema.sql', 'The forward command and retained-proof cleanup migrations must be present');
-    for (const file of files) await applySql(parser, db, readFileSync(new URL('../migrations/' + file, import.meta.url), 'utf8'));
+    for (const file of files) await applySql(parser, db, readFileSync(new URL('../../d1-migrations/' + file, import.meta.url), 'utf8'));
   } finally { parser.close(); }
   const nativeTime = await db.prepare("SELECT CAST(round(unixepoch('subsec')*1000) AS INTEGER) AS at").first();
   assert.ok(Math.abs(nativeTime.at - Date.now()) < 10000, 'Native D1 and service use the real wall clock');

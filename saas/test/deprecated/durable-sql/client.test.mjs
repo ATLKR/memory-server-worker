@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-const implementation = await import('../../src/durable-sql/client.ts').catch(error => {
+const implementation = await import('../../../src/deprecated-durable-sql/client.ts').catch(error => {
   if (error.code === 'ERR_MODULE_NOT_FOUND') return {};
   throw error;
 });

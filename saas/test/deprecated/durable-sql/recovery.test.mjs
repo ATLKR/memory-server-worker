@@ -1,11 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { SqlDatabaseEngine } from '../../src/durable-sql/engine.ts';
+import { SqlDatabaseEngine } from '../../../src/deprecated-durable-sql/engine.ts';
 import { generateKeyPairSync,sign,createHash } from 'node:crypto';
-import { SnapshotImporter,snapshotCanonical } from '../../src/durable-sql/snapshot.ts';
+import { SnapshotImporter,snapshotCanonical } from '../../../src/deprecated-durable-sql/snapshot.ts';
 
-const recoveryModule=await import('../../src/durable-sql/recovery.ts').catch(()=>({}));
+const recoveryModule=await import('../../../src/deprecated-durable-sql/recovery.ts').catch(()=>({}));
 const keys=generateKeyPairSync('ed25519');
 const publicKey=keys.publicKey.export({format:'der',type:'spki'}).toString('base64url');
 const hash=value=>createHash('sha256').update(snapshotCanonical(value)).digest('hex');

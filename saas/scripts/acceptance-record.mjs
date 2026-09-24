@@ -128,7 +128,7 @@ async function sourceSchemas() {
     if (!versions.length) fail('No source migrations found for acceptance.');
     return Math.max(...versions);
   };
-  return { centralSchemaVersion: await version('migrations'), hotSchemaVersion: await version('shard-migrations') };
+  return { centralSchemaVersion: await version('d1-migrations'), hotSchemaVersion: await version('d1-shard-migrations') };
 }
 
 async function privateOutput(path) {

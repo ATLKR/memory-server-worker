@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { generateKeyPairSync, sign, createHash } from 'node:crypto';
-import { SnapshotImporter, snapshotCanonical, validateSnapshotPlan } from '../../src/durable-sql/snapshot.ts';
+import { SnapshotImporter, snapshotCanonical, validateSnapshotPlan } from '../../../src/deprecated-durable-sql/snapshot.ts';
 
 const identity={deploymentId:'snapshot-test',databaseId:'control',kind:'control',epoch:1};
 const name='sql:snapshot-test:control:1', now=Date.now();

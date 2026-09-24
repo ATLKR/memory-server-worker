@@ -4,8 +4,8 @@ import {existsSync,readFileSync} from 'node:fs';
 import {fixture,at} from './db-sqlite.mjs';
 import {WorkspaceService,WorkspaceError} from '../../src/workspace.ts';
 import {createSeoulProjectionCapture} from '../../src/release/seoul-projection-capture.ts';
-import {createDurableDatabase} from '../../src/durable-sql/client.ts';
-import {SqlDatabaseEngine} from '../../src/durable-sql/engine.ts';
+import {createDurableDatabase} from '../../src/deprecated-durable-sql/client.ts';
+import {SqlDatabaseEngine} from '../../src/deprecated-durable-sql/engine.ts';
 import {encodeSeoulAuthoritySnapshot} from '../../src/release/seoul-projection-snapshot-codec.ts';
 
 const issuer='https://auth-api.allen.company';

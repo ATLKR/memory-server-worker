@@ -24,7 +24,7 @@ function target() {
   config.vectorize = [{ binding: 'MEMORY_INDEX', index_name: 'memory-operations-staging-index' }];
   Object.assign(config.vars, { DEPLOYMENT_ENVIRONMENT: 'staging', PUBLIC_ORIGIN: 'https://ops.example.org', STORAGE_MODE: 'sharded', AI_MONTHLY_BUDGET_MICROUSD: '200000', BACKGROUND_JOBS_ENABLED: 'true', STORAGE_BACKFILL_ENABLED: 'false', ENROLLMENT_MODE: 'invite', PAID_BILLING_ENABLED: 'false', STORAGE_SHARDS_JSON: JSON.stringify([{ id: 'a', binding: 'HOT_A', mode: 'active' }, { id: 'b', binding: 'HOT_B', mode: 'draining' }]) });
   config.name = 'operations-test'; config.routes = [{ pattern: 'ops.example.org', custom_domain: true }];
-  config.d1_databases = ['DB', 'HOT_A', 'HOT_B'].map((binding, i) => ({ binding, database_name: `ops-${i}`, database_id: `${i}aaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee`, migrations_dir: i ? 'shard-migrations' : 'migrations' }));
+  config.d1_databases = ['DB', 'HOT_A', 'HOT_B'].map((binding, i) => ({ binding, database_name: `ops-${i}`, database_id: `${i}aaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee`, migrations_dir: i ? 'd1-shard-migrations' : 'd1-migrations' }));
   config.r2_buckets = [{ binding: 'MEMORY_PAYLOADS', bucket_name: 'operations-test-payloads' }];
   config.analytics_engine_datasets = [{ binding: 'METRICS', dataset: 'operations_test_metrics' }];
   return { config, environment: 'staging', hotBindings: ['HOT_A', 'HOT_B'] };
@@ -32,7 +32,7 @@ function target() {
 async function setup(t) {
   const { db } = await fixture(); t.after(() => db.close());
   await db.raw.prepare("INSERT INTO release_heartbeats VALUES('maintenance',?)").run(at);
-  const hot = new DatabaseSync(':memory:'); hot.exec(readFileSync(new URL('../shard-migrations/0001_payloads.sql', import.meta.url), 'utf8')); t.after(() => hot.close());
+  const hot = new DatabaseSync(':memory:'); hot.exec(readFileSync(new URL('../d1-shard-migrations/0001_payloads.sql', import.meta.url), 'utf8')); t.after(() => hot.close());
   const selected = target(), plan = createOperationsPlan(selected, { now: at });
   // The central binding is PostgreSQL (async); HOT shard bindings stay SQLite.
   const collect = async () => Object.fromEntries(await Promise.all(plan.d1.map(async q => [q.id, q.binding === 'DB' ? await db.raw.prepare(q.sql).all(...q.params) : hot.prepare(q.sql).all(...q.params)])));
@@ -124,7 +124,7 @@ test('queue-episode trigger stamps inserts and done/dead restarts, preserving mi
   await db.raw.prepare("UPDATE release_jobs SET queued_at=NULL WHERE id='initial'").run();
   assert.equal((await db.raw.prepare("SELECT queued_at FROM release_jobs WHERE id='initial'").get()).queued_at, null);
   await insert.run('new', 'ingest', 'pending', 0, at, at); assert.equal((await db.raw.prepare("SELECT queued_at FROM release_jobs WHERE id='new'").get()).queued_at, now);
-  assert.equal((await db.raw.prepare('SELECT version FROM release_meta').get()).version, 16);
+  assert.equal((await db.raw.prepare('SELECT version FROM release_meta').get()).version, 18);
 });
 test('routine completed-delete reconciliation starts a fresh episode and retries preserve its real age', async t => {
   const f = await setup(t), store = new MemoryStore(f.db, () => at), memory = await store.create('a'.repeat(64), 's1', { body: 'completed content' }, 'episode-create');

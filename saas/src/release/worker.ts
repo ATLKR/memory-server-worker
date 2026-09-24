@@ -4,7 +4,7 @@ import { readSettings } from '../config.ts';
 import { IdentityService } from '../identity.ts';
 import type { PublicKeyCache } from '../auth.ts';
 import type { ReleaseEnv, WorkerEnv } from './types.ts';
-import { resolveReleaseEnv } from '../durable-sql/runtime.ts';
+import { resolveReleaseEnv } from '../deprecated-durable-sql/runtime.ts';
 import { createRelease } from './extension.ts';
 import { json } from './util.ts';
 import { recordMetric } from './telemetry.ts';

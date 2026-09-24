@@ -3,14 +3,14 @@ import assert from 'node:assert/strict';
 import { readFileSync,readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { Miniflare,convertV4MiniflareOptions } from 'miniflare';
-import { applySql } from './apply-sql.mjs';
-import { suspendedOwnerFixture,sharesRejectSuspendedOwner,queuedProvidersRejectSuspendedPersonalOwner,bufferedMcpRejectsSuspendedOwner } from '../release-validation/tests/suspended-owner-scenarios.mjs';
+import { applySql } from '../apply-sql.mjs';
+import { suspendedOwnerFixture,sharesRejectSuspendedOwner,queuedProvidersRejectSuspendedPersonalOwner,bufferedMcpRejectsSuspendedOwner } from '../../release-validation/tests/suspended-owner-scenarios.mjs';
 
 test('native D1 applies lifecycle owner state to shared disclosure and provider work',{timeout:180000},async t=>{
  const mf=new Miniflare(convertV4MiniflareOptions({name:'suspended-owner-native',modules:true,compatibilityDate:'2026-09-08',compatibilityFlags:['nodejs_compat'],
   script:'export default {fetch(){return new Response("synthetic native owner fixture");}}',d1Databases:['DB'],outboundService:()=>new Response('Outbound disabled',{status:503})}));
  t.after(()=>mf.dispose());const db=await mf.getD1Database('DB'),parser=new DatabaseSync(':memory:');
- try{for(const name of readdirSync(new URL('../migrations/',import.meta.url)).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort())await applySql(parser,db,readFileSync(new URL('../migrations/'+name,import.meta.url),'utf8'));}finally{parser.close();}
+ try{for(const name of readdirSync(new URL('../../d1-migrations/',import.meta.url)).filter(name=>/^\d{4}_.+\.sql$/.test(name)).sort())await applySql(parser,db,readFileSync(new URL('../../d1-migrations/'+name,import.meta.url),'utf8'));}finally{parser.close();}
  const f=await suspendedOwnerFixture(db,Date.now);
  await t.test('signed suspension denies accepted/pending shares and preserves independent organization',()=>sharesRejectSuspendedOwner(f));
  await t.test('queued personal content is never newly sent to providers',()=>queuedProvidersRejectSuspendedPersonalOwner(f));

@@ -5,8 +5,8 @@ import {fixture,at} from './db-sqlite.mjs';
 import {WorkspaceService,WorkspaceError} from '../../src/workspace.ts';
 import {createSeoulProjectionCapture} from '../../src/release/seoul-projection-capture.ts';
 import {parseSeoulAuthoritySourceRow} from '../../src/release/seoul-projection-source-codec.ts';
-import {createDurableDatabase} from '../../src/durable-sql/client.ts';
-import {SqlDatabaseEngine} from '../../src/durable-sql/engine.ts';
+import {createDurableDatabase} from '../../src/deprecated-durable-sql/client.ts';
+import {SqlDatabaseEngine} from '../../src/deprecated-durable-sql/engine.ts';
 
 const issuer='https://auth-api.allen.company';
 for(const recursive of ['ON','OFF'])for(const command of ['invite','member','issue','revoke'])test('captured dirty revision survives later Workspace '+command+'; '+recursive,async t=>{

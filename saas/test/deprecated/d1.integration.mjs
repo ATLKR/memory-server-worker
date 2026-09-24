@@ -4,22 +4,22 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { parse } from 'jsonc-parser';
-import { WorkspaceService } from '../src/workspace.ts';
-import { MemoryService } from '../src/memory.ts';
-import { Jobs } from '../src/release/jobs.ts';
-import { Billing } from '../src/release/billing.ts';
-import { createRelease } from '../src/release/extension.ts';
-import { digest } from '../src/release/util.ts';
-import { applySql } from './apply-sql.mjs';
+import { WorkspaceService } from '../../src/workspace.ts';
+import { MemoryService } from '../../src/memory.ts';
+import { Jobs } from '../../src/release/jobs.ts';
+import { Billing } from '../../src/release/billing.ts';
+import { createRelease } from '../../src/release/extension.ts';
+import { digest } from '../../src/release/util.ts';
+import { applySql } from '../apply-sql.mjs';
 
-const config = parse(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'));
+const config = parse(readFileSync(new URL('../../wrangler.jsonc', import.meta.url), 'utf8'));
 // This suite covers populated inline upgrades; storage-runtime.integration.mjs
 // separately exercises native multi-HOT/R2 bindings and distributed writes.
 const inlineBindings = { ...config.vars, STORAGE_MODE: 'inline', BACKGROUND_JOBS_ENABLED: 'false' };
 delete inlineBindings.STORAGE_SHARDS_JSON;
 const mf = new Miniflare(convertV4MiniflareOptions({
   name: 'saas-product-integration', modules: true,
-  scriptPath: fileURLToPath(new URL('../.local/build/worker.js', import.meta.url)),
+  scriptPath: fileURLToPath(new URL('../../.local/build/worker.js', import.meta.url)),
   compatibilityDate: config.compatibility_date, compatibilityFlags: config.compatibility_flags,
   d1Databases: ['DB'], bindings: inlineBindings,
   ratelimits: { REQUEST_LIMITER: { namespace_id: '2086090801', simple: { limit: 120, period: 60 } } },
@@ -35,7 +35,7 @@ try {
     await db.prepare('UPDATE memories SET revision=2,deleted_at=?,updated_at=? WHERE id=?').bind(at, at, id).run();
     return { id, body, revision: 2 };
   }
-  for (const file of ['schema.sql', 'memory-schema.sql', 'product-schema.sql', 'auth-schema.sql']) parser.exec(readFileSync(new URL(`../${file}`, import.meta.url), 'utf8'));
+  for (const file of ['schema.sql', 'memory-schema.sql', 'product-schema.sql', 'auth-schema.sql']) parser.exec(readFileSync(new URL(`../../${file}`, import.meta.url), 'utf8'));
   for (const row of parser.prepare('SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY rowid').all()) await db.prepare(row.sql).run();
   const baselineLastRow = parser.prepare('SELECT max(rowid) AS id FROM sqlite_master').get().id;
   const workspace = new WorkspaceService(db);
@@ -45,7 +45,7 @@ try {
   const ownerEmail = await db.prepare('SELECT id FROM account_emails WHERE account_id=?').bind(owner.accountId).first();
   const organization = await workspace.createOrganization(owner.token, { name: 'D1 team', emailId: ownerEmail.id });
   // Apply the forward migration to a populated four-migration D1 database.
-  parser.exec(readFileSync(new URL('../migrations/0005_hierarchy-schema.sql', import.meta.url), 'utf8'));
+  parser.exec(readFileSync(new URL('../../d1-migrations/0005_hierarchy-schema.sql', import.meta.url), 'utf8'));
   for (const row of parser.prepare('SELECT sql FROM sqlite_master WHERE sql IS NOT NULL AND rowid>? ORDER BY rowid').all(baselineLastRow)) await db.prepare(row.sql).run();
   assert.equal((await workspace.snapshot(owner.token)).organizations[0].parentId, null);
   const invite = await workspace.createInvite(owner.token, organization.id, { email: 'guest@example.org', role: 'admin' });
@@ -59,13 +59,13 @@ try {
   const original = new MemoryService(db);
   const historical = await original.create(key.token, organization.spaceId, { body: 'Before release migration' });
   await original.update(key.token, organization.spaceId, historical.id, { body: 'Preserved populated revision', expectedRevision: 1 });
-  await applySql(parser, db, readFileSync(new URL('../migrations/0006_release-schema.sql', import.meta.url), 'utf8'));
-  await applySql(parser, db, readFileSync(new URL('../migrations/0007_maintenance-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0006_release-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0007_maintenance-schema.sql', import.meta.url), 'utf8'));
   const checkoutPool = 'org:' + organization.id, checkoutAt = Date.now();
   await db.prepare(`INSERT INTO release_checkout_requests(id,pool_id,price_id,operation_key,created_at,expires_at)
     VALUES('pre-eight-checkout',?,'price_test','pre-eight',?,?)`).bind(checkoutPool, checkoutAt, checkoutAt + 2100000).run();
   const preEightCheckout = await db.prepare("SELECT * FROM release_checkout_requests WHERE id='pre-eight-checkout'").first();
-  await applySql(parser, db, readFileSync(new URL('../migrations/0008_checkout-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0008_checkout-schema.sql', import.meta.url), 'utf8'));
   assert.deepEqual(await db.prepare("SELECT * FROM release_checkout_requests WHERE id='pre-eight-checkout'").first(),
     { ...preEightCheckout, checkout_attempted: 1 });
   await assert.rejects(() => db.prepare("UPDATE release_checkout_requests SET checkout_attempted=0 WHERE id='pre-eight-checkout'").run(), /immutable/);
@@ -79,14 +79,14 @@ try {
   await db.prepare("INSERT INTO release_vector_refs(memory_id,vector_id,revision) VALUES(?,'pre-nine-retained-ref',1)").bind(historical.id).run();
   const preNineJobs = (await db.prepare('SELECT * FROM release_jobs ORDER BY id').all()).results;
   const preNineRefs = (await db.prepare('SELECT * FROM release_vector_refs ORDER BY vector_id').all()).results;
-  await applySql(parser, db, readFileSync(new URL('../migrations/0009_job-progress-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0009_job-progress-schema.sql', import.meta.url), 'utf8'));
   assert.deepEqual((await db.prepare('SELECT * FROM release_jobs ORDER BY id').all()).results,
     preNineJobs.map(job => ({ ...job, next_chunk: 0, cleanup_cursor: '' })));
   assert.deepEqual((await db.prepare('SELECT * FROM release_vector_refs ORDER BY vector_id').all()).results, preNineRefs);
   assert.equal((await db.prepare('SELECT version FROM release_meta').first()).version, 9);
   const preTenCheckout = (await db.prepare('SELECT * FROM release_checkout_requests ORDER BY id').all()).results;
   const preTenMemberships = (await db.prepare('SELECT * FROM memberships ORDER BY id').all()).results;
-  await applySql(parser, db, readFileSync(new URL('../migrations/0010_protocol-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0010_protocol-schema.sql', import.meta.url), 'utf8'));
   assert.deepEqual((await db.prepare('SELECT * FROM release_checkout_requests ORDER BY id').all()).results, preTenCheckout);
   assert.deepEqual((await db.prepare('SELECT * FROM memberships ORDER BY id').all()).results, preTenMemberships);
   assert.equal((await db.prepare('SELECT count(*) AS n FROM release_checkout_closures').first()).n, 0);
@@ -96,7 +96,7 @@ try {
   const beforePagination = new Map();
   for (const table of paginationTables)
     beforePagination.set(table, (await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results);
-  await applySql(parser, db, readFileSync(new URL('../migrations/0011_pagination-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0011_pagination-schema.sql', import.meta.url), 'utf8'));
   for (const table of paginationTables)
     assert.deepEqual((await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results, beforePagination.get(table));
   const paginationIndexes = (await db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name IN ('release_audit_export','release_memories_live_created','release_memories_trash_created','release_shares_recipient_page') ORDER BY name").all()).results.map(row => row.name);
@@ -108,7 +108,7 @@ try {
     beforeLookup.set(table, (await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results);
   const beforeLookupCredentials = (await db.prepare('SELECT * FROM active_credentials ORDER BY id').all()).results;
   const beforeLookupFts = (await db.prepare('SELECT memory_id,space_id,body FROM release_fts ORDER BY memory_id').all()).results;
-  await applySql(parser, db, readFileSync(new URL('../migrations/0012_lookup-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0012_lookup-schema.sql', import.meta.url), 'utf8'));
   for (const table of lookupTables)
     assert.deepEqual((await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results, beforeLookup.get(table));
   assert.deepEqual((await db.prepare('SELECT * FROM active_credentials ORDER BY id').all()).results, beforeLookupCredentials);
@@ -124,7 +124,7 @@ try {
   const beforeKeyLookup = new Map();
   for (const table of keyLookupTables)
     beforeKeyLookup.set(table, (await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results);
-  await applySql(parser, db, readFileSync(new URL('../migrations/0013_key-lookup-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0013_key-lookup-schema.sql', import.meta.url), 'utf8'));
   for (const table of keyLookupTables)
     assert.deepEqual((await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results, beforeKeyLookup.get(table));
   assert.equal((await db.prepare('SELECT version FROM release_meta').first()).version, 13);
@@ -146,7 +146,7 @@ try {
     beforeTenantQueue.set(table, (await db.prepare('SELECT ' + names + ' FROM ' + table + ' ORDER BY rowid').all()).results);
   }
   const beforeTenantQueueFts = (await db.prepare('SELECT rowid,memory_id,space_id,body FROM release_fts ORDER BY rowid').all()).results;
-  await applySql(parser, db, readFileSync(new URL('../migrations/0014_tenant-queue-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0014_tenant-queue-schema.sql', import.meta.url), 'utf8'));
   for (const table of tenantQueueTables)
     assert.deepEqual((await db.prepare('SELECT ' + tenantQueueColumns.get(table) + ' FROM ' + table + ' ORDER BY rowid').all()).results, beforeTenantQueue.get(table));
   assert.deepEqual((await db.prepare('SELECT rowid,memory_id,space_id,body FROM release_fts ORDER BY rowid').all()).results, beforeTenantQueueFts);
@@ -155,7 +155,7 @@ try {
   for (const table of tenantQueueTables)
     beforeWorkspaceLookup.set(table, (await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results);
   const vectorSweepBeforeLookup = await db.prepare("SELECT * FROM release_maintenance_progress WHERE name='vector_resweep'").first();
-  await applySql(parser, db, readFileSync(new URL('../migrations/0015_workspace-lookup-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0015_workspace-lookup-schema.sql', import.meta.url), 'utf8'));
   for (const table of tenantQueueTables)
     assert.deepEqual((await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results, beforeWorkspaceLookup.get(table));
   assert.deepEqual(await db.prepare("SELECT * FROM release_maintenance_progress WHERE name='vector_resweep'").first(), vectorSweepBeforeLookup);
@@ -168,7 +168,7 @@ try {
     retrievalColumns.set(table, names);
     beforeRetrieval.set(table, (await db.prepare('SELECT ' + names + ' FROM ' + table + ' ORDER BY rowid').all()).results);
   }
-  await applySql(parser, db, readFileSync(new URL('../migrations/0016_retrieval-progress-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0016_retrieval-progress-schema.sql', import.meta.url), 'utf8'));
   for (const table of retrievalTables)
     assert.deepEqual((await db.prepare('SELECT ' + retrievalColumns.get(table) + ' FROM ' + table + ' ORDER BY rowid').all()).results, beforeRetrieval.get(table));
   assert.equal((await db.prepare("SELECT count(*) AS n FROM release_jobs WHERE cleanup_pending<>'[]'").first()).n, 0);
@@ -179,7 +179,7 @@ try {
     reconciliationColumns.set(table, names);
     beforeReconciliation.set(table, (await db.prepare('SELECT ' + names + ' FROM ' + table + ' ORDER BY rowid').all()).results);
   }
-  await applySql(parser, db, readFileSync(new URL('../migrations/0017_vector-reconciliation-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0017_vector-reconciliation-schema.sql', import.meta.url), 'utf8'));
   for (const table of retrievalTables)
     assert.deepEqual((await db.prepare('SELECT ' + reconciliationColumns.get(table) + ' FROM ' + table + ' ORDER BY rowid').all()).results, beforeReconciliation.get(table));
   assert.equal((await db.prepare('SELECT count(*) AS n FROM release_jobs WHERE cleanup_retry_at<>0 OR cleanup_retry_delay<>60000').first()).n, 0);
@@ -187,7 +187,7 @@ try {
   const outboundTables = [...retrievalTables, 'release_shares'], beforeOutbound = new Map();
   for (const table of outboundTables)
     beforeOutbound.set(table, (await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results);
-  await applySql(parser, db, readFileSync(new URL('../migrations/0018_outbound-share-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0018_outbound-share-schema.sql', import.meta.url), 'utf8'));
   for (const table of outboundTables)
     assert.deepEqual((await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results, beforeOutbound.get(table));
   assert.equal((await db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='index' AND name='release_shares_space_created'").first()).n, 1);
@@ -197,7 +197,7 @@ try {
   const beforeExecution = new Map();
   for (const table of executionTables)
     beforeExecution.set(table, (await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results);
-  await applySql(parser, db, readFileSync(new URL('../migrations/0019_execution-time-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0019_execution-time-schema.sql', import.meta.url), 'utf8'));
   for (const table of executionTables)
     assert.deepEqual((await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results, beforeExecution.get(table));
   assert.equal((await db.prepare('SELECT version FROM release_meta').first()).version, 19);
@@ -219,7 +219,7 @@ try {
   for (const table of domainUpgradeTables)
     beforeDomainUpgrade.set(table, (await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results);
   const beforeDomainUpgradeAt = Date.now();
-  await applySql(parser, db, readFileSync(new URL('../migrations/0020_domain-verification-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0020_domain-verification-schema.sql', import.meta.url), 'utf8'));
   const afterDomainUpgradeAt = Date.now();
   for (const table of domainUpgradeTables) {
     const actual = (await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results;
@@ -233,21 +233,21 @@ try {
   const beforeDomainRetention = new Map();
   for (const table of [...domainUpgradeTables, 'release_domain_verifications'])
     beforeDomainRetention.set(table, (await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results);
-  await applySql(parser, db, readFileSync(new URL('../migrations/0021_domain-retention-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0021_domain-retention-schema.sql', import.meta.url), 'utf8'));
   for (const [table, previous] of beforeDomainRetention)
     assert.deepEqual((await db.prepare('SELECT * FROM ' + table + ' ORDER BY rowid').all()).results, previous);
   assert.equal((await db.prepare("SELECT count(*) AS n FROM sqlite_master WHERE type='index' AND name='release_domains_pending_expiry'").first()).n, 1);
   assert.equal((await db.prepare('SELECT version FROM release_meta').first()).version, 21);
-  await applySql(parser, db, readFileSync(new URL('../migrations/0022_payload-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0022_payload-schema.sql', import.meta.url), 'utf8'));
   assert.equal((await db.prepare('SELECT version FROM release_meta').first()).version, 22);
-  await applySql(parser, db, readFileSync(new URL('../migrations/0023_operational-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0023_operational-schema.sql', import.meta.url), 'utf8'));
   assert.equal((await db.prepare('SELECT version FROM release_meta').first()).version, 23);
-  await applySql(parser, db, readFileSync(new URL('../migrations/0024_lifecycle-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0024_lifecycle-schema.sql', import.meta.url), 'utf8'));
   assert.equal((await db.prepare('SELECT version FROM release_meta').first()).version, 24);
   const queueCreatedAt = Date.now() - 86400000;
   await db.prepare("INSERT INTO release_jobs(id,kind,state,attempt,available_at,created_at) VALUES('native-queue-initial','upsert','pending',0,?,?),('native-queue-retry','delete','pending',2,?,?),('native-queue-completed','delete','done',0,?,?)")
     .bind(queueCreatedAt, queueCreatedAt, Date.now(), queueCreatedAt, Date.now(), queueCreatedAt).run();
-  await applySql(parser, db, readFileSync(new URL('../migrations/0025_queue-episode-schema.sql', import.meta.url), 'utf8'));
+  await applySql(parser, db, readFileSync(new URL('../../d1-migrations/0025_queue-episode-schema.sql', import.meta.url), 'utf8'));
   assert.equal((await db.prepare('SELECT version FROM release_meta').first()).version, 25);
   assert.equal((await db.prepare("SELECT queued_at FROM release_jobs WHERE id='native-queue-initial'").first()).queued_at, queueCreatedAt);
   assert.equal((await db.prepare("SELECT queued_at FROM release_jobs WHERE id='native-queue-retry'").first()).queued_at, null);

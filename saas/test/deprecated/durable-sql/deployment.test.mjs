@@ -4,8 +4,8 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { parse } from 'jsonc-parser';
-import { loadDeploymentConfiguration, deploymentFingerprint, PROJECT_DIRECTORY } from '../../scripts/deployment-config.mjs';
-import { runDeploymentCommand } from '../../scripts/deployment-command.mjs';
+import { loadDeploymentConfiguration, deploymentFingerprint, PROJECT_DIRECTORY } from '../../../scripts/deployment-config.mjs';
+import { runDeploymentCommand } from '../../../scripts/deployment-command.mjs';
 
 const base = parse(await readFile(join(PROJECT_DIRECTORY, 'wrangler.jsonc'), 'utf8'));
 function durableConfig(environment = 'production') {
@@ -66,7 +66,7 @@ for (const backend of ['d1', 'durable']) test(`${backend} SQL maintenance accept
       config.vars.MEMORY_SQL_BACKEND = 'd1';
       for (const key of ['MEMORY_SQL_DEPLOYMENT_ID', 'MEMORY_SQL_EPOCH', 'MEMORY_SQL_DATABASES_JSON']) delete config.vars[key];
       config.vars.STORAGE_MODE = 'inline'; delete config.vars.STORAGE_SHARDS_JSON;
-      config.d1_databases = [{ binding: 'DB', database_name: 'legacy-fixture', database_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', migrations_dir: 'migrations' }];
+      config.d1_databases = [{ binding: 'DB', database_name: 'legacy-fixture', database_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', migrations_dir: 'd1-migrations' }];
     }
     return config;
   }
@@ -145,7 +145,7 @@ test('staging cannot reuse production SQL deployment identity even with differen
 test('legacy D1 mode rejects dormant durable identity variables rather than hiding a future switch', async t => {
   for (const mutate of [c => { c.vars.MEMORY_SQL_BACKEND = 'd1'; }, c => { delete c.vars.MEMORY_SQL_BACKEND; }]) {
     const config = durableConfig('staging'); mutate(config);
-    config.d1_databases = [{ binding: 'DB', database_name: 'legacy-fixture', database_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', migrations_dir: 'migrations' }];
+    config.d1_databases = [{ binding: 'DB', database_name: 'legacy-fixture', database_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', migrations_dir: 'd1-migrations' }];
     await assert.rejects((await fixture(t, config)).load(), /durable|SQL/i);
   }
 });
@@ -153,7 +153,7 @@ test('D1 prepare phase can declare a local SQL namespace without activating dura
   const config = durableConfig('staging'); config.vars.MEMORY_SQL_BACKEND = 'd1';
   for (const key of ['MEMORY_SQL_DEPLOYMENT_ID', 'MEMORY_SQL_EPOCH', 'MEMORY_SQL_DATABASES_JSON']) delete config.vars[key];
   config.vars.STORAGE_MODE = 'inline'; delete config.vars.STORAGE_SHARDS_JSON;
-  config.d1_databases = [{ binding: 'DB', database_name: 'legacy-fixture', database_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', migrations_dir: 'migrations' }];
+  config.d1_databases = [{ binding: 'DB', database_name: 'legacy-fixture', database_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', migrations_dir: 'd1-migrations' }];
   assert.equal((await (await fixture(t, config)).load()).sqlBackend, 'd1');
 });
 

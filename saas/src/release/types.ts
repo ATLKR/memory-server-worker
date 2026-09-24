@@ -91,7 +91,7 @@ export interface ReleaseEnv extends StorageEnv {
     MEMORY_SQL_DEPLOYMENT_ID?: string;
     MEMORY_SQL_EPOCH?: string;
     MEMORY_SQL_DATABASES_JSON?: string;
-    MEMORY_SQL?: { getByName(name: string): import('../durable-sql/types.ts').DurableSqlStub };
+    MEMORY_SQL?: { getByName(name: string): import('../deprecated-durable-sql/types.ts').DurableSqlStub };
     /** Transitional consent runtime: identity authority still uses DB. */
     MEMORY_CONSENT_LEDGER?: import('../routing/ledger-types.ts').RoutingLedger;
     MEMORY_ROUTING_ENABLED?: 'true' | 'false';

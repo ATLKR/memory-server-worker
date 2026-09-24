@@ -3,16 +3,16 @@ import assert from 'node:assert/strict';
 import { readFileSync, readdirSync } from 'node:fs';
 import { DatabaseSync } from 'node:sqlite';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { PayloadStore } from '../src/release/payloads.ts';
-import { canonical } from '../src/release/util.ts';
-import { ftsQuery, Search } from '../src/release/search.ts';
-import { applySql } from './apply-sql.mjs';
-import { WorkspaceService } from '../src/workspace.ts';
-import { MemoryStore } from '../src/release/memory.ts';
-import { PayloadMaintenance } from '../src/release/payload-maintenance.ts';
-import { LegacyBackfill } from '../src/release/payload-backfill.ts';
-import { Ingest } from '../src/release/ingest.ts';
-import { Transfers } from '../src/release/transfer.ts';
+import { PayloadStore } from '../../src/release/payloads.ts';
+import { canonical } from '../../src/release/util.ts';
+import { ftsQuery, Search } from '../../src/release/search.ts';
+import { applySql } from '../apply-sql.mjs';
+import { WorkspaceService } from '../../src/workspace.ts';
+import { MemoryStore } from '../../src/release/memory.ts';
+import { PayloadMaintenance } from '../../src/release/payload-maintenance.ts';
+import { LegacyBackfill } from '../../src/release/payload-backfill.ts';
+import { Ingest } from '../../src/release/ingest.ts';
+import { Transfers } from '../../src/release/transfer.ts';
 
 const content = { body: '₿budget 🫠alpha x🫠y cafe\u0301ine', source: 'Private source', provenance: { originKind: 'user' } };
 const code = value => error => error.code === value;
@@ -28,7 +28,7 @@ test('native physical D1 payload shards and private R2', { timeout: 180000 }, as
     const first = await mf.getD1Database('HOT_ONE'), second = await mf.getD1Database('HOT_TWO'), bucket = await mf.getR2Bucket('MEMORY_PAYLOADS');
     for (const db of [first, second]) {
         const parser = new DatabaseSync(':memory:');
-        try { await applySql(parser, db, readFileSync(new URL('../shard-migrations/0001_payloads.sql', import.meta.url), 'utf8')); }
+        try { await applySql(parser, db, readFileSync(new URL('../../d1-shard-migrations/0001_payloads.sql', import.meta.url), 'utf8')); }
         finally { parser.close(); }
     }
     const configuration = [{ id: 'one', binding: 'HOT_ONE', mode: 'active' }, { id: 'two', binding: 'HOT_TWO', mode: 'active' }];
@@ -137,12 +137,12 @@ test('native physical D1 payload shards and private R2', { timeout: 180000 }, as
     await t.test('native central publication, retained history and erasure operate over actual external providers', async () => {
         const db = await mf.getD1Database('DB'), parser = new DatabaseSync(':memory:');
         try {
-            const migrations = readdirSync(new URL('../migrations/', import.meta.url)).filter(file => /^\d{4}_.*\.sql$/.test(file) && Number(file.slice(0, 4)) <= 21).sort();
-            for (const file of migrations) await applySql(parser, db, readFileSync(new URL('../migrations/' + file, import.meta.url), 'utf8'));
-            await applySql(parser, db, readFileSync(new URL('../payload-schema.sql', import.meta.url), 'utf8'));
-            await applySql(parser, db, readFileSync(new URL('../operational-schema.sql', import.meta.url), 'utf8'));
-            await applySql(parser, db, readFileSync(new URL('../lifecycle-schema.sql', import.meta.url), 'utf8'));
-            await applySql(parser, db, readFileSync(new URL('../queue-episode-schema.sql', import.meta.url), 'utf8'));
+            const migrations = readdirSync(new URL('../../d1-migrations/', import.meta.url)).filter(file => /^\d{4}_.*\.sql$/.test(file) && Number(file.slice(0, 4)) <= 21).sort();
+            for (const file of migrations) await applySql(parser, db, readFileSync(new URL('../../d1-migrations/' + file, import.meta.url), 'utf8'));
+            await applySql(parser, db, readFileSync(new URL('../../payload-schema.sql', import.meta.url), 'utf8'));
+            await applySql(parser, db, readFileSync(new URL('../../operational-schema.sql', import.meta.url), 'utf8'));
+            await applySql(parser, db, readFileSync(new URL('../../lifecycle-schema.sql', import.meta.url), 'utf8'));
+            await applySql(parser, db, readFileSync(new URL('../../queue-episode-schema.sql', import.meta.url), 'utf8'));
         } finally { parser.close(); }
         const workspace = new WorkspaceService(db), identity = await workspace.signIn({ issuer: 'https://auth-api.allen.company', subject: 'native-storage-owner',
             email: 'storage-owner@example.test', emailVerified: true, permission: 'write', expiresAt: Date.now() + 900000 });
@@ -244,7 +244,7 @@ test('native physical D1 payload shards and private R2', { timeout: 180000 }, as
         await memories.remove(identity.token, space.id, trash.id, 1, 'native-recovery-delete');
         const recoveredOne = await mf.getD1Database('RECOVERED_ONE'), recoveredTwo = await mf.getD1Database('RECOVERED_TWO');
         for (const hot of [recoveredOne, recoveredTwo]) { const parser = new DatabaseSync(':memory:');
-            try { await applySql(parser, hot, readFileSync(new URL('../shard-migrations/0001_payloads.sql', import.meta.url), 'utf8')); } finally { parser.close(); } }
+            try { await applySql(parser, hot, readFileSync(new URL('../../d1-shard-migrations/0001_payloads.sql', import.meta.url), 'utf8')); } finally { parser.close(); } }
         const recoveredEnv = { ...env, DB: db, HOT_ONE: recoveredOne, HOT_TWO: recoveredTwo }, recoveredPayloads = new PayloadStore(recoveredEnv), recovered = new MemoryStore(db, Date.now, recoveredPayloads);
         const restored = await recovered.restore(identity.token, space.id, trash.id, 2, 'native-recovery-restore');
         assert.equal(restored.body, 'recoverableword native retained trash');

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import { buildWriteFence, verifyWriteFence, fenceRemovalStatements } from '../../src/durable-sql/fence.ts';
+import { buildWriteFence, verifyWriteFence, fenceRemovalStatements } from '../../../src/deprecated-durable-sql/fence.ts';
 const runId='a'.repeat(24),hash='b'.repeat(64);
 function catalog(raw){return raw.prepare("SELECT type,name,tbl_name AS tableName,sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY rowid").all();}
 function fixture(){const raw=new DatabaseSync(':memory:');raw.exec("CREATE TABLE parent(id TEXT PRIMARY KEY,n INTEGER); CREATE TABLE audit(id TEXT PRIMARY KEY); CREATE TRIGGER parent_audit AFTER INSERT ON parent BEGIN INSERT INTO audit VALUES(NEW.id); END;");return raw;}

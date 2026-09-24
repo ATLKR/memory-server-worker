@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { randomBytes } from 'node:crypto';
-import { snapshotHash } from '../../src/durable-sql/snapshot.ts';
-import { encryptSnapshotBackup, decryptSnapshotBackup, snapshotBackupKey } from '../../src/durable-sql/backup.ts';
+import { snapshotHash } from '../../../src/deprecated-durable-sql/snapshot.ts';
+import { encryptSnapshotBackup, decryptSnapshotBackup, snapshotBackupKey } from '../../../src/deprecated-durable-sql/backup.ts';
 
 async function fixture() {
   const identity = { deploymentId: 'test-stage', databaseId: 'control', kind: 'control', epoch: 1 };

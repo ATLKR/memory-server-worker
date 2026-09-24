@@ -4,17 +4,17 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import assert from 'node:assert/strict';
 import { parse } from 'jsonc-parser';
-import { WorkspaceService } from '../src/workspace.ts';
-import { MemoryStore } from '../src/release/memory.ts';
-import { Ingest } from '../src/release/ingest.ts';
-import { Jobs } from '../src/release/jobs.ts';
-import { digest } from '../src/release/util.ts';
-import { applySql } from './apply-sql.mjs';
+import { WorkspaceService } from '../../src/workspace.ts';
+import { MemoryStore } from '../../src/release/memory.ts';
+import { Ingest } from '../../src/release/ingest.ts';
+import { Jobs } from '../../src/release/jobs.ts';
+import { digest } from '../../src/release/util.ts';
+import { applySql } from '../apply-sql.mjs';
 
-const config = parse(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'));
+const config = parse(readFileSync(new URL('../../wrangler.jsonc', import.meta.url), 'utf8'));
 const mf = new Miniflare(convertV4MiniflareOptions({
   name: 'saas-execution-time-integration', modules: true,
-  scriptPath: fileURLToPath(new URL('../.local/build/worker.js', import.meta.url)),
+  scriptPath: fileURLToPath(new URL('../../.local/build/worker.js', import.meta.url)),
   compatibilityDate: config.compatibility_date, compatibilityFlags: config.compatibility_flags,
   d1Databases: ['DB'], bindings: config.vars,
 }));
@@ -22,9 +22,9 @@ const parser = new DatabaseSync(':memory:');
 const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 try {
   const db = await mf.getD1Database('DB');
-  const migrations = readdirSync(new URL('../migrations/', import.meta.url)).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
+  const migrations = readdirSync(new URL('../../d1-migrations/', import.meta.url)).filter(name => /^\d{4}_.+\.sql$/.test(name)).sort();
   assert.equal(migrations.length, 25);
-  for (const name of migrations) await applySql(parser, db, readFileSync(new URL('../migrations/' + name, import.meta.url), 'utf8'));
+  for (const name of migrations) await applySql(parser, db, readFileSync(new URL('../../d1-migrations/' + name, import.meta.url), 'utf8'));
   const workspace = new WorkspaceService(db);
   async function setup(name, organization = false) {
     const actor = await workspace.signIn({ issuer: 'https://auth-api.allen.company', subject: name,

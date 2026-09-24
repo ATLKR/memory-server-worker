@@ -7,9 +7,9 @@ import { fileURLToPath } from 'node:url';
 import { DatabaseSync } from 'node:sqlite';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { createDurableDatabase } from '../../src/durable-sql/client.ts';
+import { createDurableDatabase } from '../../../src/deprecated-durable-sql/client.ts';
 
-const directory = new URL('../../migrations/', import.meta.url);
+const directory = new URL('../../../d1-migrations/', import.meta.url);
 const migrations = await Promise.all((await readdir(directory)).filter(name => name.endsWith('.sql')).sort()
   .map(async name => ({ name, sql: await readFile(new URL(name, directory), 'utf8') })));
 const authoritySchemaQuery = "SELECT type,name,tbl_name FROM sqlite_master WHERE type IN ('trigger','view') ORDER BY type,name";
@@ -23,9 +23,9 @@ const expectedAuthoritySchema = (() => {
     return db.prepare(authoritySchemaQuery).all().map(row => ({ ...row }));
   } finally { db.close(); }
 })();
-const shard = await readFile(new URL('../../shard-migrations/0001_payloads.sql', import.meta.url), 'utf8');
+const shard = await readFile(new URL('../../../d1-shard-migrations/0001_payloads.sql', import.meta.url), 'utf8');
 const built = await build({ stdin: { contents: `
-import { MemorySqlDatabase } from '../../src/durable-sql/object.ts';
+import { MemorySqlDatabase } from '../../../src/deprecated-durable-sql/object.ts';
 const migrations=${JSON.stringify(migrations)},shard=${JSON.stringify(shard)};
 export class Fixture extends MemorySqlDatabase {
  bootstrap(identity){

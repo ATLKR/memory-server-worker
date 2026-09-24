@@ -9,8 +9,8 @@ import {createSeoulProjectionCapture} from '../../src/release/seoul-projection-c
 import {parseSeoulAuthoritySourceRow} from '../../src/release/seoul-projection-source-codec.ts';
 import {createSeoulProjectionPreparer} from '../../src/release/seoul-projection-preparer.ts';
 import {decodeSeoulHeadEvent} from '../../src/release/seoul-projection-head-codec.ts';
-import {createDurableDatabase} from '../../src/durable-sql/client.ts';
-import {SqlDatabaseEngine} from '../../src/durable-sql/engine.ts';
+import {createDurableDatabase} from '../../src/deprecated-durable-sql/client.ts';
+import {SqlDatabaseEngine} from '../../src/deprecated-durable-sql/engine.ts';
 import {hmac} from '../../src/release/util.ts';
 
 const issuer='https://auth-api.allen.company',secret='synthetic-provider-capture-only-123456789';

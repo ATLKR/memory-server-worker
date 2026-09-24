@@ -8,11 +8,11 @@ import { join, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
-import { createDurableDatabase } from '../../src/durable-sql/client.ts';
-import { snapshotCanonical } from '../../src/durable-sql/snapshot.ts';
-import { exportDurableSnapshot } from '../../scripts/durable-snapshot.mjs';
-import { openLocalDatabase } from '../../dev/sqlite.mjs';
-import { digestToken } from '../../src/identity.ts';
+import { createDurableDatabase } from '../../../src/deprecated-durable-sql/client.ts';
+import { snapshotCanonical } from '../../../src/deprecated-durable-sql/snapshot.ts';
+import { exportDurableSnapshot } from '../../../scripts/durable-snapshot.mjs';
+import { openLocalDatabase } from '../../../dev/sqlite.mjs';
+import { digestToken } from '../../../src/identity.ts';
 
 const keys = generateKeyPairSync('ed25519');
 const publicKey = keys.publicKey.export({ type: 'spki', format: 'der' }).toString('base64url');
@@ -20,7 +20,7 @@ const hash = value => createHash('sha256').update(snapshotCanonical(value)).dige
 const textHash = value => createHash('sha256').update(value).digest('hex');
 const quote = name => '"' + name.replaceAll('"', '""') + '"';
 const built = await build({ stdin: { contents: `
-export {MemorySqlDatabase} from '../../src/durable-sql/object.ts';
+export {MemorySqlDatabase} from '../../../src/deprecated-durable-sql/object.ts';
 export default {async fetch(request,env){
  const {identity,method,input,grant}=await request.json();
  if(!['execute','beginImport','appendImport','sealImport'].includes(method))return Response.json({error:'fixture_method'},{status:400});
@@ -156,7 +156,7 @@ test('native full populated snapshot preserves historical commands, exact runtim
 
 test('native hot snapshot preserves deleted AUTOINCREMENT high-water, visible FTS content and permanent tombstones', { timeout: 30000 }, async t => {
   const raw = new DatabaseSync(':memory:'); t.after(() => raw.close());
-  raw.exec(await readFile(new URL('../../shard-migrations/0001_payloads.sql', import.meta.url), 'utf8'));
+  raw.exec(await readFile(new URL('../../../d1-shard-migrations/0001_payloads.sql', import.meta.url), 'utf8'));
   const content = JSON.stringify({ body: 'Synthetic searchable payload', source: null, provenance: { originKind: 'user' } });
   const insert = raw.prepare('INSERT INTO payloads(row_id,id,space_id,memory_id,content,sha256,bytes,created_at) VALUES(?,?,?,?,?,?,?,?)');
   for (const [rowid, id] of [[4, 'live'], [90, 'retired']]) insert.run(rowid, id, 'space', id, content, textHash(content), Buffer.byteLength(content), Date.now());

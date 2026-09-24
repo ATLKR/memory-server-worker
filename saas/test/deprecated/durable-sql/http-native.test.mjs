@@ -5,7 +5,7 @@ import { generateKeyPairSync, sign, createHash } from 'node:crypto';
 import { build } from 'esbuild';
 import { Miniflare, convertV4MiniflareOptions } from 'miniflare';
 import { generateKeyPair, exportJWK, SignJWT } from 'jose';
-import { snapshotCanonical } from '../../src/durable-sql/snapshot.ts';
+import { snapshotCanonical } from '../../../src/deprecated-durable-sql/snapshot.ts';
 
 const origin = 'https://memory-native.example.test', issuer = 'https://auth-api.allen.company';
 const deploymentId = 'native-http', control = { deploymentId, databaseId: 'authority', kind: 'control', epoch: 1 };
@@ -17,7 +17,7 @@ function authorize(plan) {
   const payload = { planHash: hash(plan), notBeforeMs: Date.now() - 5000, expiresAtMs: Date.now() + 600000 };
   return { ...payload, signature: sign(null, Buffer.from(snapshotCanonical(payload)), keys.privateKey).toString('base64url') };
 }
-const built = await build({ entryPoints: [fileURLToPath(new URL('../../src/worker.ts', import.meta.url))], bundle: true, write: false,
+const built = await build({ entryPoints: [fileURLToPath(new URL('../../../src/worker.ts', import.meta.url))], bundle: true, write: false,
   format: 'esm', platform: 'browser', target: 'es2022', external: ['cloudflare:workers'],
   define: { BUILD_SOURCE_REVISION: JSON.stringify('a'.repeat(40)), BUILD_RESOURCE_FINGERPRINT: JSON.stringify('b'.repeat(64)) } });
 // This bridge exists only inside this test's isolated operator Worker. The

@@ -210,8 +210,8 @@ function validate(config, production, isProductionFile) {
       if (databases.length !== shards.length + 1 || databases.some(db => db.binding !== 'DB' && !registered.has(db.binding))) fail('Shard registry must exactly match the configured hot D1 bindings.');
       if (new Set(databases.map(db => db.database_id.toLowerCase())).size !== databases.length || new Set(databases.map(db => db.database_name)).size !== databases.length)
         fail('Every central and hot D1 binding must use a distinct physical database ID and name.');
-      if (databases.some(db => db.migrations_dir !== (db.binding === 'DB' ? 'migrations' : 'shard-migrations')))
-        fail('Use migrations for DB and shard-migrations for every hot D1 binding.');
+      if (databases.some(db => db.migrations_dir !== (db.binding === 'DB' ? 'd1-migrations' : 'd1-shard-migrations')))
+        fail('Use d1-migrations for DB and d1-shard-migrations for every hot D1 binding.');
     }
     if (buckets.filter(bucket => bucket.binding === 'MEMORY_PAYLOADS').length !== 1) fail('Configure the private MEMORY_PAYLOADS R2 binding; verify public access is disabled separately.');
     hotBindings = shards.sort((a, b) => a.id < b.id ? -1 : a.id > b.id ? 1 : 0).map(shard => shard.binding);

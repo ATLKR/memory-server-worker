@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { resolveReleaseEnv } from '../../src/durable-sql/runtime.ts';
-import { inspectStorage } from '../../src/release/storage-readiness.ts';
-import worker from '../../src/release/worker.ts';
+import { resolveReleaseEnv } from '../../../src/deprecated-durable-sql/runtime.ts';
+import { inspectStorage } from '../../../src/release/storage-readiness.ts';
+import worker from '../../../src/release/worker.ts';
 
 const mapping = { DB: { databaseId: 'authority', kind: 'control' }, HOT_A: { databaseId: 'payload-a', kind: 'hot' }, HOT_B: { databaseId: 'payload-b', kind: 'hot' } };
 const shards = [{ id: 'a', binding: 'HOT_A', mode: 'active' }, { id: 'b', binding: 'HOT_B', mode: 'draining' }];

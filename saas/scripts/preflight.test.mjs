@@ -27,7 +27,7 @@ function stagingConfig() {
   config.analytics_engine_datasets = [{ binding: 'METRICS', dataset: 'memory_target_test_staging_metrics' }];
   config.vars.PUBLIC_ORIGIN = 'https://memory-staging.example.org';
   config.routes = [{ pattern: 'memory-staging.example.org', custom_domain: true }];
-  config.d1_databases = [{ binding: 'DB', database_name: 'memory-target-test-staging', database_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', migrations_dir: 'migrations' }];
+  config.d1_databases = [{ binding: 'DB', database_name: 'memory-target-test-staging', database_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', migrations_dir: 'd1-migrations' }];
   config.r2_buckets = [{ binding: 'ARCHIVE', bucket_name: 'memory-target-test-staging-archive' }];
   return config;
 }
@@ -37,8 +37,8 @@ function shardedConfig() {
   config.vars.STORAGE_MODE = 'sharded';
   config.vars.STORAGE_SHARDS_JSON = JSON.stringify([{ id: 'hot-a', binding: 'HOT_A', mode: 'active' }, { id: 'hot-b', binding: 'HOT_B', mode: 'draining' }]);
   config.d1_databases.push(
-    { binding: 'HOT_A', database_name: 'memory-hot-a-staging', database_id: '11111111-2222-4333-8444-555555555555', migrations_dir: 'shard-migrations' },
-    { binding: 'HOT_B', database_name: 'memory-hot-b-staging', database_id: '22222222-3333-4444-8555-666666666666', migrations_dir: 'shard-migrations' });
+    { binding: 'HOT_A', database_name: 'memory-hot-a-staging', database_id: '11111111-2222-4333-8444-555555555555', migrations_dir: 'd1-shard-migrations' },
+    { binding: 'HOT_B', database_name: 'memory-hot-b-staging', database_id: '22222222-3333-4444-8555-666666666666', migrations_dir: 'd1-shard-migrations' });
   config.r2_buckets = [{ binding: 'MEMORY_PAYLOADS', bucket_name: 'memory-payloads-staging' }];
   return config;
 }
@@ -353,8 +353,8 @@ for (const [name, mutate] of [
   ['one hot shard', c => { c.d1_databases.pop(); c.vars.STORAGE_SHARDS_JSON = JSON.stringify([{ id: 'hot-a', binding: 'HOT_A', mode: 'active' }]); }],
   ['physical database alias', c => { c.d1_databases[2].database_id = c.d1_databases[1].database_id; }],
   ['central database alias', c => { c.d1_databases[1].database_id = c.d1_databases[0].database_id; }],
-  ['wrong hot migrations directory', c => { c.d1_databases[1].migrations_dir = 'migrations'; }],
-  ['wrong central migrations directory', c => { c.d1_databases[0].migrations_dir = 'shard-migrations'; }],
+  ['wrong hot migrations directory', c => { c.d1_databases[1].migrations_dir = 'd1-migrations'; }],
+  ['wrong central migrations directory', c => { c.d1_databases[0].migrations_dir = 'd1-shard-migrations'; }],
   ['missing payload bucket', c => { c.r2_buckets = []; }],
   ['malformed registry JSON', c => { c.vars.STORAGE_SHARDS_JSON = '{'; }],
   ['unregistered D1 binding', c => { c.d1_databases[2].binding = 'HOT_OTHER'; }],

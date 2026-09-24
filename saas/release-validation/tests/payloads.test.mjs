@@ -158,5 +158,5 @@ test('shard schema rejects ordinary payload edits and preserves generated migrat
   const f = setup(t), ref = await f.store.descriptor(context, content, 'payload-a'); await f.store.stage(context, ref, content); const db = f.selected(ref);
   for (const sql of ["UPDATE payloads SET content='{}'", 'DELETE FROM payloads', 'INSERT OR REPLACE INTO payloads SELECT * FROM payloads']) await assert.rejects(async()=> (await db.raw.exec(sql)), /payload_immutable/);
   const source = readFileSync(new URL('../../shard-schema.sql', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
-  assert.equal(readFileSync(new URL('../../shard-migrations/0001_payloads.sql', import.meta.url), 'utf8').replaceAll('\r\n', '\n'), '-- Generated from shard-schema.sql; independent hot-shard migration 1.\n' + source);
+  assert.equal(readFileSync(new URL('../../d1-shard-migrations/0001_payloads.sql', import.meta.url), 'utf8').replaceAll('\r\n', '\n'), '-- Generated from shard-schema.sql; independent hot-shard migration 1.\n' + source);
 });

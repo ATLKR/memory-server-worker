@@ -2,8 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {existsSync,readFileSync} from 'node:fs';
 import {fixture,at} from './db-sqlite.mjs';
-import {createDurableDatabase} from '../../src/durable-sql/client.ts';
-import {SqlDatabaseEngine} from '../../src/durable-sql/engine.ts';
+import {createDurableDatabase} from '../../src/deprecated-durable-sql/client.ts';
+import {SqlDatabaseEngine} from '../../src/deprecated-durable-sql/engine.ts';
 import {createSeoulProjectionPreparer} from '../../src/release/seoul-projection-preparer.ts';
 import {prepareSeoulHeadCandidate} from '../../src/release/seoul-projection-source-codec.ts';
 

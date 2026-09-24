@@ -34,7 +34,7 @@ const { outputFiles } = await build({ stdin: {
         token:${JSON.stringify(session)},accountId:'synthetic-account',expiresAt:principal.expiresAt
       })).handle(request)??new Response(null,{status:404});
     }}`,
-  resolveDir: fileURLToPath(new URL('../', import.meta.url)), sourcefile: 'auth-runtime-test-worker.mjs', loader: 'js',
+  resolveDir: fileURLToPath(new URL('../../', import.meta.url)), sourcefile: 'auth-runtime-test-worker.mjs', loader: 'js',
 }, bundle: true, format: 'esm', platform: 'browser', target: 'es2022', write: false });
 
 async function fixture(t, handler) {
@@ -51,7 +51,7 @@ async function fixture(t, handler) {
   // auth_flows has no dependencies; native D1 validates the claim/erase path.
   const schema = new DatabaseSync(':memory:');
   try {
-    schema.exec(readFileSync(new URL('../auth-schema.sql', import.meta.url), 'utf8'));
+    schema.exec(readFileSync(new URL('../../auth-schema.sql', import.meta.url), 'utf8'));
     for (const { sql } of schema.prepare('SELECT sql FROM sqlite_master WHERE sql IS NOT NULL ORDER BY rowid').all())
       await db.prepare(sql).run();
   } finally { schema.close(); }
