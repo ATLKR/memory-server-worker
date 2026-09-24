@@ -44,7 +44,9 @@ checks used vs monthly_units per calendar month.
    `bytes` is always captured from the commit call itself. Callers
    supply extra dimensions (ingest item counts). Failed ops never reach
    `release_operations` — their provider cost is covered by
-   `provider_budgets` reservations.
+   `provider_budgets` reservations. PostgreSQL-only: the D1 lineage is
+   frozen — it keeps no facts surface (nothing runs the release
+   `MemoryStore` there); facts accrue from cutover forward.
 2. ✅ **Storage byte-hours** — `memory_ops.storage_byte_deltas`
    (append-only) records every timestamped delta the gauge applies.
    `bytes = sum(deltas)` holds by construction; byte-hours are
