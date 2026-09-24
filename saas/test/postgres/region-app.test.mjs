@@ -6,8 +6,8 @@ import { createRegionWorkerApp } from '../../src/postgres/region-app.ts';
 
 const CONFIG = { region: 'sg', processingPolicyId: 'standard-v1', schemaVersion: 2, prefix: 'MEMORY_SG', hyperdriveBinding: 'SG_HYPERDRIVE' };
 // The attestation pins the exact contiguous migration count per cluster:
-// 17 regional, 7 control. Bump when the lineage grows.
-const FULL_CONFIG = { ...CONFIG, schemaVersion: 17, controlSchemaVersion: 7 };
+// 18 regional, 7 control. Bump when the lineage grows.
+const FULL_CONFIG = { ...CONFIG, schemaVersion: 18, controlSchemaVersion: 7 };
 const ORIGIN = 'https://memory.test';
 const TARGET = JSON.stringify({ connectionMode: 'direct', database: 'postgres', deploymentId: 'memory-sg-0001',
     expectedRole: 'memory_runtime', host: 'ep-test.ap-southeast-1.aws.neon.tech', port: 5432, user: 'memory_runtime' });
@@ -64,9 +64,12 @@ test('region-first path prefix is stripped before app routing', async t => {
     const app = createRegionWorkerApp(bindings, CONFIG, { clientFactory: pgliteClientFactory(db) });
     assert.equal((await app.fetch(new Request(ORIGIN + '/sg/health'), bindings)).status, 200);
     assert.equal((await app.fetch(new Request(ORIGIN + '/sg'), bindings)).status, 200);
-    // A foreign region's prefix must not be silently absorbed.
-    const foreign = await app.fetch(new Request(ORIGIN + '/kr-seoul/health'), bindings);
-    assert.notEqual(foreign.status, 500);
+    // Query strings survive the rewrite.
+    assert.equal((await app.fetch(new Request(ORIGIN + '/sg/health?x=1'), bindings)).status, 200);
+    // A foreign region's prefix is not stripped and never resolves to health.
+    assert.notEqual((await app.fetch(new Request(ORIGIN + '/kr-seoul/health'), bindings)).status, 200);
+    // A near-miss segment must not strip: /sgx is not /sg.
+    assert.notEqual((await app.fetch(new Request(ORIGIN + '/sgx/health'), bindings)).status, 200);
 });
 
 test('a deployment attestation mismatch refuses the session', async t => {

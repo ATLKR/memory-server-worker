@@ -33,20 +33,22 @@ separate grant ledger + regional transactional writes**.
 provisioning (e.g. launch plan 100k units) — quota enforcement already
 checks used vs monthly_units per calendar month.
 
-## Gaps to close (ordered)
+## Gaps (status)
 
-1. **Raw physical measurements per operation** — extend `usage_events`
-   (or a sibling `usage_facts`) with the priceable dimensions, not just
-   rated units: bytes_in/out, item counts, results_returned,
-   embedding/extraction calls, provider+model, token types,
-   observed microusd, outcome, timestamps, region, schema/rate-card
-   version. Include zero-unit ops (delete/erase) and failed ops that
-   consumed provider work. Counters stay rebuildable projections;
-   events/facts stay the raw source of truth.
-2. **Storage byte-hours** — the bytes gauge alone can't price
-   byte-hours. The trigger already knows each delta; record timestamped
-   delta rows (or retain the delta stream) so byte-hours are
-   reconstructable.
+1. ✅ **Raw physical measurements per operation** — implemented in
+   `0018_metering_facts.sql`. `release_operations` gains a `detail`
+   jsonb column; `usage_facts` (append-only, RLS'd) gets one row per
+   committed op via the extended `operation_meter` trigger — pool,
+   space, account, action, period, rate_version, units, bytes, items,
+   detail, occurred_at. `commit()` accepts an optional `facts` arg;
+   `bytes` is always captured from the commit call itself. Callers
+   supply extra dimensions (ingest item counts). Failed ops never reach
+   `release_operations` — their provider cost is covered by
+   `provider_budgets` reservations.
+2. ✅ **Storage byte-hours** — `memory_ops.storage_byte_deltas`
+   (append-only) records every timestamped delta the gauge applies.
+   `bytes = sum(deltas)` holds by construction; byte-hours are
+   `sum(delta × elapsed)` over the delta stream.
 3. **Credit grants ledger** — `memory_control.credit_grants`
    append-only: pool_id, units, denomination kind
    ('launch_promo'|'purchased'|'monthly_allowance'|'adjustment'),

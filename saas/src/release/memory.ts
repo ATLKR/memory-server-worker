@@ -255,7 +255,7 @@ export class MemoryStore {
             fail(404, 'memory_not_found');
         return { ...memoryRow(hydrated!), ...(row.deletedAt !== null ? allowed.get(row.id)! : {}) };
     }
-    async commit(token: string, spaceId: string, action: string, cap: Capability, key: string, input: unknown, memoryId: string | null, expectedRevision: number | null, units: number, bytes: number, build: (op: string, actorId: string, at: number) => Statement[], recent = false, additionalCap?: Capability, prepared?: PreparedPayloads): Promise<{
+    async commit(token: string, spaceId: string, action: string, cap: Capability, key: string, input: unknown, memoryId: string | null, expectedRevision: number | null, units: number, bytes: number, build: (op: string, actorId: string, at: number) => Statement[], recent = false, additionalCap?: Capability, prepared?: PreparedPayloads, facts?: Record<string, unknown>): Promise<{
         id: string;
         replayed: boolean;
         revision: number | null;
@@ -286,9 +286,14 @@ export class MemoryStore {
             // SQL evaluates admission time after any queue delay. Derive the
             // operation timestamp and quota month in that same statement.
             const op = crypto.randomUUID(), at = this.clock();
-            const start = stmt(this.db, `INSERT INTO memory_ops.release_operations(id,account_id,space_id,client_key,request_hash,action,memory_id,expected_revision,committed_revision,actor_credential_id,created_at,period,units)
-    SELECT ?,c.account_id,s.id,?,?,?,?,?,?,c.id,${sqlNow()},to_char(to_timestamp(${sqlNow()}/1000.0) AT TIME ZONE 'UTC','YYYY-MM'),? FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c WHERE s.id=? AND ${authority(cap)} ${additionalCap ? 'AND ' + authority(additionalCap) : ''} ${recent ? 'AND ' + recentSql() : ''}
-      ${prepared?.intentId ? `AND EXISTS(SELECT 1 FROM memory_content.payload_intents i WHERE i.id=? AND i.account_id=c.account_id AND i.space_id=s.id AND i.client_key=? AND i.request_hash=? AND i.expires_at>${sqlNow()} AND i.published_at IS NULL AND i.item_count=(SELECT count(*) FROM memory_content.payload_stages p WHERE p.intent_id=i.id AND p.state='ready'))` : ''}`, [op, key, requestHash, action, memoryId, expectedRevision, expectedRevision === null ? 1 : expectedRevision + 1, at, at, units, spaceId, ...params(hash, at, cap), ...(additionalCap ? params(hash, at, additionalCap) : []), ...(recent ? [at - 300000, at] : []), ...(prepared?.intentId ? [prepared.intentId, key, requestHash, at] : [])]);
+            // Physical facts on the receipt: bytes/items come from the commit
+            // args; callers may pass extra dimensions (provider, model,
+            // tokens) through facts. The metering trigger copies this to
+            // usage_facts — the rating-free measurement for future pricing.
+            const detail = JSON.stringify({ bytes, ...(facts ?? {}) });
+            const start = stmt(this.db, `INSERT INTO memory_ops.release_operations(id,account_id,space_id,client_key,request_hash,action,memory_id,expected_revision,committed_revision,actor_credential_id,created_at,period,units,detail)
+    SELECT ?,c.account_id,s.id,?,?,?,?,?,?,c.id,${sqlNow()},to_char(to_timestamp(${sqlNow()}/1000.0) AT TIME ZONE 'UTC','YYYY-MM'),?,?::jsonb FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c WHERE s.id=? AND ${authority(cap)} ${additionalCap ? 'AND ' + authority(additionalCap) : ''} ${recent ? 'AND ' + recentSql() : ''}
+      ${prepared?.intentId ? `AND EXISTS(SELECT 1 FROM memory_content.payload_intents i WHERE i.id=? AND i.account_id=c.account_id AND i.space_id=s.id AND i.client_key=? AND i.request_hash=? AND i.expires_at>${sqlNow()} AND i.published_at IS NULL AND i.item_count=(SELECT count(*) FROM memory_content.payload_stages p WHERE p.intent_id=i.id AND p.state='ready'))` : ''}`, [op, key, requestHash, action, memoryId, expectedRevision, expectedRevision === null ? 1 : expectedRevision + 1, at, at, units, detail, spaceId, ...params(hash, at, cap), ...(additionalCap ? params(hash, at, additionalCap) : []), ...(recent ? [at - 300000, at] : []), ...(prepared?.intentId ? [prepared.intentId, key, requestHash, at] : [])]);
             try {
                 await batch(this.db, [start, ...build(op, actor.id, at), ...(prepared ? publishPayloadStatements(this.db, prepared, op, { hash, at, cap, recent, additionalCap }) : [])]);
             }

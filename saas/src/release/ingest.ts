@@ -49,7 +49,7 @@ export class Ingest {
             stmt(this.env.DB, `INSERT INTO memory_jobs.release_jobs(id,space_id,revision,kind,state,available_at,created_at) SELECT ?,space_id,0,'ingest','pending',created_at,created_at FROM memory_ops.release_operations WHERE id=?`, [jobId, op]),
             stmt(this.env.DB, `INSERT INTO memory_content.release_ingests(id,account_id,space_id,actor_credential_id,ciphertext,expires_at,created_at) SELECT ?,account_id,space_id,?,?,created_at+86400000,created_at FROM memory_ops.release_operations WHERE id=?`, [jobId, actor, ciphertext, op]),
             stmt(this.env.DB, `INSERT INTO memory_jobs.ingest_operations(operation_id,ingest_id) SELECT id,? FROM memory_ops.release_operations WHERE id=?`, [jobId, op])
-        ]);
+        ], false, undefined, undefined, { items: source.length });
         const row = await one<{
             id: string;
             state: string;
@@ -187,7 +187,7 @@ export class Ingest {
             ...selectedContent.map((value, i) => prepared?.items[i] ? this.store.preparedCreate(op, prepared.items[i], value) :
                 stmt(this.env.DB, `INSERT INTO memory_content.memories(id,space_id,body,source,revision,created_at,updated_at,actor_credential_id,kind,provenance) SELECT ?,space_id,?,?,1,created_at,created_at,?,?,?::jsonb FROM memory_ops.release_operations WHERE id=?`, [memoryIds[i]!, value.body, value.source, credential, value.kind, canonical(value.provenance), op])),
             stmt(this.env.DB, `UPDATE memory_content.release_ingests SET state='approved',ciphertext=NULL,proposals=NULL,approval_hash=?,result_ids=? WHERE id=? AND EXISTS(SELECT 1 FROM memory_ops.release_operations WHERE id=?)`, [hash, canonical(memoryIds), ingestId, op])
-        ], false, undefined, prepared);
+        ], false, undefined, prepared, { items: indices.length });
         const done = await one<{
             resultIds: string;
         }>(this.env.DB, 'SELECT result_ids AS "resultIds" FROM memory_content.release_ingests WHERE id=?', [ingestId]);
