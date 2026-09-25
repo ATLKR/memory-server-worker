@@ -142,6 +142,16 @@ flip, routing enablement, acceptance record) is a separate signed step.
 - The payload fetcher must be region-pinned read→region-pinned write;
   object bytes never route through the worker.
 
+## Post-cutover operator adjustments
+
+- Owner pool stays unlimited on the target: after the cut verifies,
+  `UPDATE memory_control.pools SET monthly_units=2147483647,
+  storage_limit_bytes=1099511627776 WHERE id='account:b87f427d-3543-49b4-999e-da4332861227'`
+  (the D1 `release_pools` row was set the same way 2026-09-25; metering
+  via `usage_facts`/`usage_events` is trigger-driven and unaffected).
+- `pools.state` must be `active` — the same quota check fails closed on
+  `state != 'active'` regardless of the limit values.
+
 ## Evidence to retain
 
 - Both `postgres-attest` JSON reports (source + control, before the cut).
