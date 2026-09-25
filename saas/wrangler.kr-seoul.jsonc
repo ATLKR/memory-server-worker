@@ -7,7 +7,7 @@
   "account_id": "9f9fdfcfb6371183304908c2de94513d",
   "workers_dev": true,
   "preview_urls": false,
-  "routes": [{ "pattern": "memory.allenlabs.org/kr-seoul/*" }],
+  "routes": [{ "pattern": "memory.allenlabs.org/kr-seoul/*", "zone_name": "allenlabs.org" }],
   "vars": {
     "DEPLOYMENT_ENVIRONMENT": "production",
     "RELEASE_MODE": "pilot",
@@ -19,9 +19,12 @@
     "BACKGROUND_JOBS_ENABLED": "true",
     "STORAGE_MODE": "inline",
     "MEMORY_KR_ENABLED": "true",
-    "MEMORY_KR_TRANSPORT": "native",
+    "MEMORY_KR_TRANSPORT": "hyperdrive",
+    "MEMORY_KR_TARGET_JSON": "{\"database\":\"postgres\",\"deploymentId\":\"memory-seoul\",\"expectedRole\":\"memory_runtime\"}",
+    "MEMORY_KR_CONTROL_TRANSPORT": "hyperdrive",
+    "MEMORY_KR_CONTROL_TARGET_JSON": "{\"database\":\"memoryservice-control\",\"deploymentId\":\"memory-control\",\"expectedRole\":\"memory_runtime\"}",
     "MAIL_FROM": "memory@allenlabs.org",
-    "PUBLIC_ORIGIN": "https://memory.allenlabs.org/kr-seoul",
+    "PUBLIC_ORIGIN": "https://memory.allenlabs.org",
     "SSO_CLIENT_ID": "M5w1jhX2WjRD3PyJDwS_QosyAaHm4TWSyVCkzebqNrA",
     "PRODUCT_NAME": "Memory by Allen Labs",
     "PRODUCT_SHORT_NAME": "Memory",
@@ -30,6 +33,10 @@
     "PRODUCT_ACCENT_COLOR": "#276747"
   },
   "r2_buckets": [{ "binding": "MEMORY_PAYLOADS", "bucket_name": "allenlabs-memory-production-payloads" }],
+  "hyperdrive": [
+    { "binding": "KR_HYPERDRIVE", "id": "aeb032913eb94398a04587d8080952e6" },
+    { "binding": "MEMORY_KR_CONTROL_HYPERDRIVE", "id": "0b76cf08a44443d39d12f0d51ed059f5" }
+  ],
   "ai": { "binding": "AI" },
   "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "allenlabs_memory_production" }],
   "ratelimits": [{ "name": "REQUEST_LIMITER", "namespace_id": "2086090801", "simple": { "limit": 120, "period": 60 } }],

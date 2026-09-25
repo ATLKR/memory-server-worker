@@ -6,10 +6,11 @@ import type { WorkerEnv } from './release/types.ts';
  * on the sg cluster itself for the pilot). */
 const CONFIG = {
     region: 'sg',
-    processingPolicyId: 'standard-v1',
+    processingPolicyId: 'sg-primary-storage-v1',
     schemaVersion: 18,
     controlSchemaVersion: 7,
     controlRegion: 'sg',
+    controlPolicyId: 'standard-v1',
     prefix: 'MEMORY_SG',
     hyperdriveBinding: 'SG_HYPERDRIVE',
 } as const;

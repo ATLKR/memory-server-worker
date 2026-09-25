@@ -29,6 +29,9 @@ export interface RegionDeploymentConfig {
      * cluster is shared infrastructure homed independently of the serving
      * region, so its attestation is pinned separately. */
     controlRegion?: PostgresRegion;
+    /** Control deployment's own processing policy id. Shared infrastructure
+     * serves multiple regions, so it cannot inherit the region's policy pin. */
+    controlPolicyId?: string;
     /** Environment key prefix, e.g. `MEMORY_SG` → `MEMORY_SG_TARGET_JSON`. */
     prefix: string;
     /** Hyperdrive binding name for the regional database, e.g. `SG_HYPERDRIVE`. */
@@ -74,8 +77,8 @@ function parseTargetJson(value: string, keys: readonly string[]): Record<string,
 }
 
 function expectedDeployment(config: RegionDeploymentConfig, deploymentId: string, schemaVersion = config.schemaVersion,
-    region = config.region): ExpectedPostgresDeployment {
-    return Object.freeze({ region, deploymentId, processingPolicyId: config.processingPolicyId, schemaVersion });
+    region = config.region, processingPolicyId = config.processingPolicyId): ExpectedPostgresDeployment {
+    return Object.freeze({ region, deploymentId, processingPolicyId, schemaVersion });
 }
 
 /** Provider↔region pairing is pinned by `validateTarget`: sg→neon,
@@ -108,20 +111,29 @@ function hyperdriveSnapshot(env: object, binding: string): HyperdriveBindingSnap
     const snapshot: Record<string, string | number> = {};
     for (const key of ['connectionString', 'host', 'port', 'user', 'password', 'database']) {
         const field = Object.getOwnPropertyDescriptor(descriptor.value, key);
+        if (key === 'password' && (!field || !('value' in field))) {
+            // Workers Hyperdrive bindings do not expose the origin password as
+            // a property; the credential inside connectionString is the pin.
+            continue;
+        }
         if (!field || !('value' in field) || typeof field.value !== (key === 'port' ? 'number' : 'string'))
             throw new Error('region_configuration_invalid');
         snapshot[key] = field.value;
     }
     return Object.freeze({ connectionString: snapshot.connectionString as string, host: snapshot.host as string,
-        port: snapshot.port as number, user: snapshot.user as string, password: snapshot.password as string, database: snapshot.database as string });
+        port: snapshot.port as number, user: snapshot.user as string,
+        ...(snapshot.password !== undefined ? { password: snapshot.password as string } : {}),
+        database: snapshot.database as string });
 }
 
-function parseHyperdriveTarget(value: string, env: object, binding: string, config: RegionDeploymentConfig): PostgresTarget {
+function parseHyperdriveTarget(value: string, env: object, binding: string, config: RegionDeploymentConfig, control: boolean): PostgresTarget {
     const input = parseTargetJson(value, hyperdriveTargetKeys);
     if (typeof input.database !== 'string' || typeof input.expectedRole !== 'string' || typeof input.deploymentId !== 'string')
         throw new Error('region_configuration_invalid');
     return {
-        transport: 'hyperdrive', provider: 'supabase', region: config.region, database: input.database,
+        transport: 'hyperdrive', provider: control ? 'control' : regionProvider(config.region),
+        region: control ? (config.controlRegion ?? config.region) : config.region,
+        callerRegion: config.region, database: input.database,
         expectedRole: input.expectedRole, deploymentId: input.deploymentId, applicationSchemas,
         hyperdrive: hyperdriveSnapshot(env, binding),
     };
@@ -139,7 +151,7 @@ export function resolvePostgresConnection(env: object, config: RegionDeploymentC
         throw new Error('region_configuration_invalid');
     let target: PostgresTarget;
     if (transport.value === 'hyperdrive') {
-        target = parseHyperdriveTarget(targetJson.value, env, hyperdriveBinding, config);
+        target = parseHyperdriveTarget(targetJson.value, env, hyperdriveBinding, config, suffix === '_CONTROL_');
     } else {
         const password = ownScalar(env, `${config.prefix}${suffix}RUNTIME_PASSWORD`);
         const tlsCa = ownScalar(env, `${config.prefix}${suffix}TLS_CA`);
@@ -150,7 +162,8 @@ export function resolvePostgresConnection(env: object, config: RegionDeploymentC
         target = parseNativeTarget(targetJson.value, password.value, tlsCa.value, config, suffix === '_CONTROL_');
     }
     const expected = suffix === '_CONTROL_'
-        ? expectedDeployment(config, target.deploymentId, config.controlSchemaVersion ?? config.schemaVersion, config.controlRegion ?? config.region)
+        ? expectedDeployment(config, target.deploymentId, config.controlSchemaVersion ?? config.schemaVersion, config.controlRegion ?? config.region,
+            config.controlPolicyId ?? config.processingPolicyId)
         : expectedDeployment(config, target.deploymentId);
     return createPostgresConnection(target, {
         verifyDeployment: async (session: PgSession) => verifyPostgresDeployment(session, expected),
@@ -198,13 +211,16 @@ export function createRegionWorkerApp(env: WorkerEnv, config: RegionDeploymentCo
         if (!enabled.valid) throw new Error('region_configuration_invalid');
         if (enabled.value === 'true') {
             const clientFactory = testOptions && typeof testOptions === 'object' ? testOptions.clientFactory : undefined;
-            region = resolvePostgresConnection(env, config, '_', config.hyperdriveBinding, clientFactory);
-            if (!region) throw new Error('region_configuration_invalid');
-            control = resolvePostgresConnection(env, config, '_CONTROL_', `${config.prefix}_CONTROL_HYPERDRIVE`, clientFactory);
+            try { region = resolvePostgresConnection(env, config, '_', config.hyperdriveBinding, clientFactory); }
+            catch (e) { throw new Error(`region: ${e instanceof Error ? e.message : String(e)}`); }
+            if (!region) throw new Error('region: no_target');
+            try { control = resolvePostgresConnection(env, config, '_CONTROL_', `${config.prefix}_CONTROL_HYPERDRIVE`, clientFactory); }
+            catch (e) { throw new Error(`control: ${e instanceof Error ? e.message : String(e)}`); }
             ready = true;
         }
     }
-    catch {
+    catch (e) {
+        console.error('region_init_failed', e instanceof Error ? e.message : String(e));
         region = null; control = null; ready = false;
     }
     http.all('*', async context => {
@@ -216,7 +232,10 @@ export function createRegionWorkerApp(env: WorkerEnv, config: RegionDeploymentCo
         try {
             return await serve(context.env as WorkerEnv, region, control, context.req.raw);
         }
-        catch {
+        catch (e) {
+            const state = e && typeof e === 'object' && 'state' in e ? (e as { state?: unknown }).state : undefined;
+            console.error('region_request_failed', e instanceof Error ? `${e.name}:${e.message}` : String(e),
+                `state=${String(state)}`);
             return unavailable();
         }
     });

@@ -54,12 +54,13 @@ export interface HyperdriveBindingSnapshot {
     host: string;
     port: number;
     user: string;
-    password: string;
+    /** Optional on real Workers bindings; always present inside connectionString. */
+    password?: string;
     database: string;
 }
 export interface HyperdrivePostgresTarget extends PostgresTargetBase {
     transport: 'hyperdrive';
-    provider: 'supabase';
+    provider: 'supabase' | 'neon' | 'control';
     region: PostgresRegion;
     hyperdrive: HyperdriveBindingSnapshot;
 }
@@ -148,23 +149,32 @@ function validateTarget(input: PostgresTarget) {
     if (input.transport === 'hyperdrive') {
         const allowed = ['transport', 'region', 'provider', 'callerRegion', 'database', 'expectedRole', 'deploymentId', 'applicationSchemas', 'hyperdrive',
             'connectTimeoutMs', 'queryTimeoutMs', 'statementTimeoutMs', 'operationTimeoutMs', 'cleanupTimeoutMs'];
+        const pinned = (input.provider === 'supabase' && input.region === 'kr-seoul')
+            || (input.provider === 'neon' && input.region === 'sg')
+            || (input.provider === 'control' && (input.region === 'sg' || input.region === 'kr-seoul'));
         if (!plainData(input) || Reflect.ownKeys(input).some(key => typeof key !== 'string' || !allowed.includes(key))
-            || input.provider !== 'supabase' || input.region !== 'kr-seoul' || !plainData(input.hyperdrive)
-            || !exactKeys(input.hyperdrive, ['connectionString', 'host', 'port', 'user', 'password', 'database'])) fail();
+            || !pinned || !plainData(input.hyperdrive)
+            || Reflect.ownKeys(input.hyperdrive).some(k => typeof k !== 'string'
+                || !['connectionString', 'host', 'port', 'user', 'password', 'database'].includes(k))
+            || !['connectionString', 'host', 'port', 'user', 'database'].every(k => Object.hasOwn(input.hyperdrive, k))) fail();
         const binding = input.hyperdrive;
+        // `password` is optional on the binding: the credential already lives
+        // inside connectionString and is verified against it below.
         if (typeof binding.connectionString !== 'string' || !binding.connectionString || binding.connectionString.includes('\0') || encoder.encode(binding.connectionString).length > 8192
             || typeof binding.host !== 'string' || !/^(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(binding.host)
             || typeof binding.port !== 'number' || !Number.isSafeInteger(binding.port) || binding.port < 1 || binding.port > 65535
             || typeof binding.user !== 'string' || !binding.user || binding.user.includes('\0') || encoder.encode(binding.user).length > 255
-            || typeof binding.password !== 'string' || !binding.password || binding.password.includes('\0') || encoder.encode(binding.password).length > 4096
+            || (binding.password !== undefined && (typeof binding.password !== 'string' || !binding.password || binding.password.includes('\0') || encoder.encode(binding.password).length > 4096))
             || typeof binding.database !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(binding.database)) fail();
         let url: URL; try { url = new URL(binding.connectionString); } catch { return fail(); }
         if (!['postgres:', 'postgresql:'].includes(url.protocol) || url.search !== '?sslmode=disable' || url.hash || !url.port
             || url.hostname !== binding.host || Number(url.port) !== binding.port || decodeUrl(url.username) !== binding.user
-            || decodeUrl(url.password) !== binding.password || url.pathname !== '/' + binding.database) fail();
+            || !decodeUrl(url.password) || decodeUrl(url.password).length > 4096
+            || (binding.password !== undefined && decodeUrl(url.password) !== binding.password)
+            || url.pathname !== '/' + binding.database) fail();
         const snapshot = Object.freeze({ connectionString: binding.connectionString, host: binding.host, port: binding.port,
-            user: binding.user, password: binding.password, database: binding.database });
-        return Object.freeze({ transport: 'hyperdrive' as const, provider: 'supabase' as const, region: 'kr-seoul' as const,
+            user: binding.user, password: decodeUrl(url.password), database: binding.database });
+        return Object.freeze({ transport: 'hyperdrive' as const, provider: input.provider, region: input.region,
             callerRegion: input.callerRegion, database: input.database, expectedRole: input.expectedRole, deploymentId: input.deploymentId,
             applicationSchemas: Object.freeze([...input.applicationSchemas]), hyperdrive: snapshot, ...common });
     }
@@ -419,6 +429,14 @@ export function createPostgresConnection(input: PostgresTarget, options: Connect
             catch { throw new PostgresBoundaryError('postgres_commit_unknown', 'unknown'); }
             return value;
         } catch (e) {
+            // Diagnostic: surface the wrapped transport/driver error class and
+            // message before sanitizing it away. No credentials can appear —
+            // pg errors never embed the password.
+            if (!(e instanceof PostgresBoundaryError)) {
+                const raw = e as { name?: unknown; message?: unknown; code?: unknown };
+                console.error('postgres_raw_failure', String(raw?.name ?? typeof e),
+                    String(raw?.message ?? e).slice(0, 300), String(raw?.code ?? 'no_code'));
+            }
             const safe = sanitized(e);
             if (began && !commitSent && !failure && !busy) {
                 try { await native('ROLLBACK'); outcome = 'rolled_back'; }

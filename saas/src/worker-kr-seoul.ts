@@ -10,6 +10,7 @@ const CONFIG = {
     schemaVersion: 18,
     controlSchemaVersion: 7,
     controlRegion: 'sg',
+    controlPolicyId: 'standard-v1',
     prefix: 'MEMORY_KR',
     hyperdriveBinding: 'KR_HYPERDRIVE',
 } as const;
