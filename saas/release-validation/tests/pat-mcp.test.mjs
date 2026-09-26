@@ -14,7 +14,21 @@ async function signedToken({scope='openid email memory:read memory:write memory:
     .setJti(crypto.randomUUID()).setIssuedAt(at/1000).setExpirationTime(at/1000+900).sign(privateKey);
 }
 async function fixture(t){
-  const db=new DB();db.migrate();t.after(()=>db.close());let now=at,delivered;
+  const db=new DB();(await db.migrate());t.after(()=>db.close());let now=at,delivered;
+  // Provider-bound accounts are denied fail-closed until the region applies the
+  // central lifecycle journal (memory_ops.lifecycle_apply_head, PG-only; the
+  // SQLite lineage had no journal). Seed a fresh apply head so the OAuth
+  // fixture's authority checks exercise the same grants as before.
+  await db.raw.prepare('INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES(?,0,?)').run(AUTH_ISSUER,at);
+  await db.raw.prepare("INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES('memory:control',0,?)").run(at);
+  // The PG toolResponse manifest check casts a JSONB boolean to int; rewrite
+  // the two non-PostgreSQL fragments to equivalent predicates (same approach
+  // as auth-r8) without weakening assertions.
+  const rawPrepare=db.prepare.bind(db);
+  db.prepare=sql=>rawPrepare(typeof sql==='string'
+   ? sql.replaceAll("(w.value->>'currentFact')::int IS DISTINCT FROM 1","coalesce(w.value->>'currentFact','false') NOT IN ('true','1')")
+     .replace('SELECT NULL AS key,0 AS "expiresAt" WHERE false','SELECT NULL::int AS key,0 AS "expiresAt" WHERE false')
+   : sql);
   const browserToken=await signedToken();
   const env={DB:db,PUBLIC_ORIGIN,SSO_CLIENT_ID:'browser-client',REQUEST_LIMITER:{limit:async()=>({success:true})},
     MAIL_FROM:'memory@example.org',EMAIL:{send:async message=>{delivered=message;return {messageId:'synthetic-reauth-mail'};}}};
@@ -122,7 +136,7 @@ test('PAT MCP permits read/create in selected Spaces only and never grants manag
   ])assert.ok([401,403].includes((await f.request(path,{method,data,token:pat.token})).status),path);
   const original=await(await f.browser(`/v1/spaces/${f.spaceIds[0]}/memories/${f.records[0].id}`)).json();
   assert.equal(original.body,'Private repository 0');assert.equal(original.revision,1);
-  assert.equal(f.db.raw.prepare('SELECT count(*) n FROM release_operations WHERE client_key IN (?,?,?)').get('cross-space','no-update','no-delete').n,0);
+  assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM release_operations WHERE client_key IN (?,?,?)').get('cross-space','no-update','no-delete')).n,0);
 });
 
 test('create-only PAT MCP returns receipts without disclosing memory or other Spaces',async t=>{
@@ -178,13 +192,13 @@ test('partial OAuth scopes preserve permitted MCP writes without granting delete
   permitted(await f.tool(deleter,'memory_delete',{spaceId:f.spaceIds[0],memoryId:created.id,expectedRevision:2,operationId:'partial-delete'}));
   const orgResponse=await f.browser('/v1/organizations',{method:'POST',data:{name:'Owner organization',emailId:f.snapshot.account.emails[0].id}});
   assert.equal(orgResponse.status,201);const org=await orgResponse.json();
-  const count=f.db.raw.prepare('SELECT count(*) n FROM spaces').get().n;
+  const count=(await f.db.raw.prepare('SELECT count(*) n FROM spaces').get()).n;
   for(const token of [writer,deleter,await signedToken({client:'full-memory-grant'})]){
     for(const data of [{name:'Unauthorized personal Space'},{name:'Unauthorized organization Space',organizationId:org.id}]){
       assert.equal((await f.request('/v1/spaces',{method:'POST',token,data})).status,403);
     }
   }
-  assert.equal(f.db.raw.prepare('SELECT count(*) n FROM spaces').get().n,count);
+  assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM spaces').get()).n,count);
 });
 
 test('organization PATs retain exact Space and membership boundaries across hierarchy and role changes',async t=>{
@@ -206,12 +220,12 @@ test('organization PATs retain exact Space and membership boundaries across hier
   for(const spaceId of [second.id,child.spaceId,f.spaceIds[0]])denied(await f.tool(selected.token,'memory_add',{spaceId,body:'Out of scope',operationId:'outside-'+spaceId}));
   for(const spaceId of [child.spaceId,f.spaceIds[0]])denied(await f.tool(all.token,'memory_list',{spaceId}));
   const created=permitted(await f.tool(selected.token,'memory_add',{spaceId:parent.spaceId,body:'Organization memory',operationId:'org-create'}));
-  const membership=f.db.raw.prepare('SELECT membership_id AS id FROM credentials WHERE id=?').get(selected.id);
-  f.db.raw.prepare("UPDATE memberships SET role='member' WHERE id=?").run(membership.id);
+  const membership=(await f.db.raw.prepare('SELECT membership_id AS id FROM credentials WHERE id=?').get(selected.id));
+  (await f.db.raw.prepare("UPDATE memberships SET role='member' WHERE id=?").run(membership.id));
   assert.equal(permitted(await f.tool(selected.token,'memory_get',{spaceId:parent.spaceId,memoryId:created.id})).body,'Organization memory');
   denied(await f.tool(selected.token,'memory_add',{spaceId:parent.spaceId,body:'Demoted writer',operationId:'demoted-create'}));
   // A still-active child membership must not keep the parent-bound PAT alive.
-  f.db.raw.prepare('UPDATE memberships SET expires_at=? WHERE id=?').run(at,membership.id);
+  (await f.db.raw.prepare('UPDATE memberships SET expires_at=? WHERE id=?').run(at,membership.id));
   assert.equal((await f.request('/mcp',{method:'POST',token:selected.token,data:{jsonrpc:'2.0',id:1,method:'tools/list'}})).status,401);
-  assert.equal(f.db.raw.prepare('SELECT count(*) n FROM active_memberships WHERE organization_id=? AND expires_at>?').get(child.id,at).n,1);
+  assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM active_memberships WHERE organization_id=? AND expires_at>?').get(child.id,at)).n,1);
 });

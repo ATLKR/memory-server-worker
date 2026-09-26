@@ -1,0 +1,149 @@
+# Residency verification + GA acceptance — P-7 evidence
+
+Status: **partially evidenced** (2026-09-19). In-band residency facts are
+proven; provider-console evidence for backup/object-store residency and
+billing is still required before GA acceptance can be signed.
+
+## What is proven in-band (SQL-observable, no console needed)
+
+### sg — Neon `memoryservicedb-nonseoul` (project `hidden-credit-77904433`)
+
+Evidence: `residency-sg.json` + `neon-api-evidence.json` (ops evidence
+store, outside repository).
+
+- **Project region `aws-ap-southeast-1` (API)** — Neon pins the entire
+  project (compute, pageserver storage, WAL history, S3 durable tier) to
+  the project region; `region_id` is the residency record.
+- **Pageserver in ap-southeast-1 (in-band)** — `neon.pageserver_connstring`
+  reports `pageserver-2.cell-3.ap-southeast-1.aws.neon.tech`: the tier
+  that owns WAL and base backups is in the Singapore region.
+- **Cost**: organization `MemoryServiceDB` plan `free` → $0/month.
+- `history_retention_seconds: 21600` (6 h PITR window, free tier).
+- `branch_id br-silent-term-azdcvcc3`, `compute_id compute-icy-bonus-azem2fg8`,
+  `endpoint_id ep-lingering-pine-azosommb` — stable identifiers for the
+  console record.
+- `data_checksums on`, `wal_level replica`, `archive_mode off` (Neon
+  archives through the pageserver, not `archive_command`).
+- `ssl off` on the compute — TLS terminates at Neon's regional proxy;
+  the operator connection was verify-full to the endpoint.
+- Database `memoryservice-nonseoul`, 13 MB.
+- PostgreSQL 18.6 aarch64.
+
+### kr-seoul — Supabase project `dnhcszbgdzgjpsktjaxn`
+
+Evidence: `residency-seoul.json` + Management API facts (2026-09-19,
+personal-account PAT from the vault).
+
+- **Compute in ap-northeast-2 (Seoul).** Management API: project region
+  `ap-northeast-2`, `ACTIVE_HEALTHY`, created 2026-09-11. Session pooler
+  `aws-0-ap-northeast-2.pooler.supabase.com`. The `postgres` database is
+  the deployment database.
+- **Backup residency proven via API**: `database/backups` reports
+  `region: ap-northeast-2`, `walg_enabled: true`, `pitr_enabled: false`
+  (free tier — no PITR). In-band: `archive_mode on`,
+  `archive_command /usr/bin/admin-mgr wal-push` — consistent.
+- **Cost**: organization `Allen Labs` plan `free` → $0/month for the
+  Supabase tier.
+- `ssl on` at the compute, `data_checksums on`, `wal_level logical`;
+  `ssl_enforcement` API reports enforcement `false` — non-TLS conns are
+  not rejected provider-side (our connections are verify-full).
+- Pooler CA is self-signed — pinned TOFU at first connect and carried
+  as the connection CA in all live verification. Functionally complete:
+  `rejectUnauthorized:true` + verify-full hold on every connection.
+- Database `postgres`, 15 MB. PostgreSQL 17.6 x86_64.
+
+## Cut/integrity evidence (P-6, feeding the acceptance record)
+
+Both regions passed the live sealed cut (`postgres-rehearse.mjs --run`)
+on 2026-09-19 against a fresh `memory_rehearsal_cutover` database:
+
+| | sg | kr-seoul |
+|---|---|---|
+| tables | 79 | 79 |
+| rows copied | 37 | 198 |
+| mismatches | 0 | 0 |
+| freeze→verify | 104.9 s | 15.2 s |
+| RPO | 0 | 0 |
+| unfrozen | true | true |
+
+Post-cut attestation as the runtime login on each target:
+`attested:true`, `allDenialsHeld:true` (denials: `pg_authid`,
+`pg_shadow`, public-schema DDL, `COPY TO STDOUT`, `ALTER SYSTEM`).
+
+### Payload object re-home — CLOSED 2026-09-22
+
+`scripts/postgres-object-store.mjs` adds a Supabase Storage REST adapter
+(storage is pinned to the project region). With `PAYLOAD_SRC_*`/
+`PAYLOAD_TGT_*` envs the rehearsal seals real object bytes, re-homes
+each sealed object into the target store, and verifies target-served
+digests; without config the pass records `skipped`.
+
+- kr-seoul: same project (`dnhcszbgdzgjpsktjaxn`, ap-northeast-2),
+  buckets `rehearsal-src`/`rehearsal-tgt`.
+- sg: storage-only Supabase project `zlwvsdgdrbdicgaltxeb` created in
+  `ap-southeast-1` via Management API (Neon has no object tier); buckets
+  `rehearsal-src`/`rehearsal-tgt`.
+
+Live result on both regions (2026-09-22):
+`payloadObjects 1, sealed 1, copied 1, verify "verified" — all digests
+match`, alongside `tables 79, mismatches [], unfrozen true`.
+
+### Cross-cluster fresh-cluster rehearsal — CLOSED 2026-09-22
+
+`rehearse-cross.mjs` (ops store) created a fresh Neon project
+`snowy-mud-13267409` (`aws-ap-southeast-1`, PG 18), provisioned it
+end-to-end — role pre-creation + owner grant (fresh clusters need
+`SET`-capable membership before `CREATE SCHEMA ... AUTHORIZATION` and
+`ALTER DEFAULT PRIVILEGES FOR ROLE` succeed), `--roles-exist` lineage,
+deployment-identity provision — then ran the sealed cut from the live sg
+cluster (`ep-lingering-pine`) to the fresh cluster
+(`ep-super-scene-azppq4wx`):
+
+`rehearsed:true, tables 79, copiedRows 37, mismatches [],
+payloadVerify "verified", unfrozen:true, rpo 0`.
+
+## Not yet evidenced (GA blockers)
+
+1. **Logs residency** — probed via provider APIs 2026-09-22: Supabase
+   `analytics/endpoints/logs.all` responds 200 on both projects (log
+   analytics infra is provisioned, project-scoped — Supabase runs it
+   project-local), but ad-hoc queries error on the free tier and no
+   dedicated log-drain/log-region endpoint exists (404s). Neon exposes
+   no log API on the free tier — residency rests on its architecture
+   (project region pins compute/storage/logs). Console/support record
+   still required for the final GA record.
+2. ~~**Control-plane placement**~~ — resolved 2026-09-22 (re-platform
+   plan open decision 4): replicated reads in-region + single-primary
+   writes; `memory.allenlabs.org/{region-id}/…` path-first routing.
+   Implementation of the replication channel is its own phase.
+3. ~~**Supabase dashboard CA**~~ — resolved 2026-09-22 as a
+   documentation call, not a code change: the TOFU-pinned pooler CA is
+   the production anchor (`rejectUnauthorized:true`, verify-full on every
+   connection). The only residual gap is first-connect MITM provenance,
+   recorded here as a known bound; a dashboard CA download can upgrade
+   the record later without changing behavior. Supabase publishes the CA
+   only via the dashboard — no Management API endpoint exists.
+
+## Cost evidence (≤ $50/month) — CLOSED
+
+| Provider | Evidence | Monthly |
+| --- | --- | --- |
+| Supabase `MemoryServiceDB` (kr-seoul) | API org plan `free` | $0 |
+| Neon `memoryservicedb-nonseoul` (sg) | API org plan `free` | $0 |
+| Cloudflare account `9f9fdfcf` | API subscriptions: `workers_paid` $5/mo, all others $0 (r2, teams, images, free tiers) | $5 |
+| **Total** | | **$5 ≤ $50** |
+
+CF evidence gathered with `CF Billing Evidence Token` (Billing Read on
+the account, minted via the profile token, stored in the vault).
+
+### Resolved since first draft
+
+- ~~Supabase PAT~~ — personal-account PAT added to the vault resolves a
+  valid `sbp_` token; Management API evidence collected 2026-09-19.
+- ~~Supabase backup region + plan~~ — `backups.region: ap-northeast-2`,
+  `walg_enabled: true`, org plan `free` ($0/month).
+- ~~Neon durable-tier region + plan~~ — Neon API: project `region_id
+  aws-ap-southeast-1` covers compute, storage, WAL and the S3 durable
+  tier; org `MemoryServiceDB` plan `free` ($0/month).
+- ~~Cloudflare Workers plan~~ — API subscriptions: `workers_paid`
+  $5/month is the only paid subscription on the account.

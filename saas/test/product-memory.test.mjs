@@ -19,7 +19,7 @@ test('listing paginates tied timestamps and never includes tombstones or another
   assert.equal(new Set([...first.results, ...second.results].map(x => x.id)).size, 4);
   await assert.rejects(m.list(f.tokens.bob, space.id), MemoryDenied);
   await assert.rejects(m.list(f.tokens.alice, space.id, { cursor: 'invalid' }), MemoryInvalid);
-  f.raw.prepare('UPDATE credentials SET revoked_at=? WHERE id=?').run(NOW, 's-alice');
+  await f.raw.prepare('UPDATE memory_identity.credentials SET revoked_at=? WHERE id=?').run(NOW, 's-alice');
   await assert.rejects(m.list(f.tokens.alice, space.id, { cursor: first.nextCursor }), MemoryDenied);
 });
 

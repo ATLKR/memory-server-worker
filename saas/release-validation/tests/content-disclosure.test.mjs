@@ -11,11 +11,11 @@ const origin='https://memory.example.test',secret='SENSITIVE ERASED CONTENT';
 function api(env,clock=()=>at){const release=createRelease({...env,PUBLIC_ORIGIN:origin},{clock});return (path,token,method='GET',data)=>release.route(new Request(origin+path,{method,headers:{...(data===undefined?{}:{'content-type':'application/json'})},...(data===undefined?{}:{body:JSON.stringify(data)})}),token);}
 function race(db,change,{ingest=false}={}){
  const prepare=db.prepare.bind(db);let hydrated=false,changed=false;
- db.prepare=sql=>{
+ db.prepare= sql=>{
   const s=prepare(sql),isData=sql.includes('r.body')&&sql.startsWith('SELECT r.id')||sql.includes('FROM versions v')||sql.includes('i.proposals');
   for(const name of ['first','all']){const read=s[name].bind(s);s[name]=async()=>{
-   const marker=sql.includes('/* rest-memory-disclosure */')||sql.includes('AS exportExpiresAt')||sql.includes('/* ingest-disclosure */');
-   const oldGuard=sql.includes('FROM spaces s CROSS JOIN active_credentials c WHERE s.id=? AND');
+   const marker=sql.includes('/* rest-memory-disclosure */')||sql.includes('/* export-disclosure */')||sql.includes('/* ingest-disclosure */');
+   const oldGuard=sql.includes('FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c WHERE s.id=? AND');
    if(!changed&&(hydrated&&(marker||oldGuard)||ingest&&sql.includes('/* ingest-disclosure */'))){changed=true;await change();}
    const result=await read();if(isData&&JSON.stringify(result).includes(secret))hydrated=true;return result;
   };}return s;
@@ -31,7 +31,7 @@ for(const kind of ['get','list','search','export'])test('HTTP '+kind+' omits pla
    assert.equal((await request('/v1/spaces/s1/memories/'+memory.id,token,'DELETE',{expectedRevision:1,operationId:'delete'})).status,204);
    assert.equal((await request('/v1/spaces/s1/memories/'+memory.id+'/erase',token,'POST',{expectedRevision:2,confirmation:memory.id,operationId:'erase'})).status,200);
   });
-  const response=await request(path,token),wire=await response.text();assert.equal(changed(),true);assert.equal(db.raw.prepare('SELECT body FROM memories WHERE id=?').get(memory.id).body,'[erased]');
+  const response=await request(path,token),wire=await response.text();assert.equal(changed(),true);assert.equal((await db.raw.prepare('SELECT body FROM memories WHERE id=?').get(memory.id)).body,'[erased]');
   assert.ok(!wire.includes(secret),wire);assert.equal(response.status,kind==='get'?404:200);if(kind!=='get')assert.deepEqual(JSON.parse(wire).results,[]);
  }finally{db.close();}
 });
@@ -44,7 +44,7 @@ test('HTTP ingest GET returns current cancellation state without the cleared rev
   const path='/v1/spaces/s1/ingests/'+submission.id,changed=race(db,async()=>{assert.equal((await request(path,token,'DELETE')).status,204);},{ingest:true});
   const response=await request(path,token),wire=await response.text();assert.equal(changed(),true);assert.equal(response.status,200);assert.ok(!wire.includes(secret),wire);
   const result=JSON.parse(wire);assert.equal(result.state,'cancelled');assert.deepEqual(result.proposals,[]);
-  assert.deepEqual({...db.raw.prepare('SELECT state,ciphertext,proposals FROM release_ingests WHERE id=?').get(submission.id)},{state:'cancelled',ciphertext:null,proposals:null});
+  assert.deepEqual({...(await db.raw.prepare('SELECT state,ciphertext,proposals FROM release_ingests WHERE id=?').get(submission.id))},{state:'cancelled',ciphertext:null,proposals:null});
  }finally{db.close();}
 });
 
@@ -53,8 +53,8 @@ test('HTTP ingest collection reports cancellation committed before its final rea
   const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',PAYLOAD_KEY:Buffer.alloc(32,3).toString('base64url'),AI:{}},ingest=new Ingest(env,()=>at),request=api(env);
   const submission=await ingest.submit(token,'s1',{messages:[{id:'m',role:'user',content:secret}]},'submit');
   let hydrated=false,changed=false;const prepare=db.prepare.bind(db);
-  db.prepare=sql=>{const s=prepare(sql);for(const method of ['first','all']){const read=s[method].bind(s);s[method]=async()=>{
-   if(!changed&&(sql.includes('/* ingest-list-disclosure */')||hydrated&&sql.includes('FROM spaces s CROSS JOIN active_credentials c WHERE s.id=? AND'))){changed=true;assert.equal((await request('/v1/spaces/s1/ingests/'+submission.id,token,'DELETE')).status,204);}
+  db.prepare= sql=>{const s=prepare(sql);for(const method of ['first','all']){const read=s[method].bind(s);s[method]=async()=>{
+   if(!changed&&(sql.includes('/* ingest-list-disclosure */')||hydrated&&sql.includes('FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c WHERE s.id=? AND'))){changed=true;assert.equal((await request('/v1/spaces/s1/ingests/'+submission.id,token,'DELETE')).status,204);}
    const result=await read();if(sql.startsWith('SELECT i.id,')&&sql.includes('ORDER BY i.created_at'))hydrated=true;return result;
   };}return s;};
   const response=await request('/v1/spaces/s1/ingests',token);assert.equal(changed,true);assert.equal(response.status,200);assert.equal((await response.json()).results[0].state,'cancelled');
@@ -111,31 +111,31 @@ for(const action of ['create','update','restore'])test('HTTP '+action+' returns 
  const {db,token}=await fixture();try{
   const store=new MemoryStore(db,()=>at),request=api({DB:db});let memory;
   if(action!=='create'){memory=await store.create(token,'s1',{body:action==='restore'?secret:'before'},'seed');if(action==='restore')await store.remove(token,'s1',memory.id,1,'initial-remove');}
-  const changed=race(db,async()=>{const row=db.raw.prepare('SELECT id,revision FROM memories WHERE erased_at IS NULL').get();await store.remove(token,'s1',row.id,row.revision,'remove');await store.erase(token,'s1',row.id,row.revision+1,row.id,'erase');});
+  const changed=race(db,async()=>{const row=(await db.raw.prepare('SELECT id,revision FROM memories WHERE erased_at IS NULL').get());await store.remove(token,'s1',row.id,row.revision,'remove');await store.erase(token,'s1',row.id,row.revision+1,row.id,'erase');});
   const response=action==='create'?await request('/v1/spaces/s1/memories',token,'POST',{body:secret,operationId:'create'}):action==='update'?await request('/v1/spaces/s1/memories/'+memory.id,token,'PATCH',{body:secret,expectedRevision:1,operationId:'update'}):await request('/v1/spaces/s1/memories/'+memory.id+'/restore',token,'POST',{expectedRevision:2,operationId:'restore'});
   const wire=await response.text();assert.equal(changed(),true);assert.equal(response.status,action==='create'?201:200);assert.ok(!wire.includes(secret));assert.equal(JSON.parse(wire).representation,'receipt');
  }finally{db.close();}
 });
 
 for(const change of ['approved','expired-before','expired-after'])test('ingest disclosure uses current '+change+' state and hides proposals',async()=>{
- const {db,token}=await fixture();let now=at;try{
-  db.raw.prepare('UPDATE credentials SET expires_at=?').run(at+172800000);
+ let now=at;const {db,token}=await fixture({clock:()=>now});try{
+  (await db.raw.prepare('UPDATE credentials SET expires_at=?').run(at+172800000));
   const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',PAYLOAD_KEY:Buffer.alloc(32,3).toString('base64url'),AI:{async run(){return{response:{memories:[{body:secret,kind:'fact',sourceMessageId:'m',quote:secret}]}};}}};
   const ingest=new Ingest(env,()=>now),jobs=new Jobs(env,()=>now);jobs.ingest=j=>ingest.process(j);const submission=await ingest.submit(token,'s1',{messages:[{id:'m',role:'user',content:secret}]},'submit');await jobs.drain(1);
-  let touched=false;const prepare=db.prepare.bind(db);db.prepare=sql=>{const s=prepare(sql);if(sql.includes('/* ingest-disclosure */')){const first=s.first.bind(s);s.first=async()=>{touched=true;if(change==='approved')await ingest.approve(token,'s1',submission.id,[0],'approve');if(change==='expired-before')now=at+86400000;const result=await first();if(change==='expired-after')now=at+86400000;return result;};}return s;};
+  let touched=false;const prepare=db.prepare.bind(db);db.prepare= sql=>{const s=prepare(sql);if(sql.includes('/* ingest-disclosure */')){const first=s.first.bind(s);s.first=async()=>{touched=true;if(change==='approved')await ingest.approve(token,'s1',submission.id,[0],'approve');if(change==='expired-before')now=at+86400000;const result=await first();if(change==='expired-after')now=at+86400000;return result;};}return s;};
   const result=await ingest.get(token,'s1',submission.id);assert.equal(touched,true);assert.equal(result.state,change==='approved'?'approved':'expired');assert.deepEqual(result.proposals,[]);
  }finally{db.close();}
 });
 
 for(const kind of ['get','list','search','export','ingest','ingest-list'])for(const expiry of ['credential','membership'])test(kind+' final disclosure compares '+expiry+' expiry after its awaited read',async()=>{
- const {db,token}=await fixture();let now=at;try{
+ let now=at;const {db,token}=await fixture({clock:()=>now});try{
   const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',PAYLOAD_KEY:Buffer.alloc(32,3).toString('base64url'),AI:{}},store=new MemoryStore(db,()=>now),request=api(env,()=>now),memory=await store.create(token,'so',{body:secret},'seed');
   let path='/v1/spaces/so/memories'+(kind==='get'?'/'+memory.id:kind==='search'?'?query=SENSITIVE':'');
   if(kind==='export'){const session=await new Transfers(db,()=>now).startExport(token,'so');path='/v1/spaces/so/exports/'+session.id;}
   if(kind==='ingest'){const submission=await new Ingest(env,()=>now).submit(token,'so',{messages:[{id:'m',role:'user',content:secret}]},'submit');path='/v1/spaces/so/ingests/'+submission.id;}
   if(kind==='ingest-list')path='/v1/spaces/so/ingests';
-  db.raw.prepare(expiry==='credential'?"UPDATE credentials SET expires_at=? WHERE id='session:alice'":"UPDATE memberships SET expires_at=? WHERE id='m1'").run(at+1);
-  let touched=false;const prepare=db.prepare.bind(db);db.prepare=sql=>{const s=prepare(sql);if(sql.includes('-disclosure */')){const first=s.first.bind(s);s.first=async()=>{const result=await first();touched=true;now=at+2;return result;};}return s;};
+  (await db.raw.prepare(expiry==='credential'?"UPDATE credentials SET expires_at=? WHERE id='session:alice'":"UPDATE memberships SET expires_at=? WHERE id='m1'").run(at+1));
+  let touched=false;const prepare=db.prepare.bind(db);db.prepare= sql=>{const s=prepare(sql);if(sql.includes('-disclosure */')){const first=s.first.bind(s);s.first=async()=>{const result=await first();touched=true;now=at+2;return result;};}return s;};
   const response=await request(path,token);assert.equal(touched,true);assert.equal(response.status,403);assert.ok(!(await response.text()).includes(secret));
  }finally{db.close();}
 });
@@ -155,23 +155,28 @@ for(const kind of ['get','list','search','export','ingest','ingest-list'])test(k
 for(const kind of ['list','export'])test(kind+' final disclosure resolves only its bounded page through memory IDs',async()=>{
  const {db,token}=await fixture();try{
   const store=new MemoryStore(db,()=>at),transfers=new Transfers(db,()=>at),limit=kind==='list'?100:50;
-  db.raw.prepare(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2100)
+  (await db.raw.prepare(`WITH RECURSIVE n(x) AS (VALUES(1) UNION ALL SELECT x+1 FROM n WHERE x<2100)
    INSERT INTO memories(id,space_id,body,revision,created_at,updated_at,actor_credential_id)
-   SELECT printf('record:%04d',x),CASE WHEN x<=100 THEN 's1' ELSE 's2' END,'bounded content',1,?,?,
-    CASE WHEN x<=100 THEN 'session:alice' ELSE 'session:bob' END FROM n`).run(at,at);
+   SELECT 'record:'||lpad(x::text,4,'0'),CASE WHEN x<=100 THEN 's1' ELSE 's2' END,'bounded content',1,?,?,
+    CASE WHEN x<=100 THEN 'session:alice' ELSE 'session:bob' END FROM n`).run(at,at));
   const session=kind==='export'?await transfers.startExport(token,'s1'):null,plans=[],prepare=db.prepare.bind(db);
-  db.prepare=sql=>{const statement=prepare(sql),bind=statement.bind.bind(statement);let values=[];
+  db.prepare= sql=>{const statement=prepare(sql),bind=statement.bind.bind(statement);let values=[];
    statement.bind=(...args)=>{values=args;bind(...args);return statement;};
    if(sql.includes('-disclosure */')){const first=statement.first.bind(statement);statement.first=async()=>{
     const targets=values.find(value=>typeof value==='string'&&value.startsWith('['));
     assert.equal(JSON.parse(targets).length,limit);
-    plans.push(db.raw.prepare('EXPLAIN QUERY PLAN '+sql).all(...values).map(row=>row.detail).join('\n'));
+    // The fixture table is small enough that the planner prefers a Seq Scan
+    // even though the bounded page resolves through memory IDs. Prove the
+    // index path exists rather than forcing it for the live read.
+    await db.raw.exec('SET enable_seqscan=off');
+    plans.push((await db.raw.prepare('EXPLAIN '+sql).all(...values)).map(row=>row['QUERY PLAN']).join('\n'));
+    await db.raw.exec('RESET enable_seqscan');
     return first();
    };}return statement;
   };
   const result=kind==='list'?await store.list(token,'s1',{limit}):await transfers.exportPage(token,'s1',session.id,null,limit);
   assert.equal(result.results.length,limit);assert.ok(result.results.every(row=>row.spaceId==='s1'));assert.equal(plans.length,1);
-  assert.match(plans[0],/SEARCH r USING INDEX \S+ \((?:space_id=\? AND )?id=\?\)/,plans[0]);
-  assert.doesNotMatch(plans[0],/SCAN r(?:\s|$)/,plans[0]);
+  assert.match(plans[0],/Index Scan using \S+ on memories r|Bitmap Heap Scan on memories r/,plans[0]);
+  assert.doesNotMatch(plans[0],/Seq Scan on memories r(?:\s|$)/,plans[0]);
  }finally{db.close();}
 });

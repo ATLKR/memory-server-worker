@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createGeneralApi, routingDiscovery, requireRoutingProvider, checkGeneralRoute } from '../../src/routing/general-api.ts';
 import { fixture, at } from '../../release-validation/tests/db.mjs';
 import { createRoutingClient } from '../../src/routing/client.ts';
+import { digest } from '../../src/release/util.ts';
 
 const policy={version:1,revision:'test-v1',validUntilMs:Date.now()+60000,maxMonthlyRequests:100,
   maxMonthlyInputBytes:1000000,maxMonthlyReservedMicroUsd:1000000,ingestBaseMicroUsd:100,
@@ -72,10 +73,13 @@ test('metadata-only general check uses current exact-Space PAT ACL without provi
   assert.deepEqual(await checkGeneralRoute(f.env,f.key,{...checkInput,spaceId:'s1',requestId:7},f.clock),
     {...checkInput,requestId:7,allowed:true,spaceId:'s1',route:'agent-memory',issuedAtMs:at,expiresAtMs:at+60000});
   await assert.rejects(()=>route(checkRequest(checkInput,'so'),f.key),{status:403,code:'access_denied'});
-  f.db.raw.prepare("UPDATE release_credential_policies SET capabilities='[\"read\"]' WHERE credential_id='key:alice'").run();
-  await assert.rejects(()=>route(checkRequest(),f.key),{status:403,code:'access_denied'});
+  // Credential policies are append-only; demotion is a new read-only credential.
+  const reader='reader-'+'r'.repeat(40);
+  (await f.db.raw.prepare('INSERT INTO credentials(id,account_id,kind,token_digest,expires_at,permission) VALUES(?,?,?,?,?,?)').run('key:reader','alice','personal_key',await digest(reader),at+800000,'write'));
+  (await f.db.raw.prepare('INSERT INTO release_credential_policies(credential_id,capabilities,space_ids) VALUES(?,?,?)').run('key:reader',JSON.stringify(['read']),JSON.stringify(['s1'])));
+  await assert.rejects(()=>route(checkRequest(),reader),{status:403,code:'access_denied'});
   assert.equal((await route(checkRequest({...checkInput,operation:'memory_search'}),f.key)).status,200);
-  f.db.raw.prepare("UPDATE credentials SET revoked_at=? WHERE id='key:alice'").run(at);
+  (await f.db.raw.prepare("UPDATE credentials SET revoked_at=? WHERE id='key:alice'").run(at));
   await assert.rejects(()=>route(checkRequest({...checkInput,operation:'memory_search'}),f.key),{status:403,code:'access_denied'});
   assert.equal(f.touched(),0);
 });
@@ -89,7 +93,7 @@ test('general check rejects content, overrides, unsupported operations and disab
 });
 test('general check expiry is bounded by current authority and spend policy after the last await',async t=>{
   const f=await checkFixture(t),input={...checkInput,spaceId:'s1'};
-  f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='key:alice'").run(at+45000);
+  (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='key:alice'").run(at+45000));
   assert.equal((await checkGeneralRoute(f.env,f.key,input,f.clock)).expiresAtMs,at+45000);
   f.env.MEMORY_ROUTING_BUDGET_POLICY_JSON=JSON.stringify({...policy,validUntilMs:at+20000});
   assert.equal((await checkGeneralRoute(f.env,f.key,input,f.clock)).expiresAtMs,at+20000);

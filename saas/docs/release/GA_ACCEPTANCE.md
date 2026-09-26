@@ -1,5 +1,20 @@
 # 초대 기반·사용량 계량 GA 수락 절차
 
+## 수락 완료 기록 — 2026-09-26/27 (operator-enabled-ga)
+
+PostgreSQL 리전 권한 컷오버 이후 세 배포 모두에서 `/ready`가 `ready:true, stage:"operator-enabled-ga"`를 보고한다.
+
+- 대상: `allenlabs-memory` (prod, 커스텀 도메인), `allenlabs-memory-kr-seoul`, `allenlabs-memory-sg`
+- source revision: `2fc474f25be654f59afa93467dc0084bd0ef656d` (세 배포 동일)
+- acceptance ID: `ga-2026-09-26-prod` / `ga-2026-09-26-kr-seoul` / `ga-2026-09-26-sg`
+- 수락 키: Ed25519 — 공개 키는 각 config의 `LIVE_ACCEPTANCE_PUBLIC_KEY` var, 개인 키는 Proton Pass `Development` vault의 `MemoryService GA acceptance Ed25519 keypair | 20260926` 노트
+- JWS는 `wrangler secret put LIVE_ACCEPTANCE_JWS`로 주입(지문/소스 불변). 5.1kB secret 한도로 `evidenceRef`를 `ga/<deployment>/<gate>` 단축형으로 사용
+- evidence + record + JWS 원본: `C:\Users\allenlim\memory-saas-ops\ga-acceptance\<prod|kr-seoul|sg>\` (리포 밖)
+- schemas: `centralSchemaVersion=19`, `hotSchemaVersion=0` (postgres-only 배포는 hot shard schema 없음 — signer에 0 허용 반영됨)
+- 만료: 서명 시각 +6일. 재서명은 `C:\Users\allenlim\memory-saas-ops\ga-sign.mjs` (GA_REVISION에 배포된 full commit 지정)
+
+이전 날짜의 절차는 아래를 따른다.
+
 선택한 범위는 초대 기반 가입, 관리형 메모리, AI 검색·검토형 추출, 사용량 계량이다. 유료 결제는 제외한다. 이 문서는 실행 절차이며 배포나 실환경 수락 완료 기록이 아니다. 기록된 기존 production rc.3/schema 1–7과 새 소스의 배포 상태는 [통합 기록](INTEGRATION.md)에서 구분한다.
 
 ## 대상과 비용 통제

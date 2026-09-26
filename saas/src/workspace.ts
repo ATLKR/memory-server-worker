@@ -1,6 +1,10 @@
 import { sqlNow } from './sql-clock.ts';
+import { dataPolicySql } from './data-policy.ts';
 import { canonicalEmail, IdentityInvalid } from './identity.ts';
 import type { IdentityDatabase, SqlValue } from './identity.ts';
+import type { SeoulProjectionCapture } from './release/seoul-projection-capture.ts';
+import type { Database } from './release/types.ts';
+import { accountGrantAdmission, deploymentRegion, enrollOrganization, organizationGrantAdmission } from './postgres/enrollment.ts';
 
 export class WorkspaceError extends Error {
   readonly status: number;
@@ -76,10 +80,15 @@ export class WorkspaceService {
   private readonly db: IdentityDatabase;
   private readonly clock: () => number;
   private readonly identityLifecycle: boolean;
-  constructor(db: IdentityDatabase, clock: () => number = Date.now, options: { identityLifecycle?: boolean } = {}) {
+  private readonly control?: Database;
+  private readonly capture?: SeoulProjectionCapture;
+  constructor(db: IdentityDatabase, clock: () => number = Date.now, options: { identityLifecycle?: boolean; control?: Database } = {}, capture?: SeoulProjectionCapture) {
+    capture?.assertDatabase(db);
+    this.capture = capture;
     this.db = db;
     this.clock = clock;
     this.identityLifecycle = options.identityLifecycle === true;
+    this.control = options.control;
   }
   private now(): number {
     const at = this.clock();
@@ -101,6 +110,24 @@ export class WorkspaceService {
       throw new WorkspaceError();
   }
 
+  /** Cross-region grant admission against the control-plane enrollment
+   * directory: the actor — and the org context when one is named — must be
+   * enrolled in this deployment's region before a grant row may be created.
+   * Returns the actor's account id when a control directory is configured.
+   * Single-cluster deployments skip the directory entirely. */
+  private async grantAdmission(hash: string, at: number, organizationId: string | null = null): Promise<string | null> {
+    if (!this.control) return null;
+    const actor = await this.db.prepare(`SELECT c.account_id AS "accountId" FROM memory_identity.active_credentials c
+      WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}`).bind(hash, at).first<{ accountId: string }>();
+    // An unresolvable credential is left to the mutating statement's own
+    // denial — enrollment is checked only for an authenticated actor.
+    if (actor === null) return null;
+    if (!await accountGrantAdmission(this.db, this.control, actor.accountId)
+        || (organizationId !== null && !await organizationGrantAdmission(this.db, this.control, organizationId)))
+      throw new WorkspaceError(403, 'enrollment_required');
+    return actor.accountId;
+  }
+
   async signIn(principal: WorkspacePrincipal, externalToken?: string): Promise<{ token: string; accountId: string; expiresAt: number }> {
     return this.safe(async () => {
       if (!principal || typeof principal !== 'object') invalid();
@@ -113,10 +140,10 @@ export class WorkspaceService {
       const digest = await hashToken(token);
       if (externalToken !== undefined) {
         const existing = await this.db.withSession('first-primary').prepare(`
-          SELECT c.account_id AS accountId,c.expires_at AS expiresAt,c.revoked_at AS revokedAt,c.kind,
-            c.permission,c.id,a.disabled_at AS disabledAt,p.account_id AS mappedAccountId
-          FROM credentials c JOIN accounts a ON a.id=c.account_id
-          LEFT JOIN provider_identities p ON p.issuer=? AND p.subject=? AND p.account_id=c.account_id
+          SELECT c.account_id AS "accountId",c.expires_at AS "expiresAt",c.revoked_at AS "revokedAt",c.kind,
+            c.permission,c.id,a.disabled_at AS "disabledAt",p.account_id AS "mappedAccountId"
+          FROM memory_identity.runtime_credentials c JOIN memory_identity.runtime_accounts a ON a.id=c.account_id
+          LEFT JOIN memory_identity.active_provider_identities p ON p.issuer=? AND p.subject=? AND p.account_id=c.account_id
           WHERE c.token_digest=?`).bind(issuer, subject, digest).first<{
             accountId: string; expiresAt: number; revokedAt: number | null; kind: string;
             permission: string; id: string; disabledAt: number | null; mappedAccountId: string | null;
@@ -136,14 +163,20 @@ export class WorkspaceService {
       let email: { address: string; domain: string } | null = null;
       if (principal.emailVerified === true && principal.email !== undefined) email = canonicalEmail(principal.email);
       const credentialId = externalToken === undefined ? `session:${crypto.randomUUID()}` : `oauth:${digest}`;
-      await this.write(`INSERT INTO workspace_sign_ins(id,issuer,subject,new_account_id,credential_id,token_digest,
-        expires_at,permission,email_id,address,domain,personal_space_id,created_at${this.identityLifecycle ? ',issued_at' : ''})
-        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?${this.identityLifecycle ? ',?' : ''} WHERE ?>${sqlNow()}`, [crypto.randomUUID(), issuer, subject, crypto.randomUUID(), credentialId,
-        digest, expiresAt, granted, crypto.randomUUID(), email?.address ?? null, email?.domain ?? null, crypto.randomUUID(), at,
-        ...(this.identityLifecycle ? [principal.issuedAt ?? null] : []), expiresAt, at]);
+      const receiptId = crypto.randomUUID(), newAccountId = crypto.randomUUID(), emailId = crypto.randomUUID(), spaceId = crypto.randomUUID();
+      const sql = `INSERT INTO memory_identity.workspace_sign_ins(id,issuer,subject,new_account_id,credential_id,token_digest,
+        expires_at,permission,email_id,address,domain,personal_space_id,data_policy,created_at${this.identityLifecycle ? ',issued_at' : ''})
+        SELECT ?,?,?,?,?,?,?,?,?,?,?,?,${dataPolicySql('?')},?${this.identityLifecycle ? ',?' : ''} WHERE ?>${sqlNow()}`;
+      const values = [receiptId, issuer, subject, newAccountId, credentialId,
+        digest, expiresAt, granted, emailId, email?.address ?? null, email?.domain ?? null, spaceId, null, at,
+        ...(this.identityLifecycle ? [principal.issuedAt ?? null] : []), expiresAt, at];
+      if (this.capture) {
+        const result = await this.capture.workspaceBootstrap(this.db, { commandType:'workspace-sign-in', receiptId, issuer, subject, newAccountId, credentialId, emailId, address:email?.address ?? null, spaceId }, sql, values);
+        if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new WorkspaceError();
+      } else await this.write(sql, values);
       const created = await this.db.withSession('first-primary').prepare(`
-        SELECT c.account_id AS accountId,c.expires_at AS expiresAt FROM active_credentials c
-        JOIN provider_identities p ON p.account_id=c.account_id AND p.issuer=? AND p.subject=?
+        SELECT c.account_id AS "accountId",c.expires_at AS "expiresAt" FROM memory_identity.active_credentials c
+        JOIN memory_identity.active_provider_identities p ON p.account_id=c.account_id AND p.issuer=? AND p.subject=?
         WHERE c.token_digest=? AND c.kind='session' AND c.expires_at>${sqlNow()} AND c.permission=?`)
         .bind(issuer, subject, digest, this.now(), granted).first<{ accountId: string; expiresAt: number }>();
       if (!created || created.expiresAt <= this.now()) throw new WorkspaceError(401, 'unauthorized');
@@ -155,13 +188,13 @@ export class WorkspaceService {
     return this.safe(async () => {
       const hash = await hashToken(token);
       const at = this.now();
-      const membershipExpiry = `max(CASE WHEN s.account_id=c.account_id THEN 9007199254740991 ELSE 0 END,
-        coalesce((SELECT MAX(m.expires_at) FROM active_memberships m WHERE m.account_id=c.account_id AND m.organization_id=s.organization_id),0))`;
+      const membershipExpiry = `greatest(CASE WHEN s.owner_account_id=c.account_id THEN 9007199254740991 ELSE 0 END,
+        coalesce((SELECT max(m.expires_at) FROM memory_identity.active_memberships m WHERE m.account_id=c.account_id AND m.organization_id=s.organization_id),0))`;
       const access = spaceAccess?.(hash, at) ?? {
-        read: `s.account_id=c.account_id OR EXISTS(SELECT 1 FROM active_memberships m
+        read: `s.owner_account_id=c.account_id OR EXISTS(SELECT 1 FROM memory_identity.active_memberships m
           WHERE m.account_id=c.account_id AND m.organization_id=s.organization_id AND m.expires_at>${sqlNow()})`,
         readValues: [at],
-        write: `c.permission='write' AND (s.account_id=c.account_id OR EXISTS(SELECT 1 FROM active_memberships writer
+        write: `c.permission='write' AND (s.owner_account_id=c.account_id OR EXISTS(SELECT 1 FROM memory_identity.active_memberships writer
           WHERE writer.account_id=c.account_id AND writer.organization_id=s.organization_id
             AND writer.expires_at>${sqlNow()} AND writer.role IN ('owner','admin')))`,
         writeValues: [at],
@@ -171,46 +204,46 @@ export class WorkspaceService {
       // One primary snapshot prevents mixed-tenant/stale joins between separate
       // authorization and data reads. Every correlated collection starts at c.
       const result = await this.db.withSession('first-primary').prepare(`
-        SELECT c.account_id AS accountId,c.expires_at AS credentialExpiresAt,
-          (SELECT json_group_array(json_object('id',e.id,'address',e.address)) FROM account_emails e
-            WHERE e.account_id=c.account_id AND e.revoked_at IS NULL) AS emails,
-          (SELECT json_group_array(json_object('id',s.id,'name',s.name,'organizationId',s.organization_id,
+        SELECT c.account_id AS "accountId",c.expires_at AS "credentialExpiresAt",
+          coalesce((SELECT jsonb_agg(jsonb_build_object('id',e.id,'address',e.address)) FROM memory_identity.runtime_account_emails e
+            WHERE e.account_id=c.account_id AND e.revoked_at IS NULL),'[]'::jsonb)::text AS emails,
+          coalesce((SELECT jsonb_agg(jsonb_build_object('id',s.id,'name',s.name,'organizationId',s.organization_id,
             'securityMode',s.security_mode,'canWrite',CASE WHEN ${access.write} THEN 1 ELSE 0 END,
             '_readUntil',${access.readExpires ?? '9007199254740991'},'_writeUntil',${access.writeExpires ?? '9007199254740991'}))
-            FROM spaces s WHERE s.id IN (
-              SELECT owned.id FROM spaces owned WHERE owned.account_id=c.account_id
-              UNION SELECT managed.id FROM active_memberships member
-                JOIN spaces managed ON managed.organization_id=member.organization_id
+            FROM memory_control.spaces s WHERE s.id IN (
+              SELECT owned.id FROM memory_control.spaces owned WHERE owned.owner_account_id=c.account_id
+              UNION SELECT managed.id FROM memory_identity.active_memberships member
+                JOIN memory_control.spaces managed ON managed.organization_id=member.organization_id
                 WHERE member.account_id=c.account_id
               ${access.additionalCandidates ? `UNION ${access.additionalCandidates}` : ''}
-            ) AND (${access.read})) AS spaces,
-          (SELECT json_group_array(json_object('id',m.organization_id,'name',coalesce(o.name,'Organization'),
+            ) AND (${access.read})),'[]'::jsonb)::text AS spaces,
+          coalesce((SELECT jsonb_agg(jsonb_build_object('id',m.organization_id,'name',coalesce(o.name,'Organization'),
             'role',m.role,'membershipId',m.id,'_expiresAt',m.expires_at,
-            '_parentExpiresAt',coalesce((SELECT MAX(parent.expires_at) FROM active_memberships parent WHERE parent.account_id=c.account_id AND parent.organization_id=h.parent_organization_id),0),
+            '_parentExpiresAt',coalesce((SELECT max(parent.expires_at) FROM memory_identity.active_memberships parent WHERE parent.account_id=c.account_id AND parent.organization_id=h.parent_organization_id),0),
             'parentId',CASE WHEN EXISTS(
-              SELECT 1 FROM active_memberships parent WHERE parent.account_id=c.account_id
+              SELECT 1 FROM memory_identity.active_memberships parent WHERE parent.account_id=c.account_id
                 AND parent.organization_id=h.parent_organization_id AND parent.expires_at>${sqlNow()})
-              THEN h.parent_organization_id ELSE NULL END)) FROM active_memberships m
-            LEFT JOIN workspace_organization_metadata o ON o.organization_id=m.organization_id
-            LEFT JOIN organization_hierarchy h ON h.organization_id=m.organization_id
-            WHERE m.account_id=c.account_id AND m.expires_at>${sqlNow()}) AS organizations,
-          (SELECT json_group_array(json_object('id',k.id,'label',coalesce(meta.label,'API key'),'kind',k.kind,
+              THEN h.parent_organization_id ELSE NULL END)) FROM memory_identity.active_memberships m
+            LEFT JOIN memory_identity.workspace_organization_metadata o ON o.organization_id=m.organization_id
+            LEFT JOIN memory_identity.organization_hierarchy h ON h.organization_id=m.organization_id
+            WHERE m.account_id=c.account_id AND m.expires_at>${sqlNow()}),'[]'::jsonb)::text AS organizations,
+          coalesce((SELECT jsonb_agg(jsonb_build_object('id',k.id,'label',coalesce(meta.label,'API key'),'kind',k.kind,
             'organizationId',km.organization_id,'permission',k.permission,'expiresAt',k.expires_at,'revokedAt',k.revoked_at,
-            '_authorityExpiresAt',CASE WHEN k.account_id=c.account_id THEN 9007199254740991 ELSE coalesce((SELECT MAX(admin.expires_at)
-              FROM active_memberships admin WHERE admin.account_id=c.account_id AND admin.organization_id=km.organization_id AND admin.role IN ('owner','admin')),0) END))
-            FROM credentials k LEFT JOIN workspace_key_metadata meta ON meta.credential_id=k.id
-            LEFT JOIN memberships km ON km.id=k.membership_id AND km.account_id=k.account_id AND km.email_id=k.email_id
+            '_authorityExpiresAt',CASE WHEN k.account_id=c.account_id THEN 9007199254740991 ELSE coalesce((SELECT max(admin.expires_at)
+              FROM memory_identity.active_memberships admin WHERE admin.account_id=c.account_id AND admin.organization_id=km.organization_id AND admin.role IN ('owner','admin')),0) END))
+            FROM memory_identity.runtime_credentials k LEFT JOIN memory_identity.workspace_key_metadata meta ON meta.credential_id=k.id
+            LEFT JOIN memory_identity.runtime_memberships km ON km.id=k.membership_id AND km.account_id=k.account_id AND km.email_id=k.email_id
             WHERE k.id IN (
-              SELECT owned.id FROM credentials owned WHERE owned.account_id=c.account_id AND owned.kind IN ('personal_key','api_key')
-              UNION SELECT organization_key.id FROM active_memberships admin
-                CROSS JOIN memberships member ON member.organization_id=admin.organization_id
-                CROSS JOIN credentials organization_key ON organization_key.membership_id=member.id
+              SELECT owned.id FROM memory_identity.runtime_credentials owned WHERE owned.account_id=c.account_id AND owned.kind IN ('personal_key','api_key')
+              UNION SELECT organization_key.id FROM memory_identity.active_memberships admin
+                JOIN memory_identity.runtime_memberships member ON member.organization_id=admin.organization_id
+                JOIN memory_identity.runtime_credentials organization_key ON organization_key.membership_id=member.id
                   AND organization_key.account_id=member.account_id AND organization_key.email_id=member.email_id
                 WHERE admin.account_id=c.account_id AND admin.role IN ('owner','admin') AND organization_key.kind='api_key'
             ) AND k.kind IN ('personal_key','api_key') AND (k.account_id=c.account_id OR EXISTS(
-              SELECT 1 FROM active_memberships admin WHERE admin.account_id=c.account_id
-                AND admin.organization_id=km.organization_id AND admin.expires_at>${sqlNow()} AND admin.role IN ('owner','admin')))) AS keys
-        FROM active_credentials c WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}`)
+              SELECT 1 FROM memory_identity.active_memberships admin WHERE admin.account_id=c.account_id
+                AND admin.organization_id=km.organization_id AND admin.expires_at>${sqlNow()} AND admin.role IN ('owner','admin')))),'[]'::jsonb)::text AS keys
+        FROM memory_identity.active_credentials c WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}`)
         .bind(...access.writeValues, ...access.readValues, at, at, at, hash, at).first<{ accountId: string; credentialExpiresAt: number; emails: string; spaces: string; organizations: string; keys: string }>();
       const checkedAt = this.now();
       if (!result || result.credentialExpiresAt <= checkedAt) throw new WorkspaceError(401, 'unauthorized');
@@ -229,25 +262,42 @@ export class WorkspaceService {
       const hash = await hashToken(token); const at = this.now();
       const orgName = name(input.name); const emailId = identifier(input.emailId);
       const parentId = input.parentOrganizationId === undefined ? null : identifier(input.parentOrganizationId);
+      await this.grantAdmission(hash, at, parentId);
       const id = crypto.randomUUID(); const spaceId = crypto.randomUUID();
+      const membershipId = crypto.randomUUID();
+      // A new organization is enrolled in the region it is created in — this
+      // is its first enrollment, never a resurrection of a removed one. The
+      // directory row precedes the regional write: a dangling skeleton grants
+      // nothing, while the reverse order could leave a live regional grant
+      // under an unenrolled organization.
+      if (this.control) {
+        const region = await deploymentRegion(this.db);
+        if (region === null) throw new WorkspaceError();
+        await enrollOrganization(this.control, id, region, at);
+      }
+      let sql: string, values: SqlValue[];
       if (parentId === null) {
-        await this.write(`INSERT INTO workspace_organization_creations(id,name,actor_credential_id,email_id,membership_id,space_id,created_at)
-          SELECT ?,?,c.id,e.id,?,?,? FROM active_credentials c JOIN account_emails e ON e.account_id=c.account_id
-          WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE} AND e.id=? AND e.revoked_at IS NULL`,
-          [id, orgName, crypto.randomUUID(), spaceId, at, hash, at, emailId]);
+        sql = `INSERT INTO memory_identity.workspace_organization_creations(id,name,actor_credential_id,email_id,membership_id,space_id,data_policy,created_at)
+          SELECT ?,?,c.id,e.id,?,?,${dataPolicySql('?')},? FROM memory_identity.active_credentials c JOIN memory_identity.runtime_account_emails e ON e.account_id=c.account_id
+          WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE} AND e.id=? AND e.revoked_at IS NULL`;
+        values = [id, orgName, membershipId, spaceId, null, at, hash, at, emailId];
       } else {
         // One command atomically creates the child, owner membership, default
         // Space and immutable edge. Parent authority is used only at creation.
-        await this.write(`INSERT INTO workspace_child_organization_creations
-          (id,parent_organization_id,name,actor_credential_id,email_id,membership_id,space_id,created_at)
-          SELECT ?,m.organization_id,?,c.id,e.id,?,?,? FROM active_credentials c
-          JOIN active_memberships m ON m.account_id=c.account_id
-          JOIN account_emails e ON e.account_id=c.account_id
+        sql = `INSERT INTO memory_identity.workspace_child_organization_creations
+          (id,parent_organization_id,name,actor_credential_id,email_id,membership_id,space_id,data_policy,created_at)
+          SELECT ?,m.organization_id,?,c.id,e.id,?,?,${dataPolicySql('?')},? FROM memory_identity.active_credentials c
+          JOIN memory_identity.active_memberships m ON m.account_id=c.account_id
+          JOIN memory_identity.runtime_account_emails e ON e.account_id=c.account_id
           WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}
             AND m.organization_id=? AND m.expires_at>${sqlNow()} AND m.role IN ('owner','admin')
-            AND e.id=? AND e.revoked_at IS NULL`,
-          [id, orgName, crypto.randomUUID(), spaceId, at, hash, at, parentId, at, emailId]);
+            AND e.id=? AND e.revoked_at IS NULL`;
+        values = [id, orgName, membershipId, spaceId, null, at, hash, at, parentId, at, emailId];
       }
+      if (this.capture) {
+        const result = await this.capture.workspaceBootstrap(this.db, { commandType:parentId === null ? 'organization-create' : 'organization-child-create', receiptId:id, emailId, membershipId, spaceId }, sql, values);
+        if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new WorkspaceError();
+      } else await this.write(sql, values);
       return { id, name: orgName, spaceId };
     });
   }
@@ -261,13 +311,13 @@ export class WorkspaceService {
       const id = crypto.randomUUID(); const proof = randomToken(); const proofHash = await hashToken(proof);
       const at = this.now();
       const expiresAt = at + 3 * DAY;
-      await this.write(`INSERT INTO workspace_invitations(id,organization_id,address,role,token_digest,
+      await this.write(`INSERT INTO memory_identity.workspace_invitations(id,organization_id,address,role,token_digest,
         creator_membership_id,actor_credential_id,created_at,expires_at)
-        SELECT ?,m.organization_id,?,?,?,m.id,c.id,?,? FROM active_credentials c
-        JOIN active_memberships m ON m.account_id=c.account_id
+        SELECT ?,m.organization_id,?,?,?,m.id,c.id,?,? FROM memory_identity.active_credentials c
+        JOIN memory_identity.active_memberships m ON m.account_id=c.account_id
         WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}
           AND m.organization_id=? AND m.expires_at>${sqlNow()} AND m.role IN ('owner','admin')
-          AND NOT EXISTS(SELECT 1 FROM email_blocks b WHERE b.address=?)`,
+          AND NOT EXISTS(SELECT 1 FROM memory_identity.email_blocks b WHERE b.address=?)`,
         [id, address, input.role, proofHash, at, expiresAt, hash, at, organizationId, at, address]);
       return { id, token: proof, expiresAt };
     });
@@ -277,20 +327,33 @@ export class WorkspaceService {
     return this.safe(async () => {
       const hash = await hashToken(token); const inviteHash = await hashToken(inviteToken); const at = this.now();
       const id = crypto.randomUUID();
-      await this.write(`INSERT INTO workspace_invitation_acceptances(id,invitation_id,actor_credential_id,email_id,created_at)
-        SELECT ?,i.id,c.id,e.id,? FROM workspace_invitations i
-        JOIN active_memberships creator ON creator.id=i.creator_membership_id AND creator.organization_id=i.organization_id
-        JOIN active_credentials c ON c.token_digest=?
-        JOIN account_emails e ON e.account_id=c.account_id AND e.address=i.address
+      // Accepting is the enrollment-consent act: the invitee's new membership
+      // is a grant in the invitation's region, so the accepting account and
+      // the organization must both be enrolled here. An unreadable/absent
+      // invitation leaves the mutating statement to deny on its own.
+      const invitation = this.control === undefined ? null : await this.db.prepare(
+        `SELECT i.organization_id AS "organizationId" FROM memory_identity.workspace_invitations i
+         WHERE i.token_digest=? AND i.accepted_at IS NULL AND i.expires_at>${sqlNow()}`)
+        .bind(inviteHash, at).first<{ organizationId: string }>();
+      await this.grantAdmission(hash, at, invitation?.organizationId ?? null);
+      const sql = `INSERT INTO memory_identity.workspace_invitation_acceptances(id,invitation_id,actor_credential_id,email_id,created_at)
+        SELECT ?,i.id,c.id,e.id,? FROM memory_identity.workspace_invitations i
+        JOIN memory_identity.active_memberships creator ON creator.id=i.creator_membership_id AND creator.organization_id=i.organization_id
+        JOIN memory_identity.active_credentials c ON c.token_digest=?
+        JOIN memory_identity.runtime_account_emails e ON e.account_id=c.account_id AND e.address=i.address
         WHERE i.token_digest=? AND i.accepted_at IS NULL AND i.expires_at>${sqlNow()}
           AND c.expires_at>${sqlNow()} AND ${INTERACTIVE} AND e.revoked_at IS NULL
           AND creator.expires_at>${sqlNow()} AND creator.role IN ('owner','admin')
-          AND NOT EXISTS(SELECT 1 FROM email_blocks b WHERE b.address=i.address)
-          AND NOT EXISTS(SELECT 1 FROM memberships existing WHERE existing.organization_id=i.organization_id
-            AND existing.account_id=c.account_id AND existing.revoked_at IS NULL)`,
-        [id, at, hash, inviteHash, at, at, at]);
+          AND NOT EXISTS(SELECT 1 FROM memory_identity.email_blocks b WHERE b.address=i.address)
+          AND NOT EXISTS(SELECT 1 FROM memory_identity.runtime_memberships existing WHERE existing.organization_id=i.organization_id
+            AND existing.account_id=c.account_id AND existing.revoked_at IS NULL)`;
+      const values = [id, at, hash, inviteHash, at, at, at];
+      if (this.capture) {
+        const result = await this.capture.workspaceCommand(this.db, { commandType:'invite-accept', receiptId:id, entityId:id, actorDigest:hash, invitationDigest:inviteHash, commandAt:at }, sql, values);
+        if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new WorkspaceError();
+      } else await this.write(sql, values);
       const result = await this.db.withSession('first-primary').prepare(`
-        SELECT organization_id AS organizationId FROM memberships WHERE id=?`).bind(id).first<{ organizationId: string }>();
+        SELECT organization_id AS "organizationId" FROM memory_identity.runtime_memberships WHERE id=?`).bind(id).first<{ organizationId: string }>();
       if (!result) throw new WorkspaceError();
       return { organizationId: result.organizationId };
     });
@@ -300,13 +363,13 @@ export class WorkspaceService {
     return this.safe(async () => {
       const hash = await hashToken(token); const at = this.now(); const organizationId = identifier(orgId);
       const rows = await this.db.withSession('first-primary').prepare(`
-        SELECT target.id,target.account_id AS accountId,e.address AS email,target.role,target.expires_at AS expiresAt,
-          c.expires_at AS credentialExpiresAt,actor.expires_at AS authorityExpiresAt
-        FROM active_credentials c JOIN active_memberships actor ON actor.account_id=c.account_id
-        LEFT JOIN memberships target ON target.organization_id=actor.organization_id AND target.expires_at>${sqlNow()} AND target.revoked_at IS NULL
-          AND EXISTS(SELECT 1 FROM account_emails te JOIN accounts ta ON ta.id=te.account_id AND ta.disabled_at IS NULL
+        SELECT target.id,target.account_id AS "accountId",e.address AS email,target.role,target.expires_at AS "expiresAt",
+          c.expires_at AS "credentialExpiresAt",actor.expires_at AS "authorityExpiresAt"
+        FROM memory_identity.active_credentials c JOIN memory_identity.active_memberships actor ON actor.account_id=c.account_id
+        LEFT JOIN memory_identity.runtime_memberships target ON target.organization_id=actor.organization_id AND target.expires_at>${sqlNow()} AND target.revoked_at IS NULL
+          AND EXISTS(SELECT 1 FROM memory_identity.runtime_account_emails te JOIN memory_identity.runtime_accounts ta ON ta.id=te.account_id AND ta.disabled_at IS NULL
             WHERE te.id=target.email_id AND te.account_id=target.account_id AND te.revoked_at IS NULL)
-        LEFT JOIN account_emails e ON e.id=target.email_id AND e.account_id=target.account_id AND e.revoked_at IS NULL
+        LEFT JOIN memory_identity.runtime_account_emails e ON e.id=target.email_id AND e.account_id=target.account_id AND e.revoked_at IS NULL
         WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}
           AND actor.organization_id=? AND actor.expires_at>${sqlNow()} AND actor.role IN ('owner','admin')
         ORDER BY CASE target.role WHEN 'owner' THEN 0 WHEN 'admin' THEN 1 ELSE 2 END,e.address,target.id`)
@@ -325,15 +388,20 @@ export class WorkspaceService {
     return this.safe(async () => {
       const hash = await hashToken(token); const at = this.now();
       const organizationId = identifier(orgId); const targetId = identifier(membershipId);
-      await this.write(`INSERT INTO workspace_membership_revocations(id,actor_credential_id,organization_id,membership_id,created_at)
-        SELECT ?,c.id,actor.organization_id,target.id,? FROM active_credentials c
-        JOIN active_memberships actor ON actor.account_id=c.account_id AND actor.organization_id=?
-        JOIN memberships target ON target.id=? AND target.organization_id=actor.organization_id
+      const receiptId = crypto.randomUUID();
+      const sql = `INSERT INTO memory_identity.workspace_membership_revocations(id,actor_credential_id,organization_id,membership_id,created_at)
+        SELECT ?,c.id,actor.organization_id,target.id,? FROM memory_identity.active_credentials c
+        JOIN memory_identity.active_memberships actor ON actor.account_id=c.account_id AND actor.organization_id=?
+        JOIN memory_identity.runtime_memberships target ON target.id=? AND target.organization_id=actor.organization_id
         WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}
           AND actor.expires_at>${sqlNow()} AND actor.role IN ('owner','admin') AND target.revoked_at IS NULL
-          AND (target.role<>'owner' OR (actor.role='owner' AND EXISTS(SELECT 1 FROM active_memberships other
-            WHERE other.organization_id=actor.organization_id AND other.role='owner' AND other.expires_at>${sqlNow()} AND other.id<>target.id)))`,
-        [crypto.randomUUID(), at, organizationId, targetId, hash, at, at, at]);
+          AND (target.role<>'owner' OR (actor.role='owner' AND EXISTS(SELECT 1 FROM memory_identity.active_memberships other
+            WHERE other.organization_id=actor.organization_id AND other.role='owner' AND other.expires_at>${sqlNow()} AND other.id<>target.id)))`;
+      const values = [receiptId, at, organizationId, targetId, hash, at, at, at];
+      if (this.capture) {
+        const result = await this.capture.workspaceCommand(this.db, { commandType:'membership-revoke', receiptId, entityId:targetId, actorDigest:hash, organizationId, commandAt:at }, sql, values);
+        if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new WorkspaceError();
+      } else await this.write(sql, values);
     });
   }
 
@@ -345,14 +413,19 @@ export class WorkspaceService {
       if (!Number.isInteger(input.expiresInDays) || input.expiresInDays < 1 || input.expiresInDays > 90) invalid();
       const id = crypto.randomUUID(); const proof = randomToken(); const proofHash = await hashToken(proof);
       const at = this.now(); const expiresAt = at + input.expiresInDays * DAY;
-      await this.write(`INSERT INTO workspace_key_issuances(id,actor_credential_id,organization_id,label,permission,token_digest,created_at,expires_at)
-        SELECT ?,c.id,?,?,?,?,?,? FROM active_credentials c
+      await this.grantAdmission(hash, at, organizationId);
+      const sql = `INSERT INTO memory_identity.workspace_key_issuances(id,actor_credential_id,organization_id,label,permission,token_digest,created_at,expires_at)
+        SELECT ?,c.id,?,?,?,?,?,? FROM memory_identity.active_credentials c
         WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}
           AND (?='read' OR c.permission='write')
-          AND (? IS NULL OR EXISTS(SELECT 1 FROM active_memberships m
+          AND (?::text IS NULL OR EXISTS(SELECT 1 FROM memory_identity.active_memberships m
             WHERE m.account_id=c.account_id AND m.organization_id=? AND m.expires_at>${sqlNow()}
-              AND (?='read' OR m.role IN ('owner','admin'))))`,
-        [id, organizationId, label, granted, proofHash, at, expiresAt, hash, at, granted, organizationId, organizationId, at, granted]);
+              AND (?='read' OR m.role IN ('owner','admin'))))`;
+      const values = [id, organizationId, label, granted, proofHash, at, expiresAt, hash, at, granted, organizationId, organizationId, at, granted];
+      if (this.capture) {
+        const result = await this.capture.workspaceCommand(this.db, { commandType:'workspace-key-issue', receiptId:id, entityId:id, actorDigest:hash, organizationId, commandAt:at }, sql, values);
+        if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new WorkspaceError();
+      } else await this.write(sql, values);
       return { id, token: proof, expiresAt };
     });
   }
@@ -360,15 +433,20 @@ export class WorkspaceService {
   async revokeKey(token: string, keyId: string): Promise<void> {
     return this.safe(async () => {
       const hash = await hashToken(token); const at = this.now(); const id = identifier(keyId);
-      await this.write(`INSERT INTO workspace_key_revocations(id,actor_credential_id,credential_id,created_at)
-        SELECT ?,c.id,target.id,? FROM active_credentials c JOIN credentials target ON target.id=?
-        LEFT JOIN memberships target_member ON target_member.id=target.membership_id
+      const receiptId = crypto.randomUUID();
+      const sql = `INSERT INTO memory_identity.workspace_key_revocations(id,actor_credential_id,credential_id,created_at)
+        SELECT ?,c.id,target.id,? FROM memory_identity.active_credentials c JOIN memory_identity.runtime_credentials target ON target.id=?
+        LEFT JOIN memory_identity.runtime_memberships target_member ON target_member.id=target.membership_id
         WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE}
           AND target.kind IN ('personal_key','api_key') AND target.revoked_at IS NULL
-          AND (target.account_id=c.account_id OR EXISTS(SELECT 1 FROM active_memberships actor
+          AND (target.account_id=c.account_id OR EXISTS(SELECT 1 FROM memory_identity.active_memberships actor
             WHERE actor.account_id=c.account_id AND actor.organization_id=target_member.organization_id
-              AND actor.expires_at>${sqlNow()} AND actor.role IN ('owner','admin')))`,
-        [crypto.randomUUID(), at, id, hash, at, at]);
+              AND actor.expires_at>${sqlNow()} AND actor.role IN ('owner','admin')))`;
+      const values = [receiptId, at, id, hash, at, at];
+      if (this.capture) {
+        const result = await this.capture.workspaceCommand(this.db, { commandType:'workspace-key-revoke', receiptId, entityId:id, actorDigest:hash, commandAt:at }, sql, values);
+        if (!result.success || !Number.isSafeInteger(result.meta.changes) || (result.meta.changes ?? 0) < 1) throw new WorkspaceError();
+      } else await this.write(sql, values);
     });
   }
 }

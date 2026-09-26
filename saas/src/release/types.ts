@@ -81,6 +81,9 @@ export interface AI {
 }
 export interface ReleaseEnv extends StorageEnv {
     DB: Database;
+    /** Control-plane catalog handle (pools, checkout, billing ledger). Falls
+     * back to DB when the deployment runs one cluster. */
+    CONTROL_DB?: Database;
     MEMORY_SQL_BACKEND?: 'd1' | 'durable';
     /** HTTP/cron quiescence gate; SQL fences and in-flight draining are still
      * required before a migration snapshot can be considered frozen. */
@@ -88,7 +91,7 @@ export interface ReleaseEnv extends StorageEnv {
     MEMORY_SQL_DEPLOYMENT_ID?: string;
     MEMORY_SQL_EPOCH?: string;
     MEMORY_SQL_DATABASES_JSON?: string;
-    MEMORY_SQL?: { getByName(name: string): import('../durable-sql/types.ts').DurableSqlStub };
+    MEMORY_SQL?: { getByName(name: string): import('../deprecated-durable-sql/types.ts').DurableSqlStub };
     /** Transitional consent runtime: identity authority still uses DB. */
     MEMORY_CONSENT_LEDGER?: import('../routing/ledger-types.ts').RoutingLedger;
     MEMORY_ROUTING_ENABLED?: 'true' | 'false';
@@ -161,6 +164,8 @@ export interface Extension {
     route(request: Request, token: string): Promise<Response | null>;
     signedIn(principal: unknown, session: {
         token: string;
+        accountId: string;
+        expiresAt: number;
     }, external: boolean): Promise<void>;
     scheduled(): Promise<void>;
 }

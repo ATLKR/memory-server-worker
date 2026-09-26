@@ -27,29 +27,32 @@ export function renderPage(brand: Brand, hasManagement = false, origin = PUBLIC_
   const support = escapeHtml(brand.supportEmail);
   const supportHref = escapeHtml(supportEmailHref(brand.supportEmail));
   const mark = escapeHtml(Array.from(brand.shortName)[0] ?? '');
-  const mcpEndpoint = escapeHtml(new URL('/mcp', origin).href);
+  const mcpEndpoint = escapeHtml(`${origin}/mcp`);
+  // `origin` carries the deployment's public path prefix (e.g. `/kr-seoul`).
+  // Root-relative links must keep it or the browser escapes to the origin root.
+  const publicPath = escapeHtml(new URL(origin).pathname.replace(/\/+$/, ''));
   return `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="${description}"><meta name="color-scheme" content="light">
-<title>${name}</title><link rel="stylesheet" href="/assets/app.css"><script src="/assets/app.js" defer></script></head>
+<title>${name}</title><link rel="stylesheet" href="${publicPath}/assets/app.css"><script src="${publicPath}/assets/app.js" defer></script></head>
 <body data-management="${hasManagement}" data-mcp-endpoint="${mcpEndpoint}"><a class="skip-link" href="#main-content">본문으로 건너뛰기</a>
 <div id="boot" class="boot" role="status"><span class="brand-mark" aria-hidden="true">${mark}</span><p>작업 공간을 불러오고 있어요.</p></div>
 <section id="welcome" class="welcome" hidden aria-labelledby="welcome-title">
-  <header class="welcome-header"><a class="brand" href="/" aria-label="${name} 홈"><span class="brand-mark" aria-hidden="true">${mark}</span><span>${shortName}</span></a><span class="badge">Standard</span></header>
-  <div class="welcome-grid"><div class="welcome-copy"><p class="eyebrow">A PLACE FOR WHAT MATTERS</p><h1 id="welcome-title">기억은 남기고,<br>다음 일에 집중하세요.</h1><p class="welcome-description">${description}</p><p class="welcome-subtitle">대화 속 결정부터 오래 쓸 지식까지.<br>나와 팀, 에이전트가 같은 맥락에서 이어갑니다.</p><a id="sign-in" class="button primary sign-in" href="/auth/login">계속하려면 로그인 <span aria-hidden="true">↗</span></a><p class="fine-print">기존 계정으로 안전하게 연결됩니다.</p><p id="welcome-error" class="error" role="alert" hidden></p></div>
+  <header class="welcome-header"><a class="brand" href="${publicPath}/" aria-label="${name} 홈"><span class="brand-mark" aria-hidden="true">${mark}</span><span>${shortName}</span></a><span class="badge">Standard</span></header>
+  <div class="welcome-grid"><div class="welcome-copy"><p class="eyebrow">A PLACE FOR WHAT MATTERS</p><h1 id="welcome-title">기억은 남기고,<br>다음 일에 집중하세요.</h1><p class="welcome-description">${description}</p><p class="welcome-subtitle">대화 속 결정부터 오래 쓸 지식까지.<br>나와 팀, 에이전트가 같은 맥락에서 이어갑니다.</p><a id="sign-in" class="button primary sign-in" href="${publicPath}/auth/login">계속하려면 로그인 <span aria-hidden="true">↗</span></a><p class="fine-print">기존 계정으로 안전하게 연결됩니다.</p><p id="welcome-error" class="error" role="alert" hidden></p></div>
     <div class="welcome-preview" aria-label="메모리 작업 공간 소개"><div class="preview-top"><span class="small-dot"></span><span>생각이 쌓이는 공간</span><span class="preview-corner" aria-hidden="true">↗</span></div><div class="preview-note"><span class="eyebrow">01 / CAPTURE</span><h2>다음 대화에 필요한 맥락</h2><p>무엇을 결정했는지, 왜 그랬는지.<br>흩어진 기록을 하나의 기억으로.</p><span class="tag">나의 공간</span><span class="tag">팀의 지식</span></div><div class="preview-bottom"><span class="preview-symbol" aria-hidden="true">↳</span><div><strong>저장하고, 찾고, 이어가세요.</strong><p>필요할 때 바로 꺼내 쓸 수 있도록.</p></div></div></div>
   </div><div class="trust-note"><span class="small-dot"></span><p><strong>Standard · 서버 관리형 저장</strong><br>서비스가 메모리를 저장하고 처리합니다. Zero-Access 암호화 서비스가 아닙니다.</p></div>
   <footer class="welcome-footer"><span>${name}</span><a href="${supportHref}">${support}</a></footer>
 </section>
 <div id="workspace" class="workspace" hidden>
-  <aside class="sidebar" aria-label="작업 공간 탐색"><a class="brand" href="/" aria-label="${name} 홈"><span class="brand-mark" aria-hidden="true">${mark}</span><span>${shortName}</span></a><div class="sidebar-intro">기억이 이어지는 곳</div>
+  <aside class="sidebar" aria-label="작업 공간 탐색"><a class="brand" href="${publicPath}/" aria-label="${name} 홈"><span class="brand-mark" aria-hidden="true">${mark}</span><span>${shortName}</span></a><div class="sidebar-intro">기억이 이어지는 곳</div>
     <div class="sidebar-heading"><h2>공간</h2><button id="new-space" class="icon-button" type="button" aria-label="새 공간 만들기">+</button></div><nav id="space-list" class="space-list" aria-label="메모리 공간"></nav>
     <div class="sidebar-tools"><span class="sidebar-label">함께 쓰기</span><button id="new-organization" class="nav-action" type="button"><span aria-hidden="true">⊞</span> 조직 만들기</button><button id="manage-members" class="nav-action" type="button" hidden><span aria-hidden="true">◫</span> 조직 멤버 관리</button><button id="accept-invite" class="nav-action" type="button"><span aria-hidden="true">↳</span> 초대 코드로 참여</button><button id="manage-keys" class="nav-action" type="button"><span aria-hidden="true">⌘</span> 에이전트 연결 · API 키</button></div>
     <div class="sidebar-bottom"><div class="storage-note"><span class="small-dot"></span><div><strong>Standard</strong><span>서버 관리형 메모리</span></div></div><div class="account-line"><div class="account-avatar" aria-hidden="true">나</div><div><strong id="account-name">내 계정</strong><span id="account-email"></span></div><button id="logout" class="icon-button" type="button" aria-label="로그아웃">↗</button></div><a class="support-link" href="${supportHref}">${name} · 도움말</a></div>
   </aside>
   <main id="main-content" class="main-content" tabindex="-1"><div class="topbar"><span>${shortName} <span aria-hidden="true">/</span> <span id="breadcrumb">내 메모리</span></span><span class="topbar-note"><span class="small-dot"></span> 나의 맥락, 한곳에</span></div>
     <header class="page-heading"><div><p id="space-kind" class="eyebrow">PERSONAL SPACE</p><h1 id="space-title">내 메모리</h1><p id="space-description">남겨둔 생각을 다음 작업으로 이어가세요.</p></div><div class="heading-actions"><button id="invite-members" class="button secondary" type="button" hidden>멤버 초대</button><button id="new-memory" class="button primary" type="button"><span aria-hidden="true">+</span> 새 메모리</button></div></header>
-    <div class="feedback"><p id="app-status" role="status" aria-live="polite"></p><p id="app-error" class="error" role="alert" hidden></p><button id="reload-memory" class="text-button" type="button" hidden>최신 내용 다시 불러오기</button><div id="reauth-actions" hidden><a id="reauthenticate" class="button secondary" href="/auth/login" target="_blank" rel="noopener noreferrer">새 탭에서 다시 로그인</a> <button id="resume-session" class="button primary" type="button">로그인 후 다시 연결</button><p class="field-help">초안은 이 창에만 남아 있어요. 이 창을 닫거나 새로고침하지 마세요. 필요하면 내용을 직접 복사해 두세요.</p></div></div>
+    <div class="feedback"><p id="app-status" role="status" aria-live="polite"></p><p id="app-error" class="error" role="alert" hidden></p><button id="reload-memory" class="text-button" type="button" hidden>최신 내용 다시 불러오기</button><div id="reauth-actions" hidden><a id="reauthenticate" class="button secondary" href="${publicPath}/auth/login" target="_blank" rel="noopener noreferrer">새 탭에서 다시 로그인</a> <button id="resume-session" class="button primary" type="button">로그인 후 다시 연결</button><p class="field-help">초안은 이 창에만 남아 있어요. 이 창을 닫거나 새로고침하지 마세요. 필요하면 내용을 직접 복사해 두세요.</p></div></div>
     <section class="memory-console" aria-label="메모리 탐색 및 편집"><div class="memory-index"><form id="search-form" class="search-form" role="search"><label class="sr-only" for="search-query">메모리 검색</label><span class="search-symbol" aria-hidden="true">⌕</span><input id="search-query" name="query" type="search" maxlength="${hasManagement ? 1024 : 256}" placeholder="기억 속에서 찾아보세요" autocomplete="off"><button class="sr-only" type="submit">검색</button></form><div class="list-caption"><span id="list-count">모든 메모리</span><span id="list-order">최근 수정순</span></div><div id="memory-list" class="memory-list" aria-label="메모리 목록"></div><div id="list-empty" class="list-empty" hidden><span class="empty-mark" aria-hidden="true">↳</span><strong id="empty-title">아직 비어 있는 공간이에요.</strong><p id="empty-description">첫 번째 메모리로 시작해 보세요.</p></div><button id="load-more" class="load-more" type="button" hidden>더 불러오기</button></div>
     <div class="memory-detail"><div id="editor-empty" class="editor-empty"><span class="empty-mark" aria-hidden="true">✳</span><h2>다음에 다시 찾을 기억</h2><p>목록에서 메모리를 선택하거나<br>새 메모리를 작성해 보세요.</p></div><form id="editor-form" class="editor-form" hidden><div class="editor-top"><div><span id="editor-kind" class="eyebrow">MEMORY</span><p id="memory-meta" class="memory-meta"></p></div><span id="permission-badge" class="badge">편집 가능</span></div><label class="field-label" for="memory-body">내용</label><textarea id="memory-body" class="memory-body" name="body" required placeholder="기억해 둘 내용을 자유롭게 적어 보세요. 첫 줄은 목록의 제목으로 표시됩니다."></textarea><div class="source-field"><label class="field-label" for="memory-source">출처 <span>선택</span></label><input id="memory-source" name="source" type="text" placeholder="문서 이름, 회의, 대화 또는 링크" autocomplete="off"></div><div class="editor-footer"><span id="editor-hint">변경한 내용은 저장을 눌러 반영하세요.</span><div><button id="delete-memory" class="button danger" type="button">삭제</button><button id="save-memory" class="button primary" type="submit">변경사항 저장</button></div></div></form></div></section>
     <footer class="workspace-footer"><span>Standard · 서버에서 저장하고 처리합니다.</span><span>${name}</span></footer>
@@ -60,9 +63,12 @@ export function renderPage(brand: Brand, hasManagement = false, origin = PUBLIC_
 </body></html>`;
 }
 
-/** No user data is interpolated into this script or passed to HTML sinks. */
+/** No user data is interpolated into this script or passed to HTML sinks.
+ * The server replaces __PUBLIC_PATH__ with the deployment's public path
+ * prefix (prod: the empty string) before serving this asset. */
 export const appScript = String.raw`(() => {
 'use strict';
+const BASE='__PUBLIC_PATH__';
 const $ = id => document.getElementById(id);
 const state = { workspace: null, space: null, items: [], selected: null, draft: false, dirty: false, saving: false, workspaceLoading: false, nextCursor: null, query: '', authExpired: false, reconnecting: false, recovery: null };
 let listEpoch = 0, detailEpoch = 0, editEpoch = 0, editorEpoch = 0, workspaceEpoch = 0, dialogEpoch = 0, requestEpoch = 0, verifiedRequestEpoch = 0, authenticationEpoch = 0, searchTimer;
@@ -110,7 +116,7 @@ async function requestJson(path, method = 'GET', body) {
   if (state.workspace) options.headers['X-Memory-Account-Id'] = state.workspace.account.id;
   if (body !== undefined) { options.headers['Content-Type'] = 'application/json'; options.body = JSON.stringify(body); }
   let response;
-  try { response = await fetch(path, options); }
+  try { response = await fetch(BASE + path, options); }
   catch (error) { throw uncertainResponse(error, path, method, body); }
   if (!response.ok) {
     const error = new Error('Request failed'); error.status = response.status; const detail = await response.json().catch(() => null); error.code = detail && detail.error;
@@ -523,7 +529,7 @@ function openKeys() {
   if (document.body.dataset.management === 'true') {
     $('dialog-description').textContent = '새 PAT는 관리 콘솔에서 최근 본인 확인 후 허용할 공간과 동작을 선택해 발급하세요. 기존 키는 여기서 회수할 수 있어요.';
     $('dialog-submit').hidden = true;
-    const link = node('a', 'button primary', '공간·동작을 지정해 PAT 발급'); link.href = '/manage';
+    const link = node('a', 'button primary', '공간·동작을 지정해 PAT 발급'); link.href = BASE + '/manage';
     link.addEventListener('click', event => { if (!mayLeave()) event.preventDefault(); });
     $('dialog-form').append(link); return;
   }
@@ -560,7 +566,7 @@ $('logout').addEventListener('click', async () => {
   if ($('memory-dialog').open) closeDialog();
   updateActions(); status('로그아웃 중…');
   try {
-    const response = await fetch('/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-Memory-Account-Id': accountId }, cache: 'no-store', redirect: 'follow' });
+    const response = await fetch(BASE + '/auth/logout', { method: 'POST', credentials: 'same-origin', headers: { 'X-Memory-Account-Id': accountId }, cache: 'no-store', redirect: 'follow' });
     if (!response.ok) { const error = new Error('Logout failed'); error.status = response.status; const detail = await response.json().catch(() => null); error.code = detail && detail.error; throw error; }
     signedOut();
   } catch (error) { status(''); showError(error); }

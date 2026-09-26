@@ -25,8 +25,11 @@ function memoryId(a: Record<string, unknown>): string {
   if (a.memoryId !== undefined && a.id !== undefined && a.memoryId !== a.id) fail(400, 'memory_id_mismatch');
   return id(a.memoryId ?? a.id);
 }
-/** Reuse the product's per-request SDK transport; no principal survives this request. */
-export async function mcp(request: Request, token: string, store: MemoryStore, search: Search, ingest: Ingest, title = 'Memory'): Promise<Response> {
+/** Reuse the product's per-request SDK transport; no principal survives this
+ * request. `origin` is the public base URL (origin + path prefix) for
+ * metadata links emitted in Bearer challenges. */
+export async function mcp(request: Request, token: string, store: MemoryStore, search: Search, ingest: Ingest, title = 'Memory',
+  origin: string = new URL(request.url).origin): Promise<Response> {
   if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405, { allow: 'POST' });
   const parsedBody = await body(request, ['jsonrpc', 'id', 'method', 'params', 'result', 'error']);
   // OAuth challenges belong to the HTTP authorization boundary, before the SDK
@@ -41,14 +44,14 @@ export async function mcp(request: Request, token: string, store: MemoryStore, s
       if (args.success) {
         const hash = await tokenHash(token);
         const policy = await one<{ capabilities: string; credentialExpiresAt: number; membershipExpiresAt: number }>(store.db,
-          `SELECT p.capabilities,c.expires_at AS credentialExpiresAt,
-            coalesce((SELECT live.membership_expires_at FROM active_credentials live WHERE live.id=c.id),0) AS membershipExpiresAt
-          FROM credentials c
-          JOIN release_credential_policies p ON p.credential_id=c.id AND p.verified_oauth=1
+          `SELECT p.capabilities::text AS capabilities,c.expires_at AS "credentialExpiresAt",
+            coalesce((SELECT live.membership_expires_at FROM memory_identity.active_credentials live WHERE live.id=c.id),0) AS "membershipExpiresAt"
+          FROM memory_identity.runtime_credentials c
+          JOIN memory_identity.credential_policies p ON p.credential_id=c.id AND p.verified_oauth
           WHERE c.token_digest=? AND c.kind='session' AND c.id LIKE 'oauth:%'`, [hash]);
         if (policy) {
           if (Math.min(policy.credentialExpiresAt, policy.membershipExpiresAt) <= store.clock())
-            return invalidTokenResponse(new URL(request.url).origin);
+            return invalidTokenResponse(origin);
           const required = definition.read ? ['read'] : definition.name === 'memory_delete' ? ['delete'] :
             definition.name === 'memory_update' ? ['update'] : ['create'];
           if (definition.name === 'memory_add' && object(args.data).supersedesMemoryId) required.push('update');
@@ -56,7 +59,7 @@ export async function mcp(request: Request, token: string, store: MemoryStore, s
           if (required.some(capability => !granted.includes(capability))) {
             const scopes = ['memory:read', ...(required.includes('delete') ? ['memory:delete'] : definition.read ? [] : ['memory:write'])];
             return json({ error: 'insufficient_scope' }, 403, { 'www-authenticate':
-              `Bearer error="insufficient_scope", scope="${scopes.join(' ')}", resource_metadata="${new URL(request.url).origin}/.well-known/oauth-protected-resource"` });
+              `Bearer error="insufficient_scope", scope="${scopes.join(' ')}", resource_metadata="${origin}/.well-known/oauth-protected-resource"` });
           }
         }
       }
@@ -110,9 +113,9 @@ export async function mcp(request: Request, token: string, store: MemoryStore, s
   }, { legacy: 'stateless', maxSubscriptions: 0, keepAliveMs: 0, onerror: () => undefined });
   const response = await handler.fetch(request, { parsedBody });
   return isJSONRPCRequest(parsedBody) && parsedBody.method === 'tools/call'
-    ? toolResponse(response, token, store.db, store.clock, new URL(request.url).origin, {
+    ? toolResponse(response, token, store.db, store.clock, origin, {
       sql: authority, values: params, expiry: accessExpiry,
-      liveMemory: `r.deleted_at IS NULL AND r.erased_at IS NULL AND (json_extract(w.value,'$.currentFact') IS NOT 1
-        OR NOT EXISTS(SELECT 1 FROM memories successor WHERE successor.supersedes_id=r.id))`,
+      liveMemory: `r.deleted_at IS NULL AND r.erased_at IS NULL AND (w.value->>'currentFact' IS DISTINCT FROM 'true'
+        OR NOT EXISTS(SELECT 1 FROM memory_content.memories successor WHERE successor.supersedes_id=r.id))`,
     }, context) : response;
 }

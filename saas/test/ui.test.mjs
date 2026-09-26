@@ -37,7 +37,7 @@ async function browser(t, handler = () => null, customWorkspace = workspace) {
     if (call.path === '/v1/spaces/s-one/memories/m-one') return new Response(JSON.stringify(memory));
     return new Response(JSON.stringify({ results: [] }));
   };
-  window.eval(ui.appScript);
+  window.eval(ui.appScript.replaceAll('__PUBLIC_PATH__', ''));
   await settle();
   const byId = id => window.document.getElementById(id);
   const submit = id => byId(id).dispatchEvent(new window.Event('submit', { bubbles: true, cancelable: true }));

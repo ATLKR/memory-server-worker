@@ -3,7 +3,13 @@ import { Client, types as pgTypes } from 'pg';
 export type PostgresRegion = 'sg' | 'kr-seoul';
 export type PgValue = string | number | boolean | bigint | Uint8Array | null;
 export interface PgResult<Row = Record<string, unknown>> { rows: Row[]; rowCount: number | null }
-export interface PgSession { query<Row = Record<string, unknown>>(text: string, values?: readonly PgValue[]): Promise<PgResult<Row>> }
+export interface PgSession {
+    query<Row = Record<string, unknown>>(text: string, values?: readonly PgValue[]): Promise<PgResult<Row>>;
+    /** Set by `createPostgresConnection` sessions: the callback already runs
+     * inside the operation's transaction, so `batch` uses savepoints rather
+     * than nested transaction control (which stays denied). */
+    readonly inTransaction?: boolean;
+}
 export interface PgQueryConfig { text: string; values: unknown[]; queryMode: 'extended'; query_timeout: number }
 export interface PgClient {
     connect(): Promise<unknown>;
@@ -13,7 +19,15 @@ export interface PgClient {
 }
 export interface PostgresTargetBase {
     region: PostgresRegion;
-    provider: 'neon' | 'supabase';
+    /** Regional serving targets pin their provider's endpoint shape. `control`
+     * is the control-plane connection: an internal, config-pinned endpoint that
+     * matches no regional provider pattern. */
+    provider: 'neon' | 'supabase' | 'control';
+    /** Region of the worker that opened this session — pinned to
+     * `memory.caller_region`. Defaults to `region`; the `_CONTROL_` connection
+     * pins the serving worker's own region while attesting the control
+     * plane's home. */
+    callerRegion?: PostgresRegion;
     database: string;
     expectedRole: string;
     deploymentId: string;
@@ -40,13 +54,14 @@ export interface HyperdriveBindingSnapshot {
     host: string;
     port: number;
     user: string;
-    password: string;
+    /** Optional on real Workers bindings; always present inside connectionString. */
+    password?: string;
     database: string;
 }
 export interface HyperdrivePostgresTarget extends PostgresTargetBase {
     transport: 'hyperdrive';
-    provider: 'supabase';
-    region: 'kr-seoul';
+    provider: 'supabase' | 'neon' | 'control';
+    region: PostgresRegion;
     hyperdrive: HyperdriveBindingSnapshot;
 }
 export type PostgresTarget = NativePostgresTarget | HyperdrivePostgresTarget;
@@ -127,30 +142,40 @@ function validateTarget(input: PostgresTarget) {
     if (!Array.isArray(input.applicationSchemas) || !input.applicationSchemas.length || input.applicationSchemas.length > 32
         || input.applicationSchemas.some(x => typeof x !== 'string' || !id.test(x) || /^(pg_|public$|information_schema$)/.test(x))
         || new Set(input.applicationSchemas).size !== input.applicationSchemas.length) fail();
+    if (input.callerRegion !== undefined && !['sg', 'kr-seoul'].includes(input.callerRegion)) fail();
     const common = { connectTimeoutMs: limit(input.connectTimeoutMs, 5000, 30000), queryTimeoutMs: limit(input.queryTimeoutMs, 10000, 60000),
         statementTimeoutMs: limit(input.statementTimeoutMs, 9000, 60000), operationTimeoutMs: limit(input.operationTimeoutMs, 30000, 120000),
         cleanupTimeoutMs: limit(input.cleanupTimeoutMs, 2000, 5000) };
     if (input.transport === 'hyperdrive') {
-        const allowed = ['transport', 'region', 'provider', 'database', 'expectedRole', 'deploymentId', 'applicationSchemas', 'hyperdrive',
+        const allowed = ['transport', 'region', 'provider', 'callerRegion', 'database', 'expectedRole', 'deploymentId', 'applicationSchemas', 'hyperdrive',
             'connectTimeoutMs', 'queryTimeoutMs', 'statementTimeoutMs', 'operationTimeoutMs', 'cleanupTimeoutMs'];
+        const pinned = (input.provider === 'supabase' && input.region === 'kr-seoul')
+            || (input.provider === 'neon' && input.region === 'sg')
+            || (input.provider === 'control' && (input.region === 'sg' || input.region === 'kr-seoul'));
         if (!plainData(input) || Reflect.ownKeys(input).some(key => typeof key !== 'string' || !allowed.includes(key))
-            || input.provider !== 'supabase' || input.region !== 'kr-seoul' || !plainData(input.hyperdrive)
-            || !exactKeys(input.hyperdrive, ['connectionString', 'host', 'port', 'user', 'password', 'database'])) fail();
+            || !pinned || !plainData(input.hyperdrive)
+            || Reflect.ownKeys(input.hyperdrive).some(k => typeof k !== 'string'
+                || !['connectionString', 'host', 'port', 'user', 'password', 'database'].includes(k))
+            || !['connectionString', 'host', 'port', 'user', 'database'].every(k => Object.hasOwn(input.hyperdrive, k))) fail();
         const binding = input.hyperdrive;
+        // `password` is optional on the binding: the credential already lives
+        // inside connectionString and is verified against it below.
         if (typeof binding.connectionString !== 'string' || !binding.connectionString || binding.connectionString.includes('\0') || encoder.encode(binding.connectionString).length > 8192
             || typeof binding.host !== 'string' || !/^(?=.{1,253}$)[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/.test(binding.host)
             || typeof binding.port !== 'number' || !Number.isSafeInteger(binding.port) || binding.port < 1 || binding.port > 65535
             || typeof binding.user !== 'string' || !binding.user || binding.user.includes('\0') || encoder.encode(binding.user).length > 255
-            || typeof binding.password !== 'string' || !binding.password || binding.password.includes('\0') || encoder.encode(binding.password).length > 4096
+            || (binding.password !== undefined && (typeof binding.password !== 'string' || !binding.password || binding.password.includes('\0') || encoder.encode(binding.password).length > 4096))
             || typeof binding.database !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(binding.database)) fail();
         let url: URL; try { url = new URL(binding.connectionString); } catch { return fail(); }
         if (!['postgres:', 'postgresql:'].includes(url.protocol) || url.search !== '?sslmode=disable' || url.hash || !url.port
             || url.hostname !== binding.host || Number(url.port) !== binding.port || decodeUrl(url.username) !== binding.user
-            || decodeUrl(url.password) !== binding.password || url.pathname !== '/' + binding.database) fail();
+            || !decodeUrl(url.password) || decodeUrl(url.password).length > 4096
+            || (binding.password !== undefined && decodeUrl(url.password) !== binding.password)
+            || url.pathname !== '/' + binding.database) fail();
         const snapshot = Object.freeze({ connectionString: binding.connectionString, host: binding.host, port: binding.port,
-            user: binding.user, password: binding.password, database: binding.database });
-        return Object.freeze({ transport: 'hyperdrive' as const, provider: 'supabase' as const, region: 'kr-seoul' as const,
-            database: input.database, expectedRole: input.expectedRole, deploymentId: input.deploymentId,
+            user: binding.user, password: decodeUrl(url.password), database: binding.database });
+        return Object.freeze({ transport: 'hyperdrive' as const, provider: input.provider, region: input.region,
+            callerRegion: input.callerRegion, database: input.database, expectedRole: input.expectedRole, deploymentId: input.deploymentId,
             applicationSchemas: Object.freeze([...input.applicationSchemas]), hyperdrive: snapshot, ...common });
     }
     if (input.transport !== undefined && input.transport !== 'native') fail();
@@ -161,6 +186,12 @@ function validateTarget(input: PostgresTarget) {
     if (native.provider === 'neon' && native.region === 'sg') {
         if (!/^ep-[a-z0-9-]+(?:\.[a-z0-9-]+)*\.ap-southeast-1\.aws\.neon\.tech$/.test(native.host)
             || /-pooler\./.test(native.host) !== pooled || native.connectionMode === 'session-pooler' || native.port !== 5432 || native.user !== native.expectedRole) fail();
+    } else if (native.provider === 'control') {
+        // Internal control-plane endpoint: any well-formed host, but the login
+        // still attests the serving role and a non-pooled session-pooler user
+        // must never smuggle provider session tokens.
+        if (!/^(?=.{1,253}$)[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?$/.test(native.host)
+            || native.port < 1 || native.port > 65535 || native.user !== native.expectedRole) fail();
     } else if (native.provider === 'supabase' && native.region === 'kr-seoul') {
         if (pooled ? !/^aws-[0-9]+-ap-northeast-2\.pooler\.supabase\.com$/.test(native.host)
             || native.port !== (native.connectionMode === 'session-pooler' ? 5432 : 6543) || !new RegExp(`^${native.expectedRole}\\.[a-z0-9]{20}$`).test(native.user)
@@ -330,23 +361,56 @@ export function createPostgresConnection(input: PostgresTarget, options: Connect
         async function native(text: string, values: unknown[] = []): Promise<PgResult> {
             return bounded(() => client!.query({ text, values, queryMode: 'extended', query_timeout: Math.max(1, Math.ceil(Math.min(target.queryTimeoutMs, deadline - performance.now()))) }), target.queryTimeoutMs);
         }
-        const session: PgSession = Object.freeze({ async query<Row>(text: string, values: readonly PgValue[] = []): Promise<PgResult<Row>> {
-            if (!active) throw error('postgres_connection_closed'); check();
-            if (transactionFailed) throw error('postgres_transaction_failed');
-            // Extended protocol rejects multiple statements; callbacks cannot issue transaction control.
-            if (typeof text !== 'string' || !/^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|VALUES)\b/i.test(text)) throw error('postgres_transaction_control_denied');
-            if (busy) throw error('postgres_concurrent_query');
-            if (!Array.isArray(values) || values.some(x => x !== null && !['string', 'number', 'boolean', 'bigint'].includes(typeof x) && !(x instanceof Uint8Array))) throw error('postgres_parameter_invalid');
-            numericSafety(values); busy = true;
+        // One client serializes the wire: concurrent callers queue instead of
+        // racing — ported D1-era code uses Promise.all over statements, which
+        // is legal because every statement still lands inside this operation's
+        // single transaction. `queued` counts enqueued-but-not-finished work so
+        // fire-and-forget statements cannot escape the operation boundary.
+        let tail: Promise<unknown> = Promise.resolve(), queued = 0;
+        const session: PgSession = Object.freeze({ inTransaction: true, query<Row>(text: string, values: readonly PgValue[] = []): Promise<PgResult<Row>> {
+            // Submission-time gates reject rather than throw so callers get a
+            // uniform async boundary error.
             try {
-                const statementMs = Math.max(1, Math.floor(Math.min(target.statementTimeoutMs, deadline - performance.now())));
-                await native("SELECT pg_catalog.set_config('statement_timeout',$1,$2), pg_catalog.set_config('lock_timeout',$1,$2)", [String(statementMs), true]);
-                check(); outcome = 'unknown'; return result<Row>(await native(text, [...values]));
-            } catch (e) {
-                if (began) transactionFailed = true;
-                const safe = sanitized(e, 'postgres_query_failed'); safe.outcome = outcome; throw safe;
-            }
-            finally { busy = false; }
+                if (!active) throw error('postgres_connection_closed'); check();
+            } catch (e) { return Promise.reject(e); }
+            // Extended protocol rejects multiple statements; callbacks cannot
+            // issue transaction control. Savepoints are the recovery primitive:
+            // after a failed statement only `ROLLBACK TO` may run, restoring a
+            // usable transaction without ever escaping the operation's tx.
+            const rollbackTo = typeof text === 'string' && /^\s*ROLLBACK\s+TO\b/i.test(text);
+            if (transactionFailed) { if (!rollbackTo) return Promise.reject(error('postgres_transaction_failed')); }
+            else if (typeof text !== 'string' || !/^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|VALUES|SAVEPOINT|RELEASE)\b/i.test(text) && !rollbackTo)
+                return Promise.reject(error('postgres_transaction_control_denied'));
+            if (!Array.isArray(values) || values.some(x => x !== null && !['string', 'number', 'boolean', 'bigint'].includes(typeof x) && !(x instanceof Uint8Array))) return Promise.reject(error('postgres_parameter_invalid'));
+            try { numericSafety(values); } catch (e) { return Promise.reject(e); }
+            const task = tail.then(async (): Promise<PgResult<Row>> => {
+                if (!active) throw error('postgres_connection_closed'); check();
+                // The submission-time gate passed, but an earlier queued
+                // statement may have failed the transaction meanwhile.
+                if (transactionFailed && !rollbackTo) throw error('postgres_transaction_failed');
+                busy = true;
+                try {
+                    // Savepoint recovery is itself the statement that restores a
+                    // failed transaction: it must reach the server without the
+                    // ambient timeout preamble, which the aborted transaction
+                    // would otherwise reject before the ROLLBACK TO ever ran.
+                    if (!rollbackTo) {
+                        const statementMs = Math.max(1, Math.floor(Math.min(target.statementTimeoutMs, deadline - performance.now())));
+                        await native("SELECT pg_catalog.set_config('statement_timeout',$1,$2), pg_catalog.set_config('lock_timeout',$1,$2)", [String(statementMs), true]);
+                    }
+                    check(); outcome = 'unknown';
+                    const value = result<Row>(await native(text, [...values]));
+                    if (rollbackTo) transactionFailed = false;
+                    return value;
+                } catch (e) {
+                    if (began && !rollbackTo) transactionFailed = true;
+                    const safe = sanitized(e, 'postgres_query_failed'); safe.outcome = outcome; throw safe;
+                }
+                finally { busy = false; }
+            });
+            queued += 1;
+            tail = task.catch(() => {}).then(() => { queued -= 1; });
+            return task;
         }});
         try {
             check();
@@ -369,9 +433,14 @@ export function createPostgresConnection(input: PostgresTarget, options: Connect
                 || ['superuser', 'createRole', 'createDatabase', 'bypassRls', 'replication', 'databaseOwner', 'schemaOwner', 'dangerousMembership'].some(key => r[key] !== false)) throw error('postgres_role_denied');
             const metadata = await bounded(() => verify(session), target.queryTimeoutMs);
             if (!metadata || metadata.region !== target.region || metadata.deploymentId !== target.deploymentId) throw error('postgres_deployment_mismatch');
-            if (busy) throw error('postgres_pending_query');
+            // Pin the caller's region for owner-side commands (control-plane
+            // enrollment region assertion). Transaction-local, per operation.
+            // Control sessions pin the serving worker's own region, not the
+            // control deployment's home.
+            await native("SELECT pg_catalog.set_config('memory.caller_region',$1,$2)", [target.callerRegion ?? metadata.region, true]);
+            if (busy || queued > 0) throw error('postgres_pending_query');
             const value = await bounded(() => callback(session), duration);
-            if (busy) { stop('postgres_pending_query'); throw failure!; }
+            if (busy || queued > 0) { stop('postgres_pending_query'); throw failure!; }
             if (transactionFailed) throw error('postgres_transaction_failed');
             check();
             commitSent = true;
@@ -379,6 +448,14 @@ export function createPostgresConnection(input: PostgresTarget, options: Connect
             catch { throw new PostgresBoundaryError('postgres_commit_unknown', 'unknown'); }
             return value;
         } catch (e) {
+            // Diagnostic: surface the wrapped transport/driver error class and
+            // message before sanitizing it away. No credentials can appear —
+            // pg errors never embed the password.
+            if (!(e instanceof PostgresBoundaryError)) {
+                const raw = e as { name?: unknown; message?: unknown; code?: unknown };
+                console.error('postgres_raw_failure', String(raw?.name ?? typeof e),
+                    String(raw?.message ?? e).slice(0, 300), String(raw?.code ?? 'no_code'));
+            }
             const safe = sanitized(e);
             if (began && !commitSent && !failure && !busy) {
                 try { await native('ROLLBACK'); outcome = 'rolled_back'; }

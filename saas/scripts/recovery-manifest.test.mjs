@@ -18,10 +18,13 @@ const base = parse(await readFile(new URL('../wrangler.jsonc', import.meta.url),
 function config(n) {
   const c = structuredClone(base);
   c.name = `recovery-${n}`; c.vars.DEPLOYMENT_ENVIRONMENT = 'staging'; c.vars.PUBLIC_ORIGIN = `https://recovery-${n}.example.org`;
+  // The recovery suites exercise the D1 sharded path; do not inherit
+  // production's postgres backend selection from the clone.
+  c.vars.MEMORY_SQL_BACKEND = 'd1';
   c.vars.STORAGE_MODE = 'sharded'; c.vars.RELEASE_MODE = 'pilot';
   c.vars.STORAGE_SHARDS_JSON = JSON.stringify([{ id: 'a', binding: 'HOT_A', mode: 'active' }, { id: 'b', binding: 'HOT_B', mode: 'draining' }]);
   c.routes = [{ pattern: `recovery-${n}.example.org`, custom_domain: true }];
-  c.d1_databases = ['DB', 'HOT_A', 'HOT_B'].map((binding, i) => ({ binding, database_name: `recovery-${n}-${i}`, database_id: `${n}${i}aaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee`, migrations_dir: i ? 'shard-migrations' : 'migrations' }));
+  c.d1_databases = ['DB', 'HOT_A', 'HOT_B'].map((binding, i) => ({ binding, database_name: `recovery-${n}-${i}`, database_id: `${n}${i}aaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee`, migrations_dir: i ? 'd1-shard-migrations' : 'd1-migrations' }));
   c.r2_buckets = [{ binding: 'MEMORY_PAYLOADS', bucket_name: `recovery-${n}-payloads` }];
   c.vectorize = [{ binding: 'MEMORY_INDEX', index_name: `recovery-${n}-index` }];
   c.analytics_engine_datasets = [{ binding: 'METRICS', dataset: `recovery-${n}-metrics` }];

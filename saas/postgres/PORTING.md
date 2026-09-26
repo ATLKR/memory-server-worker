@@ -1,5 +1,15 @@
 # Native PostgreSQL port status
 
+> 2026-09-16 re-platform direction: PostgreSQL becomes the authority for all
+> durable storage with customer-declared per-Space residency — see
+> [`../docs/plans/2026-09-16-postgres-regional-authority.md`](../docs/plans/2026-09-16-postgres-regional-authority.md)
+> and the frozen classification in
+> [`../docs/plans/2026-09-17-residency-data-classification.md`](../docs/plans/2026-09-17-residency-data-classification.md).
+> Two migration lineages share the `migrations/0001`–`0002` foundation:
+> `postgres/migrations/` is the **regional** lineage (0003+ existing), and
+> `postgres/control/` is the **control-plane** lineage (0003+). Each cluster's
+> `schema_migrations` ledger stays contiguous within its own lineage.
+
 > Current scope: the user's later 2026-09-11 decision prefers Cloudflare for feasible persistence and full raw Agent Memory ingest, with Seoul PostgreSQL only for explicitly external Cloudflare data. See `../docs/cloudflare-storage-research.ko.md`. The full port matrix below is an inventory of the earlier alternative, not an instruction to expand PostgreSQL as the default backend. Migration 0004 and a standalone Hono PAT archive/keyword implementation are now present; see [Seoul serving scope and release gates](SEOUL-SERVING.md). No mandatory pgvector or general-memory Neon path is being activated.
 
 The D1 baseline is preserved at `adfb256545f395274f2645e2e83c16642b596d84`. This directory contains a foundation and a bounded native serving module, not a complete operational Memory backend. This source package does not install migration 0004 or execute a production cutover. Provider installation receipts are separate from source tests. The existing D1 migrations and SQL are unchanged.
@@ -90,6 +100,75 @@ Discovery counted 75 ordinary central tables, 5 views and 227 final triggers in 
 - `memory_ops`: future immutable audit, usage, budgets, heartbeat and migration/recovery evidence.
 
 No clinical tables or namespace are pre-created. The latest user decision places medical/strict data in Seoul and general data outside Seoul; this supersedes the earlier blanket recommendation to leave medical placement undecided. Storage admission must use that explicit fixed-region profile. It does not establish where runtime, inference, logs, backups, keys, SSO or operators process data. The later Cloudflare BAA/filtering and processing controls remain separate work, and this unfinished foundation cannot yet accept product traffic. A future clinical extension needs explicit Seoul physical separation, role/key boundaries and its own migration review; a schema name is not a residency guarantee. Do not send content overseas to classify it and do not infer sensitivity from names, IPs or email domains.
+
+## Regional-authority port progress (2026-09-17)
+
+The regional-authority schema port now covers the full frozen
+classification on both tiers. Ledgers are contiguous per lineage.
+
+| Lineage | Migration | Coverage |
+| --- | --- | --- |
+| control | `control/0003_placement_directory.sql` | Region/deployment catalogs, canonical account/org skeletons, central SSO provider binding, per-region enrollments, Space placement skeleton with `data_policy`/`home_region`/epoch rules, webhook-backed ordered lifecycle journal, provider revocations. |
+| control | `control/0004_billing_catalog.sql` | Pools (auto-created on placement), checkout requests/closures, billing events/lock, heartbeats, provider budgets. Cross-tier predicates move to the service boundary. |
+| regional | `migrations/0003_identity_foundation.sql` | Regional principals/emails/memberships/credentials/provider bindings. |
+| regional | `migrations/0004`–`0005` | Seoul PAT/archive slice (existing bounded module). |
+| regional | `migrations/0006_identity_authority.sql` | Domains/managers, challenges/consumptions, revocations/blocks, lifecycle applied-state + apply-head, active views. |
+| regional | `migrations/0007_workspace_regional.sql` | Workspace command records (sign-in/org/invite/key/revocation), OAuth flows, hierarchy, credential policies, SCIM, reauth, external blocks, mail budget, regional provider tombstones. Space-creating commands carry `data_policy` asserted against `deployment_identity`. |
+| regional | `migrations/0008_regional_space.sql` | `memory_content` memories/versions, ops ledgers (operations/usage/policies/erasure/events/export/cursors), jobs queue, search references, transition/erasure/metering/storage triggers. |
+| regional | `migrations/0009_payload_staging.sql` | D1 0022 payload staging/archival including the payload-aware transition replacements. |
+| regional | `migrations/0010_execution_time_guards.sql` | D1 0019/0024 final semantics: `greatest(recorded, wall)` admission, `issued_at`, regional lifecycle-apply gating, reauth consumption, SCIM cascade, cursor shapes, index-only migrations. |
+
+Deliberately not ported: `release_fts` (FTS5 virtual table — regional
+search decision pending), `release_shares` (cross-border, deferred to
+the federation unit), the 47 dropped-projection tables, and
+`release_meta` (`schema_migrations` already covers it).
+
+Remaining P-2 follow-up before P-3 service wiring: none for table
+coverage — service call-site port (P-3), placement/routing (P-4),
+enrollment/lifecycle apply (P-5), recovery rehearsal (P-6), and
+residency/cost evidence + GA gate (P-7) remain.
+
+## Port progress (2026-09-18)
+
+- **P-3 service port.** Release service modules run on the PostgreSQL
+  `Database` adapter (`src/postgres/database.ts`): schema-qualified names,
+  JSONB, `least()` scalar min, `RETURNING`/`ON CONFLICT`, tsvector lexical
+  search. Control-plane billing tables are written through `env.CONTROL_DB`
+  when present (`billing.ts`, `provider-budget.ts`); regional authority
+  predicates keep evaluating on `env.DB`. Legacy exceptions unchanged:
+  `seoul-projection-*` (D1 transport) and `payloads.ts` (shard dialect).
+- **P-4 placement + routing (in progress).**
+  `src/routing/placement.ts` — `resolveMemoryRoute` reads the control
+  placement directory per call: `routed` only for a live region + exactly
+  one live deployment; `not_found`/`closed`/`unavailable` otherwise, and
+  `placement_directory_unavailable` on read failure — no fallback target.
+  `src/postgres/region-app.ts` — `createRegionWorkerApp` generalizes the
+  Seoul composition: `${prefix}_*` env bindings → attested `PostgresTarget`
+  → one attested session per request → `createApplication`+`createRelease`
+  over `createPostgresDatabase`; an optional `_CONTROL_*` target supplies
+  `CONTROL_DB`. `authority()` in `src/release/authority.ts` additionally
+  requires `s.data_policy->>'residency' = storage_region` of the serving
+  deployment — a Space whose data_policy declares a different region is
+  inadmissible on this cluster even before grant evaluation.
+- Open P-4 remainder: control-plane billing fixture coverage for
+  `_CONTROL_*` split wiring, provider-native attestation evidence.
+  `src/routing/router.ts` — `createRoutingWorkerApp` proxies Space-scoped
+  requests to `MEMORY_REGION_ENDPOINTS_JSON[region]` after a directory
+  read; non-Space paths get a typed `space_scope_required` refusal.
+- **P-5 enrollment + authority (in progress).**
+  `src/postgres/enrollment.ts` — explicit regional enrollment commands:
+  canonical account/org skeleton + live enrollment row (idempotent),
+  terminal removal, retired-region refusal. `signedIn` in
+  `release/extension.ts` enrolls the account in the serving deployment's
+  region when `CONTROL_DB` is configured.
+  `src/postgres/lifecycle-apply.ts` — central journal → regional apply:
+  `applyLifecycleEvent` preserves per-issuer order and the terminal
+  `account.deleted` rule; `syncLifecycleJournal` pulls events past each
+  issuer's apply-head; `scheduled()` syncs when `CONTROL_DB` is set.
+  `authority()`/`interactive()` additionally deny when a bound issuer's
+  apply-head is missing or older than `LIFECYCLE_STALENESS_MS` (900000) —
+  the bounded-staleness revocation gate; region-only accounts without
+  provider bindings are unaffected.
 
 ## Verification
 
