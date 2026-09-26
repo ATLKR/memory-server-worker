@@ -383,15 +383,20 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
             // Revocation propagation: pull the central lifecycle journal into
             // the regional applied state before serving maintenance. Without a
             // control handle the deployment is single-cluster and skips sync.
-            if (env.CONTROL_DB) await syncLifecycleJournal(env.CONTROL_DB, db);
-            await jobs.maintain();
-            await new PayloadMaintenance(env, payloads, clock).run();
-            await new LegacyBackfill(env, store, clock).run();
+            const stage = async (name: string, work: () => Promise<unknown>) => {
+                const t = Date.now();
+                try { await work(); console.log('sched_stage', name, `${Date.now() - t}ms`); }
+                catch (e) { console.log('sched_stage', name, `${Date.now() - t}ms`, 'FAIL'); throw e; }
+            };
+            if (env.CONTROL_DB) await stage('lifecycle_sync', () => syncLifecycleJournal(env.CONTROL_DB!, db));
+            await stage('maintain', () => jobs.maintain());
+            await stage('payload_maintenance', () => new PayloadMaintenance(env, payloads, clock).run());
+            await stage('legacy_backfill', () => new LegacyBackfill(env, store, clock).run());
             if (env.BACKGROUND_JOBS_ENABLED === 'true') {
-                await jobs.drain(5);
-                if (env.PAID_BILLING_ENABLED !== 'false') { await billing.reconcile(); await billing.drain(3); }
+                await stage('drain', () => jobs.drain(5));
+                if (env.PAID_BILLING_ENABLED !== 'false') { await stage('billing_reconcile', () => billing.reconcile()); await stage('billing_drain', () => billing.drain(3)); }
             }
-            await db.prepare("INSERT INTO memory_ops.heartbeats(name,last_success_at) VALUES('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at").bind(clock()).run();
+            await stage('heartbeat', () => db.prepare("INSERT INTO memory_ops.heartbeats(name,last_success_at) VALUES('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at").bind(clock()).run());
         }
     };
 }
