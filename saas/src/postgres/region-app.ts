@@ -174,7 +174,7 @@ export function resolvePostgresConnection(env: object, config: RegionDeploymentC
 /** Compose the release service over one attested regional session per request.
  * The session is scoped to the request so a pooled transport cannot interleave
  * statements with another request's transaction. */
-function serve(env: WorkerEnv, region: RegionConnection, control: RegionConnection | null, request: Request): Promise<Response> {
+function serve(env: WorkerEnv, region: RegionConnection, control: RegionConnection | null, request: Request, config: RegionDeploymentConfig): Promise<Response> {
     const compose = (db: Database, controlDb: Database | undefined): Promise<Response> => {
         const descriptors = Object.getOwnPropertyDescriptors(env);
         delete descriptors.DB;
@@ -182,7 +182,8 @@ function serve(env: WorkerEnv, region: RegionConnection, control: RegionConnecti
         const resolved = Object.defineProperties(Object.create(null), descriptors) as ReleaseEnv;
         Object.defineProperty(resolved, 'DB', { value: db, enumerable: true });
         if (controlDb) Object.defineProperty(resolved, 'CONTROL_DB', { value: controlDb, enumerable: true });
-        const settings = readSettings(resolved), release = createRelease(resolved, { identity: new IdentityService(db) });
+        const settings = readSettings(resolved), release = createRelease(resolved, { identity: new IdentityService(db),
+            readiness: { centralSchemaVersion: config.schemaVersion, hotSchemaVersion: 0 } });
         const app = createApplication(db, settings, { auth: { publicKeyCache }, limit: key => resolved.REQUEST_LIMITER.limit({ key }), release, control: controlDb });
         return app(request);
     };
@@ -230,7 +231,7 @@ export function createRegionWorkerApp(env: WorkerEnv, config: RegionDeploymentCo
             return response;
         }
         try {
-            return await serve(context.env as WorkerEnv, region, control, context.req.raw);
+            return await serve(context.env as WorkerEnv, region, control, context.req.raw, config);
         }
         catch (e) {
             const state = e && typeof e === 'object' && 'state' in e ? (e as { state?: unknown }).state : undefined;

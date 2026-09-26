@@ -40,6 +40,9 @@ export interface IdentityAdapter {
 export interface ReleaseOptions {
     clock?: () => number;
     identity?: IdentityAdapter;
+    /** Schema lineage the /ready gate pins: D1/durable default is the
+     * central 25 + hot-shard 1; regional PostgreSQL passes its own. */
+    readiness?: { centralSchemaVersion: number; hotSchemaVersion: number };
 }
 function numberParam(url: URL, name: string, defaultValue: number, max: number): number { const text = url.searchParams.get(name); if (text === null)
     return defaultValue; if (!/^\d+$/.test(text))
@@ -69,7 +72,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
         fail(421, 'invalid_host'); if (request.headers.has('origin') && request.headers.get('origin') !== origin)
         fail(403, 'origin_denied'); }
     async function ready(): Promise<Response> {
-        const result = await evaluateReadiness(env, { centralSchemaVersion: 25, hotSchemaVersion: 1, inspectStorage: () => inspectStorage(env), clock });
+        const result = await evaluateReadiness(env, { ...(options.readiness ?? { centralSchemaVersion: 25, hotSchemaVersion: 1 }), inspectStorage: () => inspectStorage(env), clock });
         return json(result, result.ready ? 200 : 503);
     }
     const identity = () => { if (!options.identity)

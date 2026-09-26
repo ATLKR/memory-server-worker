@@ -3,12 +3,12 @@ import { createApplication } from '../app.ts';
 import { readSettings } from '../config.ts';
 import { IdentityService } from '../identity.ts';
 import type { PublicKeyCache } from '../auth.ts';
-import type { ReleaseEnv, WorkerEnv } from './types.ts';
-import { resolveReleaseEnv } from '../deprecated-durable-sql/runtime.ts';
-import { createRelease } from './extension.ts';
-import { json } from './util.ts';
-import { recordMetric } from './telemetry.ts';
-import { BUILD_REVISION, BUILD_FINGERPRINT } from './build-info.ts';
+import type { ReleaseEnv, WorkerEnv } from '../release/types.ts';
+import { resolveReleaseEnv } from './runtime.ts';
+import { createRelease } from '../release/extension.ts';
+import { json } from '../release/util.ts';
+import { recordMetric } from '../release/telemetry.ts';
+import { BUILD_REVISION, BUILD_FINGERPRINT } from '../release/build-info.ts';
 // Only the original issuer's public JWKS are shared between requests.
 const publicKeyCache: PublicKeyCache = {};
 function unavailable(includeBuild = false): Response {

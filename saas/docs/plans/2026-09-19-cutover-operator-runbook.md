@@ -111,6 +111,45 @@ tiny (~50 live rows, zero payloads), so steps 3–5 are one short window:
    outputs, cut completion timestamp — write all five into the ops
    record (RPO=0 only if step-3 freeze held the whole window).
 
+### Cutover completed (2026-09-27)
+
+- **Data moved.** Manual per-table import into `kr-seoul` (report:
+  `memory-saas-ops/d1-to-pg-import-report.md`, manifest
+  `d1-archive-export.json`). Identity was replayed through the app's own
+  `workspace_sign_ins` command path (verbatim ids/digests); control
+  placement `kr-seoul` epoch 1; owner pool unlimited; lifecycle history
+  archived not imported (all rows were acceptance-test subjects).
+- **Freeze→serve window.** `MEMORY_SQL_MAINTENANCE=true` deploy
+  (version `08bfb5da`) 503'd prod and stopped cron, then the PG build
+  deployed (`dac30a3d`). Prod is now the kr-seoul region app; D1
+  databases are no longer bound (`wrangler.jsonc` declares
+  `MEMORY_SQL_BACKEND=postgres`, Hyperdrive `KR_HYPERDRIVE` +
+  `MEMORY_KR_CONTROL_HYPERDRIVE`, `STORAGE_MODE=inline`).
+- **Serving-path fix shipped with the cut.** `0019_revocations_read.sql`
+  granted `SELECT` on `memory_ops.provider_revocations` to
+  `memory_runtime` — authority checks read that table; without it every
+  space-scoped call was permission denied. Both regions at lineage 19.
+- **UI path prefix.** Root page, `/manage` console, auth redirects and
+  Stripe checkout URLs now carry `PUBLIC_PATH` (marker substitution into
+  the static bundles); regional workers verified emitting
+  `/kr-seoul/…`/`/sg/…` links live.
+- **Gated deploy path supports postgres.** `MEMORY_SQL_BACKEND=postgres`
+  rejects D1 bindings and requires Hyperdrive; `db:remote` runs
+  `postgres-migrate.mjs --cluster regional` instead of `wrangler d1`.
+- **Secrets synced to regional workers.** `PAYLOAD_KEY` and
+  `IDENTITY_WEBHOOK_SECRET` were regenerated and set on all three workers
+  (prod values were write-only; zero pending encrypted ingests made
+  rotation free). `ENROLLMENT_EMAIL_HASHES_JSON` on regional = owner
+  email digest; prod's existing roster was left untouched.
+  `LIVE_ACCEPTANCE_PUBLIC_KEY` remains prod-only until the acceptance
+  keypair ceremony.
+- **Remaining D1:** the three databases still exist as unbound archive
+  evidence; delete them only after the retention decision, never as a
+  runtime fallback.
+- **/ready on PG:** schema check pins the regional lineage (19), storage
+  check accepts `STORAGE_MODE=inline` (hot schema 0). `RELEASE_MODE` is
+  still `pilot`; GA promotion needs the 15-gate evidence + acceptance JWS.
+
 ### Provisioning notes learned from the live run
 
 - Migration logins need `CREATEROLE` (0004/0005 create roles) plus

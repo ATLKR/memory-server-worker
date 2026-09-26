@@ -6,7 +6,7 @@ import {createRelease} from '../../src/release/extension.ts';
 import {createApplication} from '../../src/app.ts';
 // Test the same default handler directly in Node. The platform entry now also
 // exports a native cloudflare:workers DO, covered by the workerd runtime tests.
-import worker from '../../src/release/worker.ts';
+import worker from '../../src/deprecated-durable-sql/worker.ts';
 import {hmac} from '../../src/release/util.ts';
 
 for(const email of ['support!desk@example.com', "A!#$%&'*+-/=?^_`{|}~Z@Example.COM", 'Support.Tag+Desk@EXAMPLE.COM'])test('support mailbox validation preserves valid configured spelling: '+email,async t=>{

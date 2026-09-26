@@ -22,7 +22,9 @@ const base = parse(await readFile(new URL('../wrangler.jsonc', import.meta.url),
 function target() {
   const config = structuredClone(base);
   config.vectorize = [{ binding: 'MEMORY_INDEX', index_name: 'memory-operations-staging-index' }];
-  Object.assign(config.vars, { DEPLOYMENT_ENVIRONMENT: 'staging', PUBLIC_ORIGIN: 'https://ops.example.org', STORAGE_MODE: 'sharded', AI_MONTHLY_BUDGET_MICROUSD: '200000', BACKGROUND_JOBS_ENABLED: 'true', STORAGE_BACKFILL_ENABLED: 'false', ENROLLMENT_MODE: 'invite', PAID_BILLING_ENABLED: 'false', STORAGE_SHARDS_JSON: JSON.stringify([{ id: 'a', binding: 'HOT_A', mode: 'active' }, { id: 'b', binding: 'HOT_B', mode: 'draining' }]) });
+  // These fixtures exercise the D1 collection path; production's postgres
+  // backend selection does not carry into the clone.
+  Object.assign(config.vars, { DEPLOYMENT_ENVIRONMENT: 'staging', MEMORY_SQL_BACKEND: 'd1', PUBLIC_ORIGIN: 'https://ops.example.org', STORAGE_MODE: 'sharded', AI_MONTHLY_BUDGET_MICROUSD: '200000', BACKGROUND_JOBS_ENABLED: 'true', STORAGE_BACKFILL_ENABLED: 'false', ENROLLMENT_MODE: 'invite', PAID_BILLING_ENABLED: 'false', STORAGE_SHARDS_JSON: JSON.stringify([{ id: 'a', binding: 'HOT_A', mode: 'active' }, { id: 'b', binding: 'HOT_B', mode: 'draining' }]) });
   config.name = 'operations-test'; config.routes = [{ pattern: 'ops.example.org', custom_domain: true }];
   config.d1_databases = ['DB', 'HOT_A', 'HOT_B'].map((binding, i) => ({ binding, database_name: `ops-${i}`, database_id: `${i}aaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee`, migrations_dir: i ? 'd1-shard-migrations' : 'd1-migrations' }));
   config.r2_buckets = [{ binding: 'MEMORY_PAYLOADS', bucket_name: 'operations-test-payloads' }];
@@ -124,7 +126,7 @@ test('queue-episode trigger stamps inserts and done/dead restarts, preserving mi
   await db.raw.prepare("UPDATE release_jobs SET queued_at=NULL WHERE id='initial'").run();
   assert.equal((await db.raw.prepare("SELECT queued_at FROM release_jobs WHERE id='initial'").get()).queued_at, null);
   await insert.run('new', 'ingest', 'pending', 0, at, at); assert.equal((await db.raw.prepare("SELECT queued_at FROM release_jobs WHERE id='new'").get()).queued_at, now);
-  assert.equal((await db.raw.prepare('SELECT version FROM release_meta').get()).version, 18);
+  assert.equal((await db.raw.prepare('SELECT version FROM release_meta').get()).version, 19);
 });
 test('routine completed-delete reconciliation starts a fresh episode and retries preserve its real age', async t => {
   const f = await setup(t), store = new MemoryStore(f.db, () => at), memory = await store.create('a'.repeat(64), 's1', { body: 'completed content' }, 'episode-create');

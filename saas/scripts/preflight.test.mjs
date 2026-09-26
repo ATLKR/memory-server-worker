@@ -70,8 +70,8 @@ test('explicit valid staging config is identified, including a path containing s
 });
 
 for (const [name, mutate, message] of [
-  ['production database ID', c => { c.d1_databases[0].database_id = production.d1_databases[0].database_id; }, /production.*D1|D1.*production/i],
-  ['production database name', c => { c.d1_databases[0].database_name = production.d1_databases[0].database_name; }, /production.*D1|D1.*production/i],
+  // Production D1 identity collisions moved to the injected-production test
+  // below: production no longer owns D1 databases after the PostgreSQL cutover.
   ['production domain', c => { c.vars.PUBLIC_ORIGIN = production.vars.PUBLIC_ORIGIN; c.routes = production.routes; }, /production.*origin|origin.*production/i],
   ['production worker name', c => { c.name = production.name; }, /production.*Worker|Worker.*production/i],
   ['extra public route', c => c.routes.push({ pattern: 'unexpected.example.org', custom_domain: true }), /route|domain/i],
@@ -132,7 +132,7 @@ test('staging checks all production D1/R2 resources, including preview targets',
   const { dir, path } = await fixture(t);
   const baseline = structuredClone(production);
   const extraDatabase = { binding: 'OTHER_DB', database_name: 'other-production-db', database_id: '22222222-3333-4444-8555-666666666666', preview_database_id: '33333333-4444-4555-8666-777777777777' };
-  baseline.d1_databases.push(extraDatabase);
+  baseline.d1_databases = [extraDatabase];
   baseline.r2_buckets = [{ binding: 'ARCHIVE', bucket_name: 'production-archive', preview_bucket_name: 'production-preview-archive' }];
   const productionConfigPath = join(dir, 'production.jsonc');
   await writeFile(productionConfigPath, JSON.stringify(baseline));
@@ -191,7 +191,7 @@ for (const operation of ['build', 'db:local', 'db:remote', 'deploy']) {
 
 test('invalid targets and unknown arguments execute no child and never forward credentials', async t => {
   const { runDeploymentCommand } = await import('./deployment-command.mjs');
-  const config = stagingConfig(); config.d1_databases[0] = production.d1_databases[0];
+  const config = stagingConfig(); config.name = production.name;
   const { path } = await fixture(t, config);
   const calls = [];
   const runner = async (...args) => calls.push(args);

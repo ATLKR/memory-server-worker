@@ -126,7 +126,7 @@ export async function evaluateReadiness(env: ReadinessEnvironment, options: Read
     mail,
     deprovisioning: new TextEncoder().encode(env.IDENTITY_WEBHOOK_SECRET ?? '').length >= 32,
     metering: meter?.tables === 3 && meter.views === 1 && meter.triggers === 2,
-    storage: Boolean(storage?.ready && Number.isInteger(options.hotSchemaVersion) && options.hotSchemaVersion > 0 && storage.hotSchemaVersion === options.hotSchemaVersion && sha256(storage.resourceFingerprint)),
+    storage: Boolean(storage?.ready && Number.isInteger(options.hotSchemaVersion) && options.hotSchemaVersion >= 0 && storage.hotSchemaVersion === options.hotSchemaVersion && sha256(storage.resourceFingerprint)),
     maintenance: Boolean(heartbeat && Number.isSafeInteger(heartbeat.at) && now >= heartbeat.at && now - heartbeat.at < 900000),
     backgroundJobs: env.BACKGROUND_JOBS_ENABLED === 'true',
     observability: typeof env.METRICS?.writeDataPoint === 'function',

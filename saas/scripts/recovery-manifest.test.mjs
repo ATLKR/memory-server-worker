@@ -18,6 +18,9 @@ const base = parse(await readFile(new URL('../wrangler.jsonc', import.meta.url),
 function config(n) {
   const c = structuredClone(base);
   c.name = `recovery-${n}`; c.vars.DEPLOYMENT_ENVIRONMENT = 'staging'; c.vars.PUBLIC_ORIGIN = `https://recovery-${n}.example.org`;
+  // The recovery suites exercise the D1 sharded path; do not inherit
+  // production's postgres backend selection from the clone.
+  c.vars.MEMORY_SQL_BACKEND = 'd1';
   c.vars.STORAGE_MODE = 'sharded'; c.vars.RELEASE_MODE = 'pilot';
   c.vars.STORAGE_SHARDS_JSON = JSON.stringify([{ id: 'a', binding: 'HOT_A', mode: 'active' }, { id: 'b', binding: 'HOT_B', mode: 'draining' }]);
   c.routes = [{ pattern: `recovery-${n}.example.org`, custom_domain: true }];

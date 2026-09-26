@@ -17,7 +17,9 @@ function authorize(plan) {
   const payload = { planHash: hash(plan), notBeforeMs: Date.now() - 5000, expiresAtMs: Date.now() + 600000 };
   return { ...payload, signature: sign(null, Buffer.from(snapshotCanonical(payload)), keys.privateKey).toString('base64url') };
 }
-const built = await build({ entryPoints: [fileURLToPath(new URL('../../../src/worker.ts', import.meta.url))], bundle: true, write: false,
+// The retired architecture's own serving entry: the live src/worker.ts now
+// composes the PostgreSQL region app and cannot exercise durable SQL.
+const built = await build({ entryPoints: [fileURLToPath(new URL('./native-entry.ts', import.meta.url))], bundle: true, write: false,
   format: 'esm', platform: 'browser', target: 'es2022', external: ['cloudflare:workers'],
   define: { BUILD_SOURCE_REVISION: JSON.stringify('a'.repeat(40)), BUILD_RESOURCE_FINGERPRINT: JSON.stringify('b'.repeat(64)) } });
 // This bridge exists only inside this test's isolated operator Worker. The

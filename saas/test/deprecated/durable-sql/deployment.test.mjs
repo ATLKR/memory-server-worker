@@ -92,7 +92,7 @@ test('SQL maintenance changes are bound into the deployment fingerprint', () => 
 for (const [name, mutate] of [
   ['unknown backend', c => { c.vars.MEMORY_SQL_BACKEND = 'durabl'; }],
   ['null backend', c => { c.vars.MEMORY_SQL_BACKEND = null; }],
-  ['D1 binding retained', c => { c.d1_databases = structuredClone(base.d1_databases); }],
+  ['D1 binding retained', c => { c.d1_databases = [{ binding: 'DB', database_name: 'legacy-fixture', database_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', migrations_dir: 'd1-migrations' }]; }],
   ['missing deployment ID', c => { delete c.vars.MEMORY_SQL_DEPLOYMENT_ID; }],
   ['colon in deployment ID', c => { c.vars.MEMORY_SQL_DEPLOYMENT_ID = 'stage:control'; }],
   ['dot in deployment ID', c => { c.vars.MEMORY_SQL_DEPLOYMENT_ID = 'stage.control'; }],

@@ -22,8 +22,8 @@ function sqlBackend(config) {
   if (maintenance !== undefined && !['false', 'true'].includes(maintenance))
     fail('MEMORY_SQL_MAINTENANCE must be absent or the exact string false or true.');
   const backend = config.vars?.MEMORY_SQL_BACKEND === undefined ? 'd1' : config.vars.MEMORY_SQL_BACKEND;
-  if (!['d1', 'durable'].includes(backend)) fail('MEMORY_SQL_BACKEND must explicitly select d1 or durable; no fallback is permitted.');
-  if (backend === 'd1' && sqlIdentityVariables.some(key => Object.hasOwn(config.vars ?? {}, key)))
+  if (!['d1', 'durable', 'postgres'].includes(backend)) fail('MEMORY_SQL_BACKEND must explicitly select d1, durable or postgres; no fallback is permitted.');
+  if (backend !== 'durable' && sqlIdentityVariables.some(key => Object.hasOwn(config.vars ?? {}, key)))
     fail('Durable SQL identity variables require MEMORY_SQL_BACKEND=durable.');
   return backend;
 }
@@ -34,7 +34,7 @@ function sqlBackend(config) {
 function validateSqlNamespace(config, backend) {
   const candidates = list(config.durable_objects ?? {}, 'bindings')
     .filter(item => item.name === 'MEMORY_SQL' || item.class_name === 'MemorySqlDatabase');
-  if (!candidates.length && backend === 'd1') return;
+  if (!candidates.length && backend !== 'durable') return;
   if (config.unsafe !== undefined) fail('Unsafe binding or metadata overrides are unsupported for Durable SQL deployments.');
   if (candidates.length !== 1 || candidates[0].name !== 'MEMORY_SQL' || candidates[0].class_name !== 'MemorySqlDatabase'
       || Object.keys(candidates[0]).sort().join(',') !== 'class_name,name')
@@ -169,7 +169,7 @@ function validate(config, production, isProductionFile) {
     if (bindings.has(value) || Object.hasOwn(config.vars, value)) fail('Duplicate resource binding in deployment configuration.');
     bindings.add(value);
   };
-  for (const [collection, key] of [['d1_databases', 'binding'], ['r2_buckets', 'binding'], ['send_email', 'name'], ['ratelimits', 'name'], ['kv_namespaces', 'binding'], ['vectorize', 'binding'], ['services', 'binding'], ['analytics_engine_datasets', 'binding'], ['mtls_certificates', 'binding']]) {
+  for (const [collection, key] of [['d1_databases', 'binding'], ['r2_buckets', 'binding'], ['send_email', 'name'], ['ratelimits', 'name'], ['kv_namespaces', 'binding'], ['vectorize', 'binding'], ['services', 'binding'], ['analytics_engine_datasets', 'binding'], ['mtls_certificates', 'binding'], ['hyperdrive', 'binding']]) {
     for (const item of list(config, collection)) addBinding(item[key]);
   }
   for (const key of ['ai', 'browser', 'images', 'assets']) {
@@ -181,7 +181,9 @@ function validate(config, production, isProductionFile) {
   for (const item of list(config.queues ?? {}, 'producers')) addBinding(item.binding);
   validateSqlNamespace(config, backend);
   const databases = list(config, 'd1_databases');
-  if (backend === 'durable' && databases.length) fail('Durable SQL deployment must not configure any D1 database bindings.');
+  if ((backend === 'durable' || backend === 'postgres') && databases.length) fail('Durable SQL or PostgreSQL deployments must not configure any D1 database bindings.');
+  if (backend === 'postgres' && (!list(config, 'hyperdrive').length || list(config, 'hyperdrive').some(item => !configured(item.id))))
+    fail('PostgreSQL deployments require at least one Hyperdrive binding with its real connection ID.');
   if (backend === 'd1' && (!databases.some(db => db.binding === 'DB') || databases.some(db => !uuid(db.database_id) || !configured(db.database_name) || (db.preview_database_id !== undefined && !uuid(db.preview_database_id)))))
     fail('Provision each dedicated D1 database and configure its real database_id and database_name, including DB.');
   const buckets = list(config, 'r2_buckets');

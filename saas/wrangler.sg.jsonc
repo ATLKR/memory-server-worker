@@ -39,6 +39,7 @@
     { "binding": "MEMORY_SG_CONTROL_HYPERDRIVE", "id": "0b76cf08a44443d39d12f0d51ed059f5" }
   ],
   "ai": { "binding": "AI" },
+  "vectorize": [{ "binding": "MEMORY_INDEX", "index_name": "allenlabs-memory-production-index" }],
   "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "allenlabs_memory_production" }],
   "ratelimits": [{ "name": "REQUEST_LIMITER", "namespace_id": "2086090801", "simple": { "limit": 120, "period": 60 } }],
   "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["memory@allenlabs.org"] }],
