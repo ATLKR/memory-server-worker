@@ -27,7 +27,7 @@ export function renderPage(brand: Brand, hasManagement = false, origin = PUBLIC_
   const support = escapeHtml(brand.supportEmail);
   const supportHref = escapeHtml(supportEmailHref(brand.supportEmail));
   const mark = escapeHtml(Array.from(brand.shortName)[0] ?? '');
-  const mcpEndpoint = escapeHtml(new URL('/mcp', origin).href);
+  const mcpEndpoint = escapeHtml(`${origin}/mcp`);
   return `<!doctype html>
 <html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="description" content="${description}"><meta name="color-scheme" content="light">

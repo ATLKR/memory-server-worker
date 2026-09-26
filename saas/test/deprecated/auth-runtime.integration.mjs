@@ -10,7 +10,7 @@ import { generateKeyPair, exportJWK, SignJWT } from 'jose';
 
 const origin = 'https://memory.example.test', issuer = 'https://auth.example.test';
 const session = 'synthetic-runtime-session-' + 'a'.repeat(40);
-const settings = { origin, issuer, authorizationEndpoint: issuer + '/oauth/authorize',
+const settings = { origin, publicPath: '', issuer, authorizationEndpoint: issuer + '/oauth/authorize',
   tokenEndpoint: issuer + '/oauth/token', jwksUri: issuer + '/.well-known/jwks.json', clientId: 'runtime-browser-client' };
 const { privateKey, publicKey } = await generateKeyPair('RS256');
 const jwk = { ...await exportJWK(publicKey), kid: 'runtime-key', alg: 'RS256', use: 'sig' };

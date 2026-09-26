@@ -256,7 +256,7 @@ export class Billing {
         const poolId = await one<{ id: string }>(this.env.DB, 'SELECT pool_id AS id FROM memory_ops.space_pools WHERE space_id=?', [spaceId]);
         const pool = poolId ? await one<{ customerId: string | null }>(this.catalog, 'SELECT p.customer_id AS "customerId" FROM memory_control.pools p WHERE p.id=?', [poolId.id]) : null;
         if (!pool?.customerId)
-        fail(409, 'billing_customer_missing'); await this.authorize(token, spaceId); const result = await this.api('billing_portal/sessions', 'POST', new URLSearchParams({ customer: pool.customerId, return_url: readSettings(this.env).origin + '/manage' })); const url = new URL(str(result.url, 2048)); if (url.protocol !== 'https:' || url.hostname !== 'billing.stripe.com')
+        fail(409, 'billing_customer_missing'); await this.authorize(token, spaceId); const result = await this.api('billing_portal/sessions', 'POST', new URLSearchParams({ customer: pool.customerId, return_url: readSettings(this.env).origin + readSettings(this.env).publicPath + '/manage' })); const url = new URL(str(result.url, 2048)); if (url.protocol !== 'https:' || url.hostname !== 'billing.stripe.com')
         fail(502, 'invalid_portal_url'); await this.authorize(token, spaceId); return { url: url.href }; }
     async webhook(request: Request) {
         const raw = await requestText(request, 262144), header = request.headers.get('stripe-signature') ?? '';

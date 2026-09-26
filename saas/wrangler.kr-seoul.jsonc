@@ -25,6 +25,7 @@
     "MEMORY_KR_CONTROL_TARGET_JSON": "{\"database\":\"memoryservice-control\",\"deploymentId\":\"memory-control\",\"expectedRole\":\"memory_runtime\"}",
     "MAIL_FROM": "memory@allenlabs.org",
     "PUBLIC_ORIGIN": "https://memory.allenlabs.org",
+    "PUBLIC_PATH": "/kr-seoul",
     "SSO_CLIENT_ID": "M5w1jhX2WjRD3PyJDwS_QosyAaHm4TWSyVCkzebqNrA",
     "PRODUCT_NAME": "Memory by Allen Labs",
     "PRODUCT_SHORT_NAME": "Memory",

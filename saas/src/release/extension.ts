@@ -94,7 +94,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                     return json(routingDiscovery(env,clock));
                 }
                 if (url.pathname === '/manage' && requireMethod(request, 'GET'))
-                    return new Response(renderManagement(settings.brand, settings.origin), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+                    return new Response(renderManagement(settings.brand, settings.origin + settings.publicPath), { headers: { 'content-type': 'text/html; charset=utf-8' } });
                 if (url.pathname === '/assets/release.js' && requireMethod(request, 'GET'))
                     return new Response(managementScript, { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
                 if (url.pathname === '/assets/release.css' && requireMethod(request, 'GET'))

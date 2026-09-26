@@ -69,7 +69,7 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     if (publicResponse) return publicResponse;
     if (['/', '/assets/app.js', '/assets/app.css', '/health', '/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'].includes(url.pathname)) requireMethod(request, 'GET');
     if (request.method === 'GET') {
-      if (url.pathname === '/') return new Response(options.release ? renderPage(settings.brand, true, settings.origin).replace(/<body([^>]*)>/, '<body$1><p><a href="/manage">서비스 관리</a></p>') : renderPage(settings.brand, false, settings.origin), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+      if (url.pathname === '/') return new Response(options.release ? renderPage(settings.brand, true, settings.origin + settings.publicPath).replace(/<body([^>]*)>/, '<body$1><p><a href="/manage">서비스 관리</a></p>') : renderPage(settings.brand, false, settings.origin + settings.publicPath), { headers: { 'content-type': 'text/html; charset=utf-8' } });
       if (url.pathname === '/assets/app.js') return new Response(appScript, { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
       if (url.pathname === '/assets/app.css') return new Response(renderStyles(settings.brand), { headers: { 'content-type': 'text/css; charset=utf-8' } });
       if (url.pathname === '/health') return json({ status: 'ok', version: SERVICE_VERSION, mode: 'managed',
@@ -176,7 +176,7 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     }
     if (response.status === 401 && !response.headers.get('www-authenticate')?.includes('resource_metadata=')) response.headers.set('www-authenticate', new URL(request.url).pathname.startsWith('/scim/')
       ? 'Bearer realm="scim"'
-      : `Bearer ${invalidToken ? 'error="invalid_token", ' : ''}resource_metadata="${settings.origin}/.well-known/oauth-protected-resource", scope="memory:read"`);
+      : `Bearer ${invalidToken ? 'error="invalid_token", ' : ''}resource_metadata="${settings.origin}${settings.publicPath}/.well-known/oauth-protected-resource", scope="memory:read"`);
     if (response.status === 429) response.headers.set('retry-after', '60');
     return protect(response, new URL(request.url).pathname);
   };

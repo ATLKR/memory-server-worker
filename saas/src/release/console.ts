@@ -8,7 +8,7 @@ export function renderManagement(brand: Brand, origin = PUBLIC_ORIGIN): string {
         'MEMORY / MANAGED STANDARD': escape(brand.shortName) + ' / MANAGED STANDARD',
         '기억과 접근 권한 관리</h1>': escape(brand.name) + ' · 기억과 접근 권한 관리</h1>',
         'Release candidate · 실환경': '<a href="' + escape(supportEmailHref(brand.supportEmail)) + '">문의</a> · Release candidate · 실환경',
-        'https://memory.allenlabs.org/mcp': escape(new URL('/mcp', origin).href),
+        'https://memory.allenlabs.org/mcp': escape(`${origin}/mcp`),
     };
     return managementHtml.replace(/<title>Memory|MEMORY \/ MANAGED STANDARD|기억과 접근 권한 관리<\/h1>|Release candidate · 실환경|https:\/\/memory\.allenlabs\.org\/mcp/g,
         marker => replacements[marker]!);

@@ -17,6 +17,7 @@ type AuthProgress = { phase: 'login' | 'callback_validation' | 'flow_claim' | 't
 
 export interface AuthSettings {
   origin: string;
+  publicPath: string;
   issuer: string;
   authorizationEndpoint: string;
   tokenEndpoint: string;
@@ -132,7 +133,7 @@ export function createAuthController(
   const fetchFn = options.fetch ?? globalThis.fetch;
   const clock = options.clock ?? Date.now;
   const isConfigured = configured(settings);
-  const callbackUri = `${settings.origin}/auth/callback`;
+  const callbackUri = `${settings.origin}${settings.publicPath}/auth/callback`;
   let resolver: JWTVerifyGetKey | undefined = options.jwks;
   function now(): number {
     const value = clock();

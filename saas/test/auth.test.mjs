@@ -7,7 +7,7 @@ import { createAuthController } from '../src/auth.ts';
 import { createDatabase, seedCredential, NOW } from './helpers.mjs';
 
 const settings = {
-  origin: 'https://memory.allenlabs.org', issuer: 'https://auth-api.allen.company',
+  origin: 'https://memory.allenlabs.org', publicPath: '', issuer: 'https://auth-api.allen.company',
   authorizationEndpoint: 'https://auth-api.allen.company/oauth/authorize',
   tokenEndpoint: 'https://auth-api.allen.company/oauth/token',
   jwksUri: 'https://auth-api.allen.company/.well-known/jwks.json', clientId: 'registered-browser-client',
@@ -63,6 +63,13 @@ async function fixture(opts = {}) {
   return { ...storage, ...controller, request, begin, callback, principals, exchanges, localToken,
     setNow: async value => { now = value; await storage.setClockValue(value); } };
 }
+
+test('region-prefixed deployments emit a prefixed redirect_uri', async t => {
+  const f = await fixture({ settings: { publicPath: '/kr-seoul' } }); t.after(f.close);
+  const flow = await f.begin();
+  assert.equal(flow.location.searchParams.get('redirect_uri'), `${settings.origin}/kr-seoul/auth/callback`);
+  assert.equal(flow.location.searchParams.get('resource'), settings.origin);
+});
 
 test('browser login binds PKCE to a single-use callback and stores only the opaque local session', async t => {
   const f = await fixture(); t.after(f.close);
