@@ -10,8 +10,9 @@
   "routes": [{ "pattern": "memory.allenlabs.org/sg/*", "zone_name": "allenlabs.org" }],
   "vars": {
     "DEPLOYMENT_ENVIRONMENT": "production",
-    "RELEASE_MODE": "pilot",
+    "RELEASE_MODE": "ga",
     "GA_PROFILE": "managed-ai-metered",
+    "LIVE_ACCEPTANCE_PUBLIC_KEY": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAP9vpX8756IIGSEgR5jr0Lh5neFZdSoh265B/urFASN4=\n-----END PUBLIC KEY-----\n",
     "PAID_BILLING_ENABLED": "false",
     "ENROLLMENT_MODE": "invite",
     "AI_MONTHLY_BUDGET_MICROUSD": "20000000",
