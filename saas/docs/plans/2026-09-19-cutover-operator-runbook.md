@@ -42,6 +42,75 @@ login `memory_sg_runtime`. Live cut rehearsal 2026-09-19: 79 tables, 37
 rows, 104.9s freeze→verify, 0 mismatches; post-cut `postgres-attest` →
 `attested:true, allDenialsHeld:true`.
 
+### Live topology update (2026-09-26)
+
+- Control plane provisioned: `memoryservice-control` on the Neon sg
+  endpoint, control lineage 1–7, `deployment_identity` =
+  `memory-control`/`sg`/`standard-v1`, catalog seeded
+  (regions `kr-seoul`,`sg`; deployments `memory-seoul`,`memory-sg`).
+- Serving login = the `memory_runtime` group role itself
+  (`connection.ts` requires `current_user = session_user = expectedRole`);
+  the September `memory_seoul_runtime`/`memory_sg_runtime` logins are
+  obsolete — do not reuse them for worker targets.
+- Workers cannot open raw TCP: `pg` native transport fails on Workers.
+  Production transport is **Hyperdrive** for all three connections
+  (configs `memory-kr`, `memory-sg`, `memory-control`; bindings
+  `KR_HYPERDRIVE`, `SG_HYPERDRIVE`, `*_CONTROL_HYPERDRIVE`).
+- `allenlabs-memory-kr-seoul` and `allenlabs-memory-sg` are deployed and
+  live-verified: `/health` 200 and `/v1/spaces` 401 through attested PG
+  sessions over `memory.allenlabs.org/{region}/*`.
+- Control attestation pins `controlRegion`/`controlSchemaVersion`(7)/
+  `controlPolicyId`(`standard-v1`) — separate from the region pins.
+
+### Prod D1 measurement (2026-09-26, for cutover sizing)
+
+Source data is near-empty, so the sealed cut is seconds-scale, not
+minutes-scale:
+
+| Database | Tables | Meaningful rows |
+|---|---|---|
+| central `a186c3b4` | 82 | 1 account, 1 space, 1 pool, 3 credentials, 1 provider_identity, 1 email, 16 lifecycle events, 8 lifecycle states, 16 webhook events, 3 workspace sign-ins; `memories` = 0 |
+| hot-01 `037bcfea` | 10 | 0 payloads, 0 tombstones |
+| hot-02 `5e16ed77` | 10 | 0 payloads, 0 tombstones |
+
+Consequence for section 3: the payload seal is a no-op today (no live
+objects), and `copyTable` volume is ~50 rows across the non-empty central
+tables — the FK-cycle machinery is exercised, not stressed. Record the
+manifest anyway; it is the evidence that nothing was silently dropped.
+
+### Prod D1 → PostgreSQL cutover sequence (2026-09-26 sizing)
+
+Ordered steps for cutting the production worker off D1. The source is
+tiny (~50 live rows, zero payloads), so steps 3–5 are one short window:
+
+1. Pick the home region for existing prod data: the owner account and
+   its single Space are unplaced; declare `kr-seoul` residency in the
+   control catalog (enroll via `memory_control.enroll_account` +
+   `enroll_organization` on the control session, then insert the
+   `memory_control.spaces` placement row with `data_policy.residency =
+   home_region` and `placement_epoch = 1`).
+2. Snapshot the D1 counts (the table in this runbook is the baseline;
+   re-run the same per-table COUNT + page_count measure immediately
+   before the freeze and diff against it).
+3. Freeze: deploy a maintenance flag on the prod worker (D1 has no
+   LOGIN gate) or drain the route; confirm by re-measuring counts.
+4. Export every non-empty central table (list above) plus `release_pools`
+   and the `release_meta`/`release_fts_config` singletons into the
+   manifest; hot shards have no data — record them as empty manifests.
+5. Map-insert into the `kr-seoul` regional schemas (`memory_identity`,
+   `memory_control` skeletons, `memory_content`, `memory_ops`); resync
+   sequences; verify row counts and digests against the manifest.
+6. Verify: `postgres-attest` on `memory-seoul` + control, then a live
+   OAuth-scoped request against `memory.allenlabs.org/kr-seoul/` proves
+   the serving path reads the imported rows.
+7. Flip the prod worker off D1 (deploy with PG region wiring or repoint
+   the unprefixed route to the regional worker — decide per acceptance
+   doc), then apply the owner-pool unlimited UPDATE on the target
+   (`Post-cutover operator adjustments`) and confirm `state='active'`.
+8. Evidence: freeze timestamp, post-freeze counts, manifest, verify
+   outputs, cut completion timestamp — write all five into the ops
+   record (RPO=0 only if step-3 freeze held the whole window).
+
 ### Provisioning notes learned from the live run
 
 - Migration logins need `CREATEROLE` (0004/0005 create roles) plus
