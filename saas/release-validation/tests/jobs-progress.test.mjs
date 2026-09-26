@@ -117,8 +117,11 @@ test('scheduled drain stops claiming more jobs after its wall-clock budget',asyn
   const store=new MemoryStore(db,()=>at);
   for(let n=0;n<5;n++)await store.create(token,'s1',{body:'x'.repeat(3300)},'create-'+n);
   const p=providers(db,()=>now,ms=>{now+=ms;});await p.jobs.drain(5);
-  assert.equal((await db.raw.prepare("SELECT count(*) n FROM release_jobs WHERE state='done'").get()).n,4);
-  assert.equal((await db.raw.prepare("SELECT count(*) n FROM release_jobs WHERE state='pending' AND attempt=0").get()).n,1);
-  assert.equal(now-at,304000);
+  // The outer slice now bounds a job's inner provider work too: the fourth job
+  // is claimed but checkpoints back to pending at the drain boundary instead
+  // of finishing inside its own fresh 240s window.
+  assert.equal((await db.raw.prepare("SELECT count(*) n FROM release_jobs WHERE state='done'").get()).n,3);
+  assert.equal((await db.raw.prepare("SELECT count(*) n FROM release_jobs WHERE state='pending' AND attempt=0").get()).n,2);
+  assert.ok(now-at >= 240000 && now-at < 304000);
  }finally{db.close();}
 });
