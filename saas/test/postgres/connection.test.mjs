@@ -70,11 +70,12 @@ test('a pre-aborted operation creates no client and a retained session cannot be
  const h=harness(),controller=new AbortController();controller.abort();await assert.rejects(h.boundary().transaction(()=>0,{signal:controller.signal}),e=>e.code==='postgres_aborted');assert.equal(h.made,0);
  let saved;await h.boundary().withConnection(db=>{saved=db;return 1;});await assert.rejects(saved.query('SELECT secret'),e=>e.code==='postgres_connection_closed');
 });
-test('parallel callback queries and transaction-control SQL cannot escape the boundary',async()=>{
+test('transaction-control SQL cannot escape the boundary and parallel callback queries serialize on the wire',async()=>{
  const pending=deferred(),h=harness({query:c=>c.text==='SELECT slow'?pending.promise:Promise.resolve({rows:[],rowCount:0})});
  await h.boundary().transaction(async db=>{for(const sql of ['COMMIT','/* x */ COMMIT','ROLLBACK','SET ROLE postgres','DO $$ BEGIN COMMIT; END $$'])await assert.rejects(db.query(sql),e=>e.code==='postgres_transaction_control_denied');
-  const first=db.query('SELECT slow');await assert.rejects(db.query('SELECT other'),e=>e.code==='postgres_concurrent_query');pending.resolve({rows:[],rowCount:0});await first;
- });assert.ok(!h.calls.includes('SELECT other'));
+  const first=db.query('SELECT slow'),second=db.query('SELECT other');await sleep(5);assert.ok(!h.calls.includes('SELECT other'));
+  pending.resolve({rows:[],rowCount:1});await first;await second;assert.ok(h.calls.indexOf('SELECT slow')<h.calls.indexOf('SELECT other'));
+ });
 });
 test('a callback returning with unawaited SQL never commits',async()=>{
  const pending=deferred(),h=harness({query:c=>c.text.startsWith('INSERT')?pending.promise:Promise.resolve({rows:[],rowCount:0})});

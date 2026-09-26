@@ -142,6 +142,7 @@ class PostgresStatement implements Statement {
 
 class PostgresDatabase implements Database {
     readonly session: PgSession;
+    private batchSeq = 0;
     constructor(session: PgSession) {
         this.session = session;
     }
@@ -175,8 +176,12 @@ class PostgresDatabase implements Database {
         // Inside a guarded operation the session already runs one transaction:
         // the batch's atomicity is a savepoint, never nested BEGIN/COMMIT.
         // Unguarded sessions (fixtures) still open their own transaction.
+        // Savepoint names are per-batch: the session serializes statements from
+        // concurrent callers, and a shared name would let a sibling batch's
+        // savepoint shadow this one's ROLLBACK TO target.
         const ambient = this.session.inTransaction === true;
-        await this.execute(ambient ? 'SAVEPOINT memory_batch' : 'BEGIN', [], 'run');
+        const savepoint = `memory_batch_${++this.batchSeq}`;
+        await this.execute(ambient ? `SAVEPOINT ${savepoint}` : 'BEGIN', [], 'run');
         const out: Result<T>[] = [];
         try {
             for (const s of statements as PostgresStatement[]) {
@@ -184,7 +189,7 @@ class PostgresDatabase implements Database {
                 out.push(await this.execute(s.sql, s['params'], 'all') as Result<T>);
             }
         } catch (e) {
-            try { await this.session.query(ambient ? 'ROLLBACK TO SAVEPOINT memory_batch' : 'ROLLBACK'); } catch { /* original error wins */ }
+            try { await this.session.query(ambient ? `ROLLBACK TO SAVEPOINT ${savepoint}` : 'ROLLBACK'); } catch { /* original error wins */ }
             if (e instanceof PostgresBoundaryError) {
                 if (e.outcome === 'not_started') e.outcome = 'rolled_back';
                 throw e;
@@ -193,7 +198,7 @@ class PostgresDatabase implements Database {
             throw fail('postgres_operation_failed', 'rolled_back', state, e);
         }
         try {
-            await this.session.query(ambient ? 'RELEASE SAVEPOINT memory_batch' : 'COMMIT');
+            await this.session.query(ambient ? `RELEASE SAVEPOINT ${savepoint}` : 'COMMIT');
         } catch (e) {
             const state = e && typeof e === 'object' && 'code' in e ? String(e.code) : undefined;
             throw fail('postgres_operation_failed', ambient ? 'rolled_back' : 'unknown', state, e);

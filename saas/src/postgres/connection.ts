@@ -361,37 +361,56 @@ export function createPostgresConnection(input: PostgresTarget, options: Connect
         async function native(text: string, values: unknown[] = []): Promise<PgResult> {
             return bounded(() => client!.query({ text, values, queryMode: 'extended', query_timeout: Math.max(1, Math.ceil(Math.min(target.queryTimeoutMs, deadline - performance.now()))) }), target.queryTimeoutMs);
         }
-        const session: PgSession = Object.freeze({ inTransaction: true, async query<Row>(text: string, values: readonly PgValue[] = []): Promise<PgResult<Row>> {
-            if (!active) throw error('postgres_connection_closed'); check();
+        // One client serializes the wire: concurrent callers queue instead of
+        // racing — ported D1-era code uses Promise.all over statements, which
+        // is legal because every statement still lands inside this operation's
+        // single transaction. `queued` counts enqueued-but-not-finished work so
+        // fire-and-forget statements cannot escape the operation boundary.
+        let tail: Promise<unknown> = Promise.resolve(), queued = 0;
+        const session: PgSession = Object.freeze({ inTransaction: true, query<Row>(text: string, values: readonly PgValue[] = []): Promise<PgResult<Row>> {
+            // Submission-time gates reject rather than throw so callers get a
+            // uniform async boundary error.
+            try {
+                if (!active) throw error('postgres_connection_closed'); check();
+            } catch (e) { return Promise.reject(e); }
             // Extended protocol rejects multiple statements; callbacks cannot
             // issue transaction control. Savepoints are the recovery primitive:
             // after a failed statement only `ROLLBACK TO` may run, restoring a
             // usable transaction without ever escaping the operation's tx.
             const rollbackTo = typeof text === 'string' && /^\s*ROLLBACK\s+TO\b/i.test(text);
-            if (transactionFailed) { if (!rollbackTo) throw error('postgres_transaction_failed'); }
+            if (transactionFailed) { if (!rollbackTo) return Promise.reject(error('postgres_transaction_failed')); }
             else if (typeof text !== 'string' || !/^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|VALUES|SAVEPOINT|RELEASE)\b/i.test(text) && !rollbackTo)
-                throw error('postgres_transaction_control_denied');
-            if (busy) throw error('postgres_concurrent_query');
-            if (!Array.isArray(values) || values.some(x => x !== null && !['string', 'number', 'boolean', 'bigint'].includes(typeof x) && !(x instanceof Uint8Array))) throw error('postgres_parameter_invalid');
-            numericSafety(values); busy = true;
-            try {
-                // Savepoint recovery is itself the statement that restores a
-                // failed transaction: it must reach the server without the
-                // ambient timeout preamble, which the aborted transaction
-                // would otherwise reject before the ROLLBACK TO ever ran.
-                if (!rollbackTo) {
-                    const statementMs = Math.max(1, Math.floor(Math.min(target.statementTimeoutMs, deadline - performance.now())));
-                    await native("SELECT pg_catalog.set_config('statement_timeout',$1,$2), pg_catalog.set_config('lock_timeout',$1,$2)", [String(statementMs), true]);
+                return Promise.reject(error('postgres_transaction_control_denied'));
+            if (!Array.isArray(values) || values.some(x => x !== null && !['string', 'number', 'boolean', 'bigint'].includes(typeof x) && !(x instanceof Uint8Array))) return Promise.reject(error('postgres_parameter_invalid'));
+            try { numericSafety(values); } catch (e) { return Promise.reject(e); }
+            const task = tail.then(async (): Promise<PgResult<Row>> => {
+                if (!active) throw error('postgres_connection_closed'); check();
+                // The submission-time gate passed, but an earlier queued
+                // statement may have failed the transaction meanwhile.
+                if (transactionFailed && !rollbackTo) throw error('postgres_transaction_failed');
+                busy = true;
+                try {
+                    // Savepoint recovery is itself the statement that restores a
+                    // failed transaction: it must reach the server without the
+                    // ambient timeout preamble, which the aborted transaction
+                    // would otherwise reject before the ROLLBACK TO ever ran.
+                    if (!rollbackTo) {
+                        const statementMs = Math.max(1, Math.floor(Math.min(target.statementTimeoutMs, deadline - performance.now())));
+                        await native("SELECT pg_catalog.set_config('statement_timeout',$1,$2), pg_catalog.set_config('lock_timeout',$1,$2)", [String(statementMs), true]);
+                    }
+                    check(); outcome = 'unknown';
+                    const value = result<Row>(await native(text, [...values]));
+                    if (rollbackTo) transactionFailed = false;
+                    return value;
+                } catch (e) {
+                    if (began && !rollbackTo) transactionFailed = true;
+                    const safe = sanitized(e, 'postgres_query_failed'); safe.outcome = outcome; throw safe;
                 }
-                check(); outcome = 'unknown';
-                const value = result<Row>(await native(text, [...values]));
-                if (rollbackTo) transactionFailed = false;
-                return value;
-            } catch (e) {
-                if (began && !rollbackTo) transactionFailed = true;
-                const safe = sanitized(e, 'postgres_query_failed'); safe.outcome = outcome; throw safe;
-            }
-            finally { busy = false; }
+                finally { busy = false; }
+            });
+            queued += 1;
+            tail = task.catch(() => {}).then(() => { queued -= 1; });
+            return task;
         }});
         try {
             check();
@@ -419,9 +438,9 @@ export function createPostgresConnection(input: PostgresTarget, options: Connect
             // Control sessions pin the serving worker's own region, not the
             // control deployment's home.
             await native("SELECT pg_catalog.set_config('memory.caller_region',$1,$2)", [target.callerRegion ?? metadata.region, true]);
-            if (busy) throw error('postgres_pending_query');
+            if (busy || queued > 0) throw error('postgres_pending_query');
             const value = await bounded(() => callback(session), duration);
-            if (busy) { stop('postgres_pending_query'); throw failure!; }
+            if (busy || queued > 0) { stop('postgres_pending_query'); throw failure!; }
             if (transactionFailed) throw error('postgres_transaction_failed');
             check();
             commitSent = true;
