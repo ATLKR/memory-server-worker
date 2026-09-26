@@ -46,7 +46,7 @@ async function browser(t, path, setup, variables = {}) {
     for (let i = 0; i < 12; i++) { await Promise.allSettled([...active]); await new Promise(resolve => setImmediate(resolve)); }
   }
   t.after(async () => { await settle(); dom.window.close(); f.db.close(); });
-  w.eval(path === '/' ? appScript : managementScript); await settle();
+  w.eval((path === '/' ? appScript : managementScript).replaceAll('__PUBLIC_PATH__', '')); await settle();
   const byId = id => w.document.getElementById(id);
   const submit = id => byId(id).dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
   return { ...f, app, settings, w, byId, submit, settle, calls, switchAccount: () => { token = f.other; }, intercept: fn => { responseInterceptor = fn; }, beforeRequest: fn => { requestInterceptor = fn; } };
@@ -1003,7 +1003,7 @@ test('a lost share response is recovered after page reload and its original gran
  const stored=(await f.db.raw.prepare('SELECT id FROM release_shares').all());assert.equal(stored.length,1);assert.equal(f.calls.filter(c=>c.path==='/v1/spaces/s1/shares'&&c.method==='POST').length,1);
  assert.match(f.byId('status').textContent,/확인|알 수 없/);assert.match(f.byId('status').textContent,/보낸 공유/);
  const html=await(await f.app(new Request(f.settings.origin+'/manage'))).text(),dom=new JSDOM(html,{url:f.settings.origin+'/manage',runScripts:'outside-only'}),w=dom.window;t.after(()=>dom.window.close());
- w.fetch=f.w.fetch;w.TextEncoder=TextEncoder;w.confirm=()=>true;w.eval(managementScript);await f.settle();
+ w.fetch=f.w.fetch;w.TextEncoder=TextEncoder;w.confirm=()=>true;w.eval(managementScript.replaceAll('__PUBLIC_PATH__',''));await f.settle();
  const byId=id=>w.document.getElementById(id);assert.equal(byId('receipt-list').children.length,0);
  byId('outbound-shares-refresh').click();await f.settle();assert.match(byId('outbound-shares').textContent,new RegExp(stored[0].id));
  await new Transfers(f.db,()=>at).accept(f.other,stored[0].id);assert.equal((await new MemoryStore(f.db,()=>at).get(f.other,'s1',memory.id)).body,'Recover original grant');

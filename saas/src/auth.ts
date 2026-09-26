@@ -242,7 +242,7 @@ export function createAuthController(
     const session = await workspaceSignIn(principal);
     if (!/^[A-Za-z0-9_-]{32,256}$/.test(session.token) || !Number.isSafeInteger(session.expiresAt) ||
         session.expiresAt > principal.expiresAt || session.expiresAt <= now()) throw new IdentityDenied();
-    const headers = new Headers({ Location: '/' });
+    const headers = new Headers({ Location: settings.publicPath + '/' });
     headers.append('Set-Cookie', cookie(FLOW_COOKIE, '', 0));
     headers.append('Set-Cookie', cookie(SESSION_COOKIE, session.token, Math.floor((session.expiresAt - now()) / 1000)));
     return response(303, '', headers);
@@ -258,7 +258,7 @@ export function createAuthController(
         .bind(hash, now()).run();
       if (!revoked.success) throw new IdentityDenied();
     }
-    const headers = new Headers({ Location: '/' });
+    const headers = new Headers({ Location: settings.publicPath + '/' });
     headers.append('Set-Cookie', cookie(SESSION_COOKIE, '', 0));
     headers.append('Set-Cookie', cookie(FLOW_COOKIE, '', 0));
     return response(303, '', headers);

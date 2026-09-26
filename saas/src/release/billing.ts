@@ -241,7 +241,7 @@ export class Billing {
             fail(409, 'checkout_expired');
         // Persisted request expiry is also Stripe's expiry. Replays after a lost
         // response must keep identical parameters under the same idempotency key.
-        const origin = readSettings(this.env).origin;
+        const origin = readSettings(this.env).origin + readSettings(this.env).publicPath;
         const session = await this.api('checkout/sessions', 'POST', new URLSearchParams({ mode: 'subscription', customer, success_url: origin + '/manage?billing=success', cancel_url: origin + '/manage?billing=cancel', 'line_items[0][price]': priceId, 'line_items[0][quantity]': '1', 'subscription_data[metadata][memory_request_id]': request.id, client_reference_id: request.id, expires_at: String(Math.floor(request.expiresAt / 1000)) }), 'memory-checkout-' + request.id);
         const url = new URL(str(session.url, 2048));
         if (url.protocol !== 'https:' || url.hostname !== 'checkout.stripe.com')

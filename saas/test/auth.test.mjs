@@ -69,6 +69,9 @@ test('region-prefixed deployments emit a prefixed redirect_uri', async t => {
   const flow = await f.begin();
   assert.equal(flow.location.searchParams.get('redirect_uri'), `${settings.origin}/kr-seoul/auth/callback`);
   assert.equal(flow.location.searchParams.get('resource'), settings.origin);
+  const response = await f.callback(flow);
+  assert.equal(response.status, 303);
+  assert.equal(response.headers.get('location'), '/kr-seoul/');
 });
 
 test('browser login binds PKCE to a single-use callback and stores only the opaque local session', async t => {

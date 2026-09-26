@@ -96,7 +96,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                 if (url.pathname === '/manage' && requireMethod(request, 'GET'))
                     return new Response(renderManagement(settings.brand, settings.origin + settings.publicPath), { headers: { 'content-type': 'text/html; charset=utf-8' } });
                 if (url.pathname === '/assets/release.js' && requireMethod(request, 'GET'))
-                    return new Response(managementScript, { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
+                    return new Response(managementScript.replaceAll('__PUBLIC_PATH__', settings.publicPath), { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
                 if (url.pathname === '/assets/release.css' && requireMethod(request, 'GET'))
                     return new Response(renderManagementStyles(settings.brand), { headers: { 'content-type': 'text/css; charset=utf-8' } });
                 if (url.pathname === '/ready' || url.pathname.startsWith('/webhooks/') || url.pathname.startsWith('/scim/')) {
@@ -125,7 +125,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                 const routingResponse = await routingApi(request, token);
                 if (routingResponse) return routingResponse;
                 if (path === '/mcp')
-                    return mcp(request, token, store, search, ingest, settings.brand.name);
+                    return mcp(request, token, store, search, ingest, settings.brand.name, settings.origin + settings.publicPath);
                 if (path === '/v1/spaces') requireMethod(request, 'GET', 'POST');
                 if (path === '/v1/account/emails') requireMethod(request, 'GET', 'POST');
                 if (path === '/v1/spaces' && method === 'GET')

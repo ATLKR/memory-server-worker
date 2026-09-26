@@ -6,6 +6,7 @@ import { WorkspaceService } from '../src/workspace.ts';
 import { createApplication } from '../src/app.ts';
 import { readSettings, PUBLIC_ORIGIN, AUTH_ISSUER, SERVICE_ID } from '../src/config.ts';
 import { SESSION_COOKIE } from '../src/auth.ts';
+import { renderManagement } from '../src/release/console.ts';
 
 async function fixture(t, options = {}) {
   const f = await createDatabase(); t.after(f.close);
@@ -63,6 +64,23 @@ test('console branding can change while stable origin, identity and stored memor
   assert.equal(renamed.auth.issuer, AUTH_ISSUER); assert.equal(renamed.origin, PUBLIC_ORIGIN);
   const metadata = await (await app(new Request(PUBLIC_ORIGIN + '/.well-known/oauth-protected-resource'))).json();
   assert.equal(metadata.resource_name, 'Future Registered Brand'); assert.equal(metadata.resource, PUBLIC_ORIGIN);
+});
+
+test('region path prefix reaches every URL the rendered pages and served bundles emit', async t => {
+  const f = await fixture(t, { vars: { PUBLIC_PATH: '/kr-seoul' } });
+  const html = await (await f.app(new Request(PUBLIC_ORIGIN + '/'))).text();
+  assert.match(html, /src="\/kr-seoul\/assets\/app\.js"/);
+  assert.match(html, /href="\/kr-seoul\/assets\/app\.css"/);
+  assert.match(html, /href="\/kr-seoul\/auth\/login"/);
+  assert.match(html, /data-mcp-endpoint="https:\/\/memory\.allenlabs\.org\/kr-seoul\/mcp"/);
+  const script = await (await f.app(new Request(PUBLIC_ORIGIN + '/assets/app.js'))).text();
+  assert.match(script, /const BASE='\/kr-seoul'/);
+  assert.ok(!script.includes('__PUBLIC_PATH__'));
+  const manage = renderManagement(f.settings.brand, f.settings.origin + f.settings.publicPath);
+  assert.match(manage, /src="\/kr-seoul\/assets\/release\.js"/);
+  assert.match(manage, /href="\/kr-seoul\/auth\/login"/);
+  assert.match(manage, /href="\/kr-seoul\/"/);
+  assert.ok(!manage.includes('__PUBLIC_PATH__'));
 });
 
 test('browser CSRF, invalid Host/Origin, missing authentication and duplicate cookies fail closed', async t => {

@@ -69,8 +69,8 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     if (publicResponse) return publicResponse;
     if (['/', '/assets/app.js', '/assets/app.css', '/health', '/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'].includes(url.pathname)) requireMethod(request, 'GET');
     if (request.method === 'GET') {
-      if (url.pathname === '/') return new Response(options.release ? renderPage(settings.brand, true, settings.origin + settings.publicPath).replace(/<body([^>]*)>/, '<body$1><p><a href="/manage">서비스 관리</a></p>') : renderPage(settings.brand, false, settings.origin + settings.publicPath), { headers: { 'content-type': 'text/html; charset=utf-8' } });
-      if (url.pathname === '/assets/app.js') return new Response(appScript, { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
+      if (url.pathname === '/') return new Response(options.release ? renderPage(settings.brand, true, settings.origin + settings.publicPath).replace(/<body([^>]*)>/, `<body$1><p><a href="${settings.publicPath}/manage">서비스 관리</a></p>`) : renderPage(settings.brand, false, settings.origin + settings.publicPath), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+      if (url.pathname === '/assets/app.js') return new Response(appScript.replaceAll('__PUBLIC_PATH__', settings.publicPath), { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
       if (url.pathname === '/assets/app.css') return new Response(renderStyles(settings.brand), { headers: { 'content-type': 'text/css; charset=utf-8' } });
       if (url.pathname === '/health') return json({ status: 'ok', version: SERVICE_VERSION, mode: 'managed',
         build: { sourceRevision: BUILD_REVISION, resourceFingerprint: BUILD_FINGERPRINT, payloadFormat: 2 } });
@@ -125,7 +125,7 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     if (credential.expiresAt <= clock()) throw new HttpError(401, external ? 'invalid_token' : 'authentication_required');
     const releaseResponse = await options.release?.route(request, token);
     if (releaseResponse) return releaseResponse;
-    if (url.pathname === '/mcp') return handleMcp(request, memory, token, settings.brand.name, db, clock);
+    if (url.pathname === '/mcp') return handleMcp(request, memory, token, settings.brand.name, db, clock, settings.origin + settings.publicPath);
     if (url.pathname.startsWith('/v1/spaces')) {
       if (url.pathname === '/v1/spaces') requireMethod(request, 'GET', 'POST');
       if (url.pathname === '/v1/spaces' && request.method === 'GET') return json({ results: await memory.listSpaces(token) });

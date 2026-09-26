@@ -27,8 +27,10 @@ async function result(operation: () => Promise<unknown>, capture: (value: unknow
   }
 }
 
-/** Per-request SDK server: no credential or user state survives the request. */
-export async function handleMcp(request: Request, memory: MemoryService, token: string, title: string, db: IdentityDatabase = memory.db, clock: () => number = memory.clock): Promise<Response> {
+/** Per-request SDK server: no credential or user state survives the request.
+ * `origin` is the public base URL (origin + path prefix) for metadata links. */
+export async function handleMcp(request: Request, memory: MemoryService, token: string, title: string, db: IdentityDatabase = memory.db, clock: () => number = memory.clock,
+  origin: string = new URL(request.url).origin): Promise<Response> {
   if (request.method !== 'POST') return json({ error: 'method_not_allowed' }, 405, { allow: 'POST' });
   const parsedBody = await readBody(request, ['jsonrpc', 'id', 'method', 'params', 'result', 'error']);
   const context: ToolResponseContext = {};
@@ -61,5 +63,5 @@ export async function handleMcp(request: Request, memory: MemoryService, token: 
   }, { legacy: 'stateless', maxSubscriptions: 0, keepAliveMs: 0, onerror: () => undefined });
   const response = await handler.fetch(request, { parsedBody });
   return isJSONRPCRequest(parsedBody) && parsedBody.method === 'tools/call'
-    ? toolResponse(response, token, db, clock, new URL(request.url).origin, memoryResponseAuthority, context) : response;
+    ? toolResponse(response, token, db, clock, origin, memoryResponseAuthority, context) : response;
 }

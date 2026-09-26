@@ -18,7 +18,7 @@ async function page(t,fetcher){
   if(path.includes('/memories?'))return json({results:[],nextCursor:null});
   return json({});
  };
- w.eval(managementScript);await tick();await tick();return w;
+ w.eval(managementScript.replaceAll('__PUBLIC_PATH__',''));await tick();await tick();return w;
 }
 
 for(const transition of ['space','account','logout','refresh'])test('a stale outbound page cannot refill the view after '+transition,async t=>{

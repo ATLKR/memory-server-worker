@@ -17,7 +17,7 @@ async function page(t,custom=()=>undefined){
     if(path==='/v1/release/config')return json({prices:{},features:{}});
     if(path.endsWith('/medical-cloudflare-consent'))return json(record(path.includes('/org-one/')?'org-one':'org-two'));
     if(path.includes('/memories?'))return json({results:[],nextCursor:null});return json({});};
-  w.eval(managementScript);await tick();await tick();await tick();
+  w.eval(managementScript.replaceAll('__PUBLIC_PATH__',''));await tick();await tick();await tick();
   const el=id=>w.document.getElementById(id);
   const select=org=>{el('organization').value=org;el('organization').dispatchEvent(new w.Event('change'));};
   select('org-one');
