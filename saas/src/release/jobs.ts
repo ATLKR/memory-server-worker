@@ -136,8 +136,8 @@ export class Jobs {
         if (!result.success || result.meta.changes !== 1 || this.clock() >= at + 120000)
             throw Error('lease_lost');
     }
-    async drain(limit = 5): Promise<void> {
-        const stopAt = this.clock() + WORK_SLICE_MS;
+    async drain(limit = 5, sliceMs = WORK_SLICE_MS): Promise<void> {
+        const stopAt = this.clock() + sliceMs;
         for (let i = 0; i < limit && this.clock() < stopAt; i++) {
             const job = await this.claim();
             if (!job)
@@ -150,7 +150,7 @@ export class Jobs {
                     await this.ingest(job);
                 }
                 else
-                    complete = await this.index(job);
+                    complete = await this.index(job, stopAt);
                 const now = this.clock();
                 // A useful continuation releases its lease without consuming a
                 // failure attempt. Earlier failures and durable progress survive.
@@ -186,11 +186,11 @@ export class Jobs {
             }
         }
     }
-    async index(job: Job): Promise<boolean> {
+    async index(job: Job, outerStopAt = Number.MAX_SAFE_INTEGER): Promise<boolean> {
         const db = this.env.DB, index = this.env.MEMORY_INDEX;
         if (!index)
             throw Error('index_not_configured');
-        const stopAt = this.clock() + WORK_SLICE_MS;
+        const stopAt = Math.min(this.clock() + WORK_SLICE_MS, outerStopAt);
         let providerCalls = 0;
         const canCall = (count: number) => providerCalls + count <= INDEX_PROVIDER_CALLS && this.clock() < stopAt;
         const current = await one<MemoryRow>(db, `SELECT ${columns} FROM memory_content.memories r WHERE r.id=? AND r.space_id=?`, [job.memoryId, job.spaceId]);

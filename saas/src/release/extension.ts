@@ -393,7 +393,11 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
             await stage('payload_maintenance', () => new PayloadMaintenance(env, payloads, clock).run());
             await stage('legacy_backfill', () => new LegacyBackfill(env, store, clock).run());
             if (env.BACKGROUND_JOBS_ENABLED === 'true') {
-                await stage('drain', () => jobs.drain(5));
+                // Bound drain's internal work slice to the operation's 30s
+                // budget: provider indexing can legitimately run for minutes
+                // (WORK_SLICE_MS=240s), which starves the heartbeat write at
+                // the end of this shared transaction and breaks the cron.
+                await stage('drain', () => jobs.drain(5, 15000));
                 if (env.PAID_BILLING_ENABLED !== 'false') { await stage('billing_reconcile', () => billing.reconcile()); await stage('billing_drain', () => billing.drain(3)); }
             }
             await stage('heartbeat', () => db.prepare("INSERT INTO memory_ops.heartbeats(name,last_success_at) VALUES('maintenance',?) ON CONFLICT(name) DO UPDATE SET last_success_at=excluded.last_success_at").bind(clock()).run());
