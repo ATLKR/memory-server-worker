@@ -251,11 +251,21 @@ export function createRegionWorkerApp(env: WorkerEnv, config: RegionDeploymentCo
             if (controlDb) Object.defineProperty(resolved, 'CONTROL_DB', { value: controlDb, enumerable: true });
             return createRelease(resolved, { identity: new IdentityService(db) }).scheduled();
         };
-        await region.withConnection(async session => {
-            const db = createPostgresDatabase(session);
-            if (!control) return run(db, undefined);
-            return control.withConnection(async controlSession => run(db, createPostgresDatabase(controlSession)));
-        });
+        try {
+            await region.withConnection(async session => {
+                const db = createPostgresDatabase(session);
+                if (!control) return run(db, undefined);
+                return control.withConnection(async controlSession => run(db, createPostgresDatabase(controlSession)));
+            });
+        }
+        catch (e) {
+            // Diagnostic only: boundary errors carry the server sqlState; the
+            // sanitized name/code alone cannot locate the failing statement.
+            const boundary = e as { code?: unknown; sqlState?: unknown; outcome?: unknown };
+            console.error('region_scheduled_failed', e instanceof Error ? `${e.name}:${e.message}` : String(e),
+                `sqlState=${String(boundary?.sqlState ?? '')}`, `outcome=${String(boundary?.outcome ?? '')}`);
+            throw e;
+        }
     };
     /** Region-first URL routing: `memory.allenlabs.org/{region-id}/…`
      * routes to this worker by path pattern; strip the own-region prefix

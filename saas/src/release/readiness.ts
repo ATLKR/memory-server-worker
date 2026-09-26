@@ -95,7 +95,7 @@ export async function evaluateReadiness(env: ReadinessEnvironment, options: Read
     safe(() => env.DB.withSession('first-primary').prepare("SELECT last_success_at AS at FROM memory_ops.heartbeats WHERE name='maintenance'").first<{ at: number }>()),
     safe(() => env.DB.withSession('first-primary').prepare(`SELECT
       (SELECT count(*) FROM information_schema.tables
-        WHERE table_schema='memory_ops' AND table_name IN ('release_operations','usage_events','usage_counters')) AS tables,
+        WHERE table_schema='memory_ops' AND table_name IN ('release_operations','usage_facts','usage_counters')) AS tables,
       (SELECT count(*) FROM information_schema.views
         WHERE table_schema='memory_ops' AND table_name='space_pools') AS views,
       (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace

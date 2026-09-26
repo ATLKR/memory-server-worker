@@ -43,9 +43,12 @@
   "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "allenlabs_memory_production" }],
   "ratelimits": [{ "name": "REQUEST_LIMITER", "namespace_id": "2086090801", "simple": { "limit": 120, "period": 60 } }],
   "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["memory@allenlabs.org"] }],
-  // Physical payload cleanup and bounded provider jobs run every five minutes.
-  // Legacy body backfill is enabled separately after a verified production backup.
-  "triggers": { "crons": ["* * * * *"] },
+  // No cron here: allenlabs-memory and allenlabs-memory-kr-seoul attest the same
+  // Seoul database, and duplicate per-minute maintenance writers serialized on
+  // lifecycle_apply_head upserts until lock_timeout canceled them (sqlState
+  // 57014) — heartbeats stayed stale for hours. The regional worker owns
+  // scheduled maintenance; this worker serves HTTP only.
+  "triggers": { "crons": [] },
   // Auth callback URLs contain codes: invocation/request logs stay disabled.
   "observability": { "enabled": false },
   "limits": { "cpu_ms": 1000 }
