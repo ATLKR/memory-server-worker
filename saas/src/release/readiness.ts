@@ -102,6 +102,16 @@ export async function evaluateReadiness(env: ReadinessEnvironment, options: Read
         WHERE n.nspname='memory_ops' AND p.proname IN ('operation_meter','operation_revision_guard')) AS triggers`).first<{ tables: number; views: number; triggers: number }>()),
     safe(() => options.inspectStorage()),
   ]);
+  // Postgres bigint columns arrive as exact strings; coerce before numeric compare.
+  const meterOk = meter !== null && meter !== undefined
+    && [meter.tables, meter.views, meter.triggers].every(value => {
+      const n = typeof value === 'bigint' ? Number(value) : typeof value === 'string' && /^\d{1,15}$/.test(value) ? Number(value)
+        : typeof value === 'number' && Number.isSafeInteger(value) ? value : NaN;
+      return Number.isSafeInteger(n) && n >= 0;
+    }) && Number(meter.tables) === 3 && Number(meter.views) === 1 && Number(meter.triggers) === 2;
+  const heartbeatAt = typeof heartbeat?.at === 'bigint' ? Number(heartbeat.at)
+    : typeof heartbeat?.at === 'string' && /^-?\d{1,15}$/.test(heartbeat.at) ? Number(heartbeat.at)
+    : typeof heartbeat?.at === 'number' ? heartbeat.at : NaN;
   let sso = false, mail = false, encryptedIngest = false, validRoster = false;
   try { const settings = readSettings(env); sso = Boolean(settings.auth.clientId && env.PUBLIC_ORIGIN === settings.origin); } catch {}
   try { mail = Boolean(env.EMAIL?.send && env.MAIL_FROM && canonicalEmail(env.MAIL_FROM).address === env.MAIL_FROM.toLowerCase()); } catch {}
@@ -125,9 +135,9 @@ export async function evaluateReadiness(env: ReadinessEnvironment, options: Read
     encryptedIngest,
     mail,
     deprovisioning: new TextEncoder().encode(env.IDENTITY_WEBHOOK_SECRET ?? '').length >= 32,
-    metering: meter?.tables === 3 && meter.views === 1 && meter.triggers === 2,
+    metering: meterOk,
     storage: Boolean(storage?.ready && Number.isInteger(options.hotSchemaVersion) && options.hotSchemaVersion >= 0 && storage.hotSchemaVersion === options.hotSchemaVersion && sha256(storage.resourceFingerprint)),
-    maintenance: Boolean(heartbeat && Number.isSafeInteger(heartbeat.at) && now >= heartbeat.at && now - heartbeat.at < 900000),
+    maintenance: Boolean(heartbeat && Number.isSafeInteger(heartbeatAt) && now >= heartbeatAt && now - heartbeatAt < 900000),
     backgroundJobs: env.BACKGROUND_JOBS_ENABLED === 'true',
     observability: typeof env.METRICS?.writeDataPoint === 'function',
     rateLimiting: typeof env.REQUEST_LIMITER?.limit === 'function',
