@@ -57,7 +57,8 @@ export default app;`;
 async function bundle(source) {
   return (await build({ stdin: { contents: source + bridge, resolveDir: fileURLToPath(new URL('.', import.meta.url)),
     sourcefile: 'recovery-native-operator.mjs' }, bundle: true, write: false, format: 'esm', platform: 'neutral',
-    target: 'es2022', external: ['cloudflare:workers', 'pg'] })).outputFiles[0].text;
+    target: 'es2022', external: ['cloudflare:workers'],
+    alias: { pg: fileURLToPath(new URL('./pg-stub.mjs', import.meta.url)) } })).outputFiles[0].text;
 }
 const script = await bundle("export {MemorySqlDatabase} from '../../../src/deprecated-durable-sql/object.ts';\n");
 

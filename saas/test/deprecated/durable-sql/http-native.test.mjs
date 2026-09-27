@@ -20,7 +20,8 @@ function authorize(plan) {
 // The retired architecture's own serving entry: the live src/worker.ts now
 // composes the PostgreSQL region app and cannot exercise durable SQL.
 const built = await build({ entryPoints: [fileURLToPath(new URL('./native-entry.ts', import.meta.url))], bundle: true, write: false,
-  format: 'esm', platform: 'browser', target: 'es2022', external: ['cloudflare:workers', 'pg'],
+  format: 'esm', platform: 'browser', target: 'es2022', external: ['cloudflare:workers'],
+  alias: { pg: fileURLToPath(new URL('./pg-stub.mjs', import.meta.url)) },
   define: { BUILD_SOURCE_REVISION: JSON.stringify('a'.repeat(40)), BUILD_RESOURCE_FINGERPRINT: JSON.stringify('b'.repeat(64)) } });
 // This bridge exists only inside this test's isolated operator Worker. The
 // application entry above is the actual deployed source and has no SQL route.

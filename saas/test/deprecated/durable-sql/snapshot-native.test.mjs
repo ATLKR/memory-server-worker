@@ -27,7 +27,8 @@ export default {async fetch(request,env){
  const stub=env.SQL.getByName('sql:'+identity.deploymentId+':'+identity.databaseId+':'+identity.epoch);
  try{return Response.json({value:await stub[method](input,grant)});}catch(error){return Response.json({error:error.message},{status:400});}
 }}`, resolveDir: fileURLToPath(new URL('.', import.meta.url)), sourcefile: 'snapshot-native-operator.mjs' },
-  bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2022', external: ['cloudflare:workers', 'pg'] });
+  bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2022', external: ['cloudflare:workers'],
+  alias: { pg: fileURLToPath(new URL('./pg-stub.mjs', import.meta.url)) } });
 
 function authorize(plan) {
   const payload = { planHash: hash(plan), notBeforeMs: Date.now() - 5000, expiresAtMs: Date.now() + 600000 };
