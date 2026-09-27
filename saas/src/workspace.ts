@@ -5,6 +5,7 @@ import type { IdentityDatabase, SqlValue } from './identity.ts';
 import type { SeoulProjectionCapture } from './release/seoul-projection-capture.ts';
 import type { Database } from './release/types.ts';
 import { accountGrantAdmission, deploymentRegion, enrollOrganization, organizationGrantAdmission } from './postgres/enrollment.ts';
+import { asSafeInteger } from './postgres/connection.ts';
 
 export class WorkspaceError extends Error {
   readonly status: number;
@@ -154,7 +155,7 @@ export class WorkspaceService {
               existing.kind !== 'session' || existing.id !== `oauth:${digest}` ||
               existing.permission !== granted || existing.mappedAccountId !== existing.accountId ||
               existing.expiresAt > principal.expiresAt) throw new WorkspaceError(401, 'unauthorized');
-          return { token, accountId: existing.accountId, expiresAt: existing.expiresAt };
+          return { token, accountId: existing.accountId, expiresAt: asSafeInteger(existing.expiresAt) };
         }
       }
       const at = this.now();
@@ -180,7 +181,7 @@ export class WorkspaceService {
         WHERE c.token_digest=? AND c.kind='session' AND c.expires_at>${sqlNow()} AND c.permission=?`)
         .bind(issuer, subject, digest, this.now(), granted).first<{ accountId: string; expiresAt: number }>();
       if (!created || created.expiresAt <= this.now()) throw new WorkspaceError(401, 'unauthorized');
-      return { token, accountId: created.accountId, expiresAt: created.expiresAt };
+      return { token, accountId: created.accountId, expiresAt: asSafeInteger(created.expiresAt) };
     });
   }
 
