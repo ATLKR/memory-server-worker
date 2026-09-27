@@ -47,7 +47,7 @@ export default {async fetch(request,env){
  const stub=random?env.DATABASE.get(env.DATABASE.newUniqueId()):env.DATABASE.getByName(name);
  try{return Response.json({value:await stub[method](input)});}catch(error){return Response.json({error:error.message},{status:400});}
 }}`, resolveDir: fileURLToPath(new URL('.', import.meta.url)), sourcefile: 'durable-sql-native-fixture.mjs' },
-  bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2022', external: ['cloudflare:workers'] });
+  bundle: true, write: false, format: 'esm', platform: 'neutral', target: 'es2022', external: ['cloudflare:workers', 'pg'] });
 const baseIdentity = { deploymentId: 'staging', databaseId: 'control', kind: 'control', epoch: 1 };
 async function fixture(t, { kind = 'control', persist = false } = {}) {
   const identity = { ...baseIdentity, databaseId: kind, kind }, name = `sql:staging:${kind}:1`;
