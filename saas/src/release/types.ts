@@ -167,5 +167,5 @@ export interface Extension {
         accountId: string;
         expiresAt: number;
     }, external: boolean): Promise<void>;
-    scheduled(): Promise<void>;
+    scheduled(options?: { skipDrain?: boolean; drainOnly?: boolean }): Promise<void>;
 }

@@ -242,20 +242,28 @@ export function createRegionWorkerApp(env: WorkerEnv, config: RegionDeploymentCo
     });
     const scheduled = async (): Promise<void> => {
         if (!ready || !region) return;
-        const run = (db: Database, controlDb: Database | undefined) => {
+        const run = (db: Database, controlDb: Database | undefined, opts?: { skipDrain?: boolean; drainOnly?: boolean }) => {
             const descriptors = Object.getOwnPropertyDescriptors(env);
             delete descriptors.DB;
             delete descriptors.CONTROL_DB;
             const resolved = Object.defineProperties(Object.create(null), descriptors) as ReleaseEnv;
             Object.defineProperty(resolved, 'DB', { value: db, enumerable: true });
             if (controlDb) Object.defineProperty(resolved, 'CONTROL_DB', { value: controlDb, enumerable: true });
-            return createRelease(resolved, { identity: new IdentityService(db) }).scheduled();
+            return createRelease(resolved, { identity: new IdentityService(db) }).scheduled(opts);
         };
         try {
+            // Drain runs in its own operation: a provider-side deadline abort
+            // must not roll back the lifecycle apply-heads and heartbeat the
+            // first operation stamps (staleness gate depends on them).
             await region.withConnection(async session => {
                 const db = createPostgresDatabase(session);
-                if (!control) return run(db, undefined);
-                return control.withConnection(async controlSession => run(db, createPostgresDatabase(controlSession)));
+                if (!control) return run(db, undefined, { skipDrain: true });
+                return control.withConnection(async controlSession => run(db, createPostgresDatabase(controlSession), { skipDrain: true }));
+            });
+            await region.withConnection(async session => {
+                const db = createPostgresDatabase(session);
+                if (!control) return run(db, undefined, { drainOnly: true });
+                return control.withConnection(async controlSession => run(db, createPostgresDatabase(controlSession), { drainOnly: true }));
             });
         }
         catch (e) {

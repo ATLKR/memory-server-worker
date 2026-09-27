@@ -386,7 +386,7 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
             const hash = await tokenHash(session.token), at = clock();
             await db.prepare(`INSERT INTO memory_identity.credential_policies(credential_id,capabilities,space_ids,verified_oauth) SELECT c.id,?::jsonb,NULL,true FROM memory_identity.active_credentials c WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND c.kind='session' AND c.id LIKE 'oauth:%' ON CONFLICT(credential_id) DO UPDATE SET capabilities=excluded.capabilities,verified_oauth=true WHERE credential_policies.verified_oauth=false`).bind(canonical(caps), hash, at).run();
         },
-        async scheduled() {
+        async scheduled(options?: { skipDrain?: boolean; drainOnly?: boolean }) {
             // Revocation propagation: pull the central lifecycle journal into
             // the regional applied state before serving maintenance. Without a
             // control handle the deployment is single-cluster and skips sync.
@@ -395,15 +395,24 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
                 try { await work(); console.log('sched_stage', name, `${Date.now() - t}ms`); }
                 catch (e) { console.log('sched_stage', name, `${Date.now() - t}ms`, 'FAIL'); throw e; }
             };
+            // Provider indexing can legitimately run for minutes
+            // (WORK_SLICE_MS=240s): a drain deadline abort inside the shared
+            // maintenance transaction rolls back the lifecycle apply-head and
+            // heartbeat stamps, which then deny writes through the staleness
+            // gate. The region worker therefore runs drain as a separate
+            // operation (drainOnly) while the main operation skips it.
+            if (options?.drainOnly) {
+                if (env.BACKGROUND_JOBS_ENABLED === 'true') {
+                    await stage('drain', () => jobs.drain(5, 15000));
+                    if (env.PAID_BILLING_ENABLED !== 'false') { await stage('billing_reconcile', () => billing.reconcile()); await stage('billing_drain', () => billing.drain(3)); }
+                }
+                return;
+            }
             if (env.CONTROL_DB) await stage('lifecycle_sync', () => syncLifecycleJournal(env.CONTROL_DB!, db));
             await stage('maintain', () => jobs.maintain());
             await stage('payload_maintenance', () => new PayloadMaintenance(env, payloads, clock).run());
             await stage('legacy_backfill', () => new LegacyBackfill(env, store, clock).run());
-            if (env.BACKGROUND_JOBS_ENABLED === 'true') {
-                // Bound drain's internal work slice to the operation's 30s
-                // budget: provider indexing can legitimately run for minutes
-                // (WORK_SLICE_MS=240s), which starves the heartbeat write at
-                // the end of this shared transaction and breaks the cron.
+            if (env.BACKGROUND_JOBS_ENABLED === 'true' && !options?.skipDrain) {
                 await stage('drain', () => jobs.drain(5, 15000));
                 if (env.PAID_BILLING_ENABLED !== 'false') { await stage('billing_reconcile', () => billing.reconcile()); await stage('billing_drain', () => billing.drain(3)); }
             }
