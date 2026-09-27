@@ -379,7 +379,7 @@ export function createPostgresConnection(input: PostgresTarget, options: Connect
             // usable transaction without ever escaping the operation's tx.
             const rollbackTo = typeof text === 'string' && /^\s*ROLLBACK\s+TO\b/i.test(text);
             if (transactionFailed) { if (!rollbackTo) return Promise.reject(error('postgres_transaction_failed')); }
-            else if (typeof text !== 'string' || !/^\s*(SELECT|WITH|INSERT|UPDATE|DELETE|VALUES|SAVEPOINT|RELEASE)\b/i.test(text) && !rollbackTo)
+            else if (typeof text !== 'string' || !/^\s*(?:\/\*[\s\S]*?\*\/\s*)*(SELECT|WITH|INSERT|UPDATE|DELETE|VALUES|SAVEPOINT|RELEASE)\b/i.test(text) && !rollbackTo)
                 return Promise.reject(error('postgres_transaction_control_denied'));
             if (!Array.isArray(values) || values.some(x => x !== null && !['string', 'number', 'boolean', 'bigint'].includes(typeof x) && !(x instanceof Uint8Array))) return Promise.reject(error('postgres_parameter_invalid'));
             try { numericSafety(values); } catch (e) { return Promise.reject(e); }
