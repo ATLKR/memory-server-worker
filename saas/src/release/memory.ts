@@ -1,5 +1,6 @@
 import type { Capability, Database, Memory, Provenance, Statement, Value } from './types.ts';
 import { SQL_NOW_MS, sqlNow } from '../sql-clock.ts';
+import { asSafeInteger } from '../postgres/connection.ts';
 import { authority, params, requireSpace, interactive, recentSql, accessExpiry } from './authority.ts';
 import { batch, canonical, decodeCursor, digest, enc, encodeCursor, fail, id, integer, month, object, one, ReleaseError, rows, stmt, str, tokenHash } from './util.ts';
 import { preparePayloads, publishPayloadStatements, type PayloadBackend, type PreparedPayloadItem, type PreparedPayloads, type PreparePayloadInput } from './payload-intents.ts';
@@ -93,12 +94,12 @@ export class MemoryStore {
         if (!limits) return;
         if (units > 0) {
             const used = await one<{ units: number }>(this.db, `SELECT units FROM memory_ops.usage_counters WHERE pool_id=? AND period=?`, [pool.id, month(this.clock())]);
-            if (limits.state !== 'active' || (used?.units ?? 0) + units > limits.monthlyUnits)
+            if (limits.state !== 'active' || (used ? asSafeInteger(used.units) : 0) + units > asSafeInteger(limits.monthlyUnits))
                 fail(429, 'quota_exceeded');
         }
         if (bytes > 0) {
             const stored = await one<{ bytes: number }>(this.db, `SELECT coalesce(sum(c.bytes),0) AS bytes FROM memory_ops.space_storage_counters c JOIN memory_ops.space_pools sp ON sp.space_id=c.space_id WHERE sp.pool_id=?`, [pool.id]);
-            if ((stored?.bytes ?? 0) + bytes > limits.storageLimitBytes)
+            if ((stored ? asSafeInteger(stored.bytes) : 0) + bytes > asSafeInteger(limits.storageLimitBytes))
                 fail(413, 'storage_quota_exceeded');
         }
     }

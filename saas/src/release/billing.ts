@@ -2,6 +2,7 @@ import type { Actor, Database, ReleaseEnv } from './types.ts';
 import { readSettings } from '../config.ts';
 import { authority, params, accessExpiry, recentSql } from './authority.ts';
 import { sqlNow } from '../sql-clock.ts';
+import { asSafeInteger } from '../postgres/connection.ts';
 import { batch, canonical, digest, enc, equal, fail, hmac, id, integer, json, month, object, one, remoteJson, requestObject, requestText, rows, stmt, str, tokenHash } from './util.ts';
 type Plan = {
     plan: string;
@@ -77,8 +78,8 @@ export class Billing {
             `SELECT coalesce((SELECT u.units FROM memory_ops.usage_counters u WHERE u.pool_id=? AND u.period=?),0) AS units,
                 coalesce((SELECT sum(c.bytes) FROM memory_ops.space_storage_counters c JOIN memory_ops.space_pools sp ON sp.space_id=c.space_id WHERE sp.pool_id=?),0) AS bytes`,
             [pool.id, month(at), pool.id]);
-        return { id: pool.id, plan: pool.plan, monthlyUnits: pool.monthlyUnits, storageLimitBytes: pool.storageLimitBytes,
-            storageBytes: used?.bytes ?? 0, state: pool.state, usedUnits: used?.units ?? 0, period: month(at) };
+        return { id: pool.id, plan: pool.plan, monthlyUnits: asSafeInteger(pool.monthlyUnits), storageLimitBytes: asSafeInteger(pool.storageLimitBytes),
+            storageBytes: used ? asSafeInteger(used.bytes) : 0, state: pool.state, usedUnits: used ? asSafeInteger(used.units) : 0, period: month(at) };
     }
     private async closePreviousCheckouts(token: string, spaceId: string, poolId: string, customerId: string | null): Promise<void> {
         const db = this.catalog;
