@@ -7,7 +7,7 @@ import type { WorkerEnv } from './release/types.ts';
 const CONFIG = {
     region: 'sg',
     processingPolicyId: 'sg-primary-storage-v1',
-    schemaVersion: 19,
+    schemaVersion: 20,
     controlSchemaVersion: 7,
     controlRegion: 'sg',
     controlPolicyId: 'standard-v1',
