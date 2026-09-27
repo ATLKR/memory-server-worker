@@ -63,6 +63,13 @@ export function createRelease(env: ReleaseEnv, options: ReleaseOptions = {}): Ex
         const identityDenied = e instanceof Error && (e.name === 'IdentityDenied' || e.constructor.name === 'IdentityDenied');
         const typedError = e instanceof ReleaseError || e instanceof HttpError || e instanceof IdentityInvalid;
         const status = typedError ? e.status : identityDenied ? 403 : 500;
+        // Sanitized code-only diagnostics: constant error codes/names only —
+        // never raw messages (which may carry SQL or provider bodies).
+        if (status === 500) {
+            const kind = e && typeof e === 'object' && 'code' in e && typeof e.code === 'string' && /^[A-Za-z0-9_:-]+$/.test(e.code) && e.code.length <= 96
+                ? e.code : e instanceof Error && /^[A-Za-z0-9_:-]+$/.test(e.name) ? e.name : 'unknown';
+            console.error('release_internal_error', kind);
+        }
         const headers = { ...(e instanceof HttpError && e.allow ? { allow: e.allow } : {}), ...(status === 429 ? { 'retry-after': '60' } : {}) };
         if (scim) return json({ schemas: ['urn:ietf:params:scim:api:messages:2.0:Error'], status: String(status), detail: typedError ? e.code : identityDenied ? 'access_denied' : 'internal_error' }, status,
             { 'content-type': 'application/scim+json; charset=utf-8', ...(status === 401 ? { 'www-authenticate': 'Bearer realm="scim"' } : {}), ...headers });

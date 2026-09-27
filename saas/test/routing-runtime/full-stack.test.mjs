@@ -29,7 +29,7 @@ export default {async fetch(request,env){
     MEMORY_ROUTING_BUDGET_ID:'native-budget',MEMORY_ROUTING_BUDGET_POLICY_JSON:${JSON.stringify(JSON.stringify(budgetPolicy))}};
   return createApplication(env.DB,readSettings(runtime),{release:createRelease(runtime)})(request);
 }};`,resolveDir:fileURLToPath(new URL('../../',import.meta.url)),sourcefile:'routing-stack.mjs'},
-  bundle:true,write:false,format:'esm',platform:'browser',target:'es2022',external:['cloudflare:workers']});
+  bundle:true,write:false,format:'esm',platform:'browser',target:'es2022',external:['cloudflare:workers','pg']});
 
 test('native authenticated API, SQLite DO receipt, routed MCP and HTTP provider compose end to end', {timeout:30000},async t=>{
   t.skip('D1 schema replay is retired; pending a PGlite-backed in-process harness');

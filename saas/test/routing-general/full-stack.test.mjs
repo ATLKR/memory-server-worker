@@ -31,7 +31,7 @@ export default {async fetch(request,env){
   }
   return createApplication(env.DB,readSettings(runtime),{release:createRelease(runtime)})(request);
 }};`,resolveDir:fileURLToPath(new URL('../../',import.meta.url)),sourcefile:'general-native-stack.mjs'},
-  bundle:true,write:false,format:'esm',platform:'browser',target:'es2022',external:['cloudflare:workers']});
+  bundle:true,write:false,format:'esm',platform:'browser',target:'es2022',external:['cloudflare:workers','pg']});
 
 test('native general REST and MCP retain Space authority, admission budget and generation erasure boundaries', {timeout:45000},async t=>{
   t.skip('D1 schema replay is retired; pending a PGlite-backed in-process harness');
