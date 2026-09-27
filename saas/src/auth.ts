@@ -279,6 +279,12 @@ export function createAuthController(
         // A fixed support code identifies the failed boundary without logging or
         // reflecting authorization codes, JWTs, cookies, DB errors or provider bodies.
         const diagnostic = `AUTH_${progress.phase.toUpperCase()}${error instanceof AuthUpstreamFailure ? `_${error.status}` : ''}`;
+        // Sanitized code-only diagnostics: error.code / error.name are fixed
+        // constant strings in this codebase; raw messages may carry provider
+        // or SQL diagnostics and are never logged here.
+        const kind = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' && error.code.length <= 96
+          ? error.code : error instanceof Error ? error.name : 'unknown';
+        console.error('auth_boundary_failure', diagnostic, /^[A-Za-z0-9_:-]+$/.test(kind) ? kind : 'untyped');
         return response(400, `Authentication failed. Please sign in again. (${diagnostic})`, {
           'X-Auth-Failure': diagnostic,
           ...(url.pathname === '/auth/callback' ? { 'Set-Cookie': cookie(FLOW_COOKIE, '', 0) } : {}),
