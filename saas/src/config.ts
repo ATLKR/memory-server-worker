@@ -6,8 +6,8 @@ export const SERVICE_ID = 'allenlabs-memory';
 export const SERVICE_VERSION = '0.5.0-rc.1';
 export const PUBLIC_ORIGIN = 'https://memory.allenlabs.org';
 export const AUTH_ISSUER = 'https://auth-api.allen.company';
-export type Settings = { origin: string; brand: Brand; auth: AuthSettings };
-type Variables = Partial<Record<'PUBLIC_ORIGIN' | 'SSO_CLIENT_ID' | 'PRODUCT_NAME' |
+export type Settings = { origin: string; publicPath: string; brand: Brand; auth: AuthSettings };
+type Variables = Partial<Record<'PUBLIC_ORIGIN' | 'PUBLIC_PATH' | 'SSO_CLIENT_ID' | 'PRODUCT_NAME' |
   'PRODUCT_SHORT_NAME' | 'PRODUCT_DESCRIPTION' | 'PRODUCT_SUPPORT_EMAIL' | 'PRODUCT_ACCENT_COLOR', string>>;
 
 function text(input: string | undefined, fallback: string, max: number): string {
@@ -21,6 +21,11 @@ export function readSettings(env: Variables): Settings {
   const origin = env.PUBLIC_ORIGIN ?? PUBLIC_ORIGIN;
   const url = new URL(origin);
   if (url.origin !== origin || url.protocol !== 'https:' || url.username || url.password) throw new Error('Invalid public origin');
+  // Region-first deployments serve the app under one path prefix
+  // (e.g. `/kr-seoul`) on the shared origin. Requests arrive prefix-stripped,
+  // but self-referencing URLs the app emits must carry the prefix.
+  const publicPath = env.PUBLIC_PATH ?? '';
+  if (publicPath !== '' && !/^\/[a-z0-9-]{1,31}$/.test(publicPath)) throw new Error('Invalid public path');
   const supportEmail = text(env.PRODUCT_SUPPORT_EMAIL, 'allenlim@allenlabs.org', 254);
   if (supportEmail.trim() !== supportEmail) throw new Error('Invalid support email');
   // Validate the mailbox without replacing its configured display spelling.
@@ -31,6 +36,7 @@ export function readSettings(env: Variables): Settings {
   if (clientId.length > 256 || /[\s\x00-\x1f]/.test(clientId)) throw new Error('Invalid SSO client ID');
   return {
     origin,
+    publicPath,
     brand: {
       name: text(env.PRODUCT_NAME, 'Memory by Allen Labs', 80),
       shortName: text(env.PRODUCT_SHORT_NAME, 'Memory', 30),
@@ -38,7 +44,7 @@ export function readSettings(env: Variables): Settings {
       supportEmail, accentColor,
     },
     auth: {
-      origin, issuer: AUTH_ISSUER, clientId,
+      origin, publicPath, issuer: AUTH_ISSUER, clientId,
       authorizationEndpoint: `${AUTH_ISSUER}/oauth/authorize`,
       tokenEndpoint: `${AUTH_ISSUER}/oauth/token`,
       jwksUri: `${AUTH_ISSUER}/.well-known/jwks.json`,

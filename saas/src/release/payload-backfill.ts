@@ -21,15 +21,15 @@ export class LegacyBackfill {
     constructor(env: { DB: Database; STORAGE_BACKFILL_ENABLED?: string }, archive: Archive, clock = Date.now) { this.env = env; this.archive = archive; this.clock = clock; }
     private async step(kind: Kind, result: BackfillResult, end: number): Promise<void> {
         const db = this.env.DB;
-        const progress = await within(one<Progress>(db, 'SELECT after_memory_id,after_revision,generation FROM release_payload_backfill_progress WHERE kind=?', [kind]), end);
+        const progress = await within(one<Progress>(db, 'SELECT after_memory_id,after_revision,generation FROM memory_ops.payload_backfill_progress WHERE kind=?', [kind]), end);
         if (!progress) fail(503, 'payload_backfill_unavailable');
         const candidate = await within(one<{ memoryId: string; revision: number }>(db, kind === 'current'
-            ? `SELECT id AS memoryId,revision FROM memories INDEXED BY release_memories_inline_archive
+            ? `SELECT id AS "memoryId",revision FROM memory_content.memories
                WHERE payload_id IS NULL AND erased_at IS NULL AND id>? ORDER BY id LIMIT 1`
-            : `SELECT memory_id AS memoryId,revision FROM memory_versions INDEXED BY release_versions_inline_archive
+            : `SELECT memory_id AS "memoryId",revision FROM memory_content.memory_versions
                WHERE payload_id IS NULL AND (memory_id,revision)>(?,?) ORDER BY memory_id,revision LIMIT 1`,
             kind === 'current' ? [progress.after_memory_id] : [progress.after_memory_id, progress.after_revision]), end);
-        const claim = await within(db.prepare(`UPDATE release_payload_backfill_progress SET after_memory_id=?,after_revision=?,generation=generation+1,updated_at=${sqlNow()}
+        const claim = await within(db.prepare(`UPDATE memory_ops.payload_backfill_progress SET after_memory_id=?,after_revision=?,generation=generation+1,updated_at=${sqlNow()}
           WHERE kind=? AND generation=? RETURNING generation`).bind(candidate?.memoryId ?? '', candidate?.revision ?? 0, this.clock(), kind, progress.generation).first<{ generation: number }>(), end);
         if (!claim || !candidate || Date.now() > end - 20000) return;
         let error: string | null = null;
@@ -39,7 +39,7 @@ export class LegacyBackfill {
         } catch { error = 'payload_archive_failure'; result.failed++; }
         // The next worker may already have advanced. An old attempt must not
         // overwrite the newer checkpoint's diagnostic result.
-        await within(db.prepare(`UPDATE release_payload_backfill_progress SET last_error=?,last_error_at=?,updated_at=${sqlNow()}
+        await within(db.prepare(`UPDATE memory_ops.payload_backfill_progress SET last_error=?,last_error_at=?,updated_at=${sqlNow()}
           WHERE kind=? AND generation=?`).bind(error, error ? this.clock() : null, this.clock(), kind, claim.generation).run(), end);
     }
     async run(): Promise<BackfillResult> {

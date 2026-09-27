@@ -49,6 +49,9 @@ export async function runDeploymentCommand(argv, { runner = runProcess, cwd = pr
   const target = await loadDeploymentConfiguration(selection);
   if (target.sqlBackend === 'durable' && (operation === 'db:local' || operation === 'db:remote'))
     throw new DeploymentConfigurationError('Durable SQL migrations/import require the sealed operator protocol; D1 migration commands are disabled for durable targets.');
+  if (target.sqlBackend === 'postgres' && operation === 'db:local')
+    throw new DeploymentConfigurationError('PostgreSQL deployments have no local replica; run db:remote with the target PG* environment.');
+  const migrateScript = join(PROJECT_DIRECTORY, 'scripts/postgres-migrate.mjs');
   const options = { cwd: PROJECT_DIRECTORY, shell: false };
   const inputs = operation === 'build' || operation === 'deploy' ? await validateDeploymentSource(target) : null;
   const source = operation === 'build' || operation === 'deploy' ? await inspectSource() : null;
@@ -74,8 +77,13 @@ export async function runDeploymentCommand(argv, { runner = runProcess, cwd = pr
   const definitions = source ? ['--define', `BUILD_SOURCE_REVISION:${JSON.stringify(source.dirty ? 'unreleased' : source.revision)}`,
     '--define', `BUILD_RESOURCE_FINGERPRINT:${JSON.stringify(deploymentFingerprint(target.config))}`,
     '--tsconfig', inputs.tsconfig] : [];
+  // PostgreSQL authority is migrated by the reviewed driver, not Wrangler; the
+  // operator supplies PGHOST/PGUSER/PGPASSWORD/PGDATABASE (and TLS CA) in the
+  // process environment. A postgres target never runs `wrangler d1`.
   const commands = operation === 'db:local' || operation === 'db:remote'
-    ? [...target.hotBindings, 'DB'].map(binding => ['d1', 'migrations', 'apply', binding, operation === 'db:local' ? '--local' : '--remote'])
+    ? target.sqlBackend === 'postgres'
+      ? [null]
+      : [...target.hotBindings, 'DB'].map(binding => ['d1', 'migrations', 'apply', binding, operation === 'db:local' ? '--local' : '--remote'])
     : [argumentsByOperation[operation]];
   for (const command of commands) {
     const checked = await loadDeploymentConfiguration(selection);
@@ -83,7 +91,9 @@ export async function runDeploymentCommand(argv, { runner = runProcess, cwd = pr
       throw new DeploymentConfigurationError('Deployment configuration changed before the next command. Review the target and run again.');
     if (inputs && JSON.stringify(await validateDeploymentSource(checked)) !== JSON.stringify(inputs))
       throw new DeploymentConfigurationError('Deployment source inputs changed before the next command. Review the target and run again.');
-    await runner(process.execPath, [wrangler, ...command, ...definitions, '--config', target.path], options);
+    await runner(process.execPath, command === null
+      ? ['--experimental-strip-types', migrateScript, '--cluster', 'regional']
+      : [wrangler, ...command, ...definitions, '--config', target.path], options);
   }
   return target;
 }

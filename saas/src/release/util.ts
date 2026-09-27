@@ -113,14 +113,17 @@ export async function batch(db: Database, statements: Statement[]): Promise<void
     catch (e) {
         if (e instanceof ReleaseError)
             throw e;
-        const m = e instanceof Error ? e.message : '';
+        // PostgreSQL guard raises surface inside the wrapped cause chain.
+        let m = '';
+        for (let cursor: unknown = e; cursor instanceof Error && m.length < 8192; cursor = (cursor as { cause?: unknown }).cause)
+            m += ' ' + cursor.message;
         if (m.includes('release_quota'))
             fail(429, 'quota_exceeded');
         if (m.includes('release_storage'))
             fail(413, 'storage_quota_exceeded');
         if (m.includes('release_conflict'))
             fail(409, 'revision_conflict');
-        if (m.includes('release_denied'))
+        if (m.includes('release_denied') || m.includes('workspace operation denied'))
             fail(403, 'access_denied');
         throw e;
     }

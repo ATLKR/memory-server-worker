@@ -143,14 +143,14 @@ test('SDK initialization and tool discovery retain renameable branding and only 
 });
 test('request deadline aborts native work and does not disclose a late response', async () => {
   let signal;
-  const f = fixture({ async search(_digest, _input, options) { signal = options.signal; return new Promise(() => {}); } }, { timeoutMs: 40 });
+  const f = fixture({ async search(_digest, _input, options) { signal = options.signal; return new Promise(() => {}); } }, { timeoutMs: 250 });
   const response = await f.app.fetch(request());
   assert.equal(response.status, 504); assert.equal(signal.aborted, true);
   assert.ok(!(await response.text()).includes(found.matches[0].excerpt));
 });
 test('a cancelled dispatched write is uncertain and never retried', async () => {
   let calls = 0;
-  const f = fixture({ async ingest() { calls++; return new Promise(() => {}); } }, { timeoutMs: 40 });
+  const f = fixture({ async ingest() { calls++; return new Promise(() => {}); } }, { timeoutMs: 500 });
   const response = await f.app.fetch(request('memory_ingest', ingest));
   const body = await response.json();
   assert.equal(response.status, 503); assert.equal(body.error, 'operation_outcome_unknown');

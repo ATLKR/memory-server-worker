@@ -26,10 +26,10 @@ export async function resolveGeneralRoutingAuthority(db: Database, token: string
   routingIdentifier(spaceId);
   const cap = capability(operation), hash = await tokenHash(token), now = routingNow(clock);
   const row = await db.withSession('first-primary').prepare(`/* general-routing-authority */
-    SELECT s.id AS spaceId,s.account_id AS ownerAccountId,s.organization_id AS ownerOrganizationId,
-      c.account_id AS accountId,c.id AS credentialId,
-      min(c.expires_at,c.membership_expires_at,${accessExpiry(cap)}) AS authorityExpiresAtMs
-    FROM spaces s CROSS JOIN active_credentials c
+    SELECT s.id AS "spaceId",s.owner_account_id AS "ownerAccountId",s.organization_id AS "ownerOrganizationId",
+      c.account_id AS "accountId",c.id AS "credentialId",
+      least(c.expires_at,c.membership_expires_at,${accessExpiry(cap)}) AS "authorityExpiresAtMs"
+    FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c
     WHERE s.id=? AND ${authority(cap)}`)
     .bind(spaceId, ...params(hash, now, cap)).first<AuthorityRow>();
   if (!row || !Number.isSafeInteger(row.authorityExpiresAtMs) || row.authorityExpiresAtMs <= routingNow(clock)) fail(403, 'access_denied');

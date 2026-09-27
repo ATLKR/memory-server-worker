@@ -26,7 +26,7 @@ async function fixture(t) {
   delete config.vars.STORAGE_SHARDS_JSON;
   config.vectorize = [{ binding: 'MEMORY_INDEX', index_name: 'memory-acceptance-staging-index' }];
   config.analytics_engine_datasets = [{ binding: 'METRICS', dataset: 'memory_acceptance_staging_metrics' }];
-  Object.assign(config.vars, { DEPLOYMENT_ENVIRONMENT: 'staging', PUBLIC_ORIGIN: 'https://memory-staging.example.org',
+  Object.assign(config.vars, { DEPLOYMENT_ENVIRONMENT: 'staging', MEMORY_SQL_BACKEND: 'd1', PUBLIC_ORIGIN: 'https://memory-staging.example.org',
     GA_PROFILE, PAID_BILLING_ENABLED: 'false', ENROLLMENT_MODE: 'invite', AI_MONTHLY_BUDGET_MICROUSD: '200000',
     LIVE_ACCEPTANCE_PUBLIC_KEY: publicKey });
   config.routes = [{ pattern: 'memory-staging.example.org', custom_domain: true }];

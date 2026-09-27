@@ -1,6 +1,7 @@
-/** SQLite/D1 resolves 'subsec' at execution, including time spent in its queue. */
-export const SQL_NOW_MS = "CAST(round(unixepoch('subsec')*1000) AS INTEGER)";
+/** PostgreSQL resolves clock_timestamp() at execution, including time spent in
+ * the statement queue — same execution-time semantics as D1 'subsec'. */
+export const SQL_NOW_MS = "memory_control.now_ms()";
 
 /** A trusted SQL expression, never request text. Preserve the application's
  * stricter deadline if its clock is ahead of the database clock. */
-export function sqlNow(bound = '?'): string { return `max(${bound},${SQL_NOW_MS})`; }
+export function sqlNow(bound = '?'): string { return `greatest(${bound},${SQL_NOW_MS})`; }

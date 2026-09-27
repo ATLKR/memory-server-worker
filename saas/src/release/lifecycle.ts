@@ -1,4 +1,5 @@
 import type { Database } from './types.ts';
+import type { SeoulProjectionCapture } from './seoul-projection-capture.ts';
 import { canonicalEmail } from '../identity.ts';
 import { sqlNow } from '../sql-clock.ts';
 import { batch, digest, exact, fail, id, integer, json, one, requestObject, stmt, str } from './util.ts';
@@ -8,7 +9,7 @@ function lifecycleEvent(event: Record<string, unknown>, timestamp: number) {
     if (event.version !== 2 || event.issuer !== 'https://auth-api.allen.company') fail(400, 'unsupported_identity_event');
     const eventId = id(event.id), subject = str(event.subject, 512), kind = str(event.type, 64);
     const sequence = integer(event.sequence, 1, Number.MAX_SAFE_INTEGER), occurredAt = integer(event.occurredAt, 0, Number.MAX_SAFE_INTEGER);
-    if (!['account.suspended', 'account.resumed', 'account.deleted', 'email.revoked', 'email.verified'].includes(kind)
+    if (!['account.suspended', 'account.resumed', 'account.deleted', 'email.revoked', 'email.verified', 'subject.unlinked'].includes(kind)
         || occurredAt > timestamp + 300000) fail(400, 'unsupported_identity_event');
     let address = '';
     if (kind.startsWith('email.')) {
@@ -19,7 +20,8 @@ function lifecycleEvent(event: Record<string, unknown>, timestamp: number) {
 
 /** Only the application callback after RS256 issuer/audience verification may
  * call this. All bounded heads commit together before sign-in creates claims. */
-export async function applyVerifiedLifecycle(db: Database, clock: () => number, principal: unknown): Promise<void> {
+export async function applyVerifiedLifecycle(db: Database, clock: () => number, principal: unknown, capture?: SeoulProjectionCapture): Promise<void> {
+    capture?.assertDatabase(db);
     if (!principal || typeof principal !== 'object' || !('identityLifecycle' in principal)) return;
     const proof = principal as { issuer: string; subject: string; issuedAt: number; expiresAt: number; email?: string; emailVerified?: boolean; identityLifecycle: unknown };
     if (proof.issuer !== 'https://auth-api.allen.company' || typeof proof.subject !== 'string'
@@ -35,38 +37,40 @@ export async function applyVerifiedLifecycle(db: Database, clock: () => number, 
             (proof.emailVerified !== true || value.address !== canonicalEmail(proof.email!).address))) fail(401, 'invalid_identity_lifecycle');
         seen.add(value.address);
         const hash = await digest(raw), existing = await one<{ hash: string }>(db,
-            "SELECT body_hash AS hash FROM release_webhook_events WHERE provider='identity' AND event_id=?", [value.eventId]);
+            "SELECT body_hash AS hash FROM memory_ops.webhook_events WHERE provider='identity' AND event_id=?", [value.eventId]);
         if (existing && existing.hash !== hash) fail(409, 'webhook_conflict');
         if (!existing) heads.push({ ...value, hash });
     }
     const at = clock();
     if (proof.issuedAt > at || proof.expiresAt <= at) fail(401, 'invalid_identity_lifecycle');
     if (!heads.length) return;
-    await batch(db, heads.flatMap(value => [
-        stmt(db, `INSERT INTO release_identity_lifecycle_jwt_proofs(event_id,body_hash,issued_at,expires_at)
+    const primitives = heads.map(value => ({event:value, commands:[
+        stmt(db, `INSERT INTO memory_ops.lifecycle_jwt_proofs(event_id,body_hash,issued_at,expires_at)
             SELECT ?,?,?,? WHERE ?<=${sqlNow()} AND ?>${sqlNow()}
-              AND NOT EXISTS(SELECT 1 FROM release_webhook_events WHERE provider='identity' AND event_id=?)`,
+              AND NOT EXISTS(SELECT 1 FROM memory_ops.webhook_events WHERE provider='identity' AND event_id=?)`,
             [value.eventId, value.hash, proof.issuedAt, proof.expiresAt, proof.issuedAt, at, proof.expiresAt, at, value.eventId]),
-        stmt(db, `INSERT INTO release_webhook_events(provider,event_id,body_hash,created_at)
-            SELECT 'identity',?,?,${sqlNow()} WHERE EXISTS(SELECT 1 FROM release_identity_lifecycle_jwt_proofs WHERE event_id=? AND body_hash=? AND expires_at>${sqlNow()})
-              AND NOT EXISTS(SELECT 1 FROM release_webhook_events WHERE provider='identity' AND event_id=?)`,
+        stmt(db, `INSERT INTO memory_ops.webhook_events(provider,event_id,body_hash,created_at)
+            SELECT 'identity',?,?,${sqlNow()} WHERE EXISTS(SELECT 1 FROM memory_ops.lifecycle_jwt_proofs WHERE event_id=? AND body_hash=? AND expires_at>${sqlNow()})
+              AND NOT EXISTS(SELECT 1 FROM memory_ops.webhook_events WHERE provider='identity' AND event_id=?)`,
             [value.eventId, value.hash, at, value.eventId, value.hash, at, value.eventId]),
-        stmt(db, `INSERT INTO release_identity_lifecycle_events(id,issuer,subject,sequence,kind,address,occurred_at,received_at,signed_at,body_hash)
-            SELECT ?,?,?,?,?,?,?,${sqlNow()},?,? WHERE EXISTS(SELECT 1 FROM release_identity_lifecycle_jwt_proofs WHERE event_id=? AND body_hash=?)
-              AND NOT EXISTS(SELECT 1 FROM release_identity_lifecycle_events WHERE id=?)`,
+        stmt(db, `INSERT INTO memory_ops.lifecycle_events(id,issuer,subject,sequence,kind,address,occurred_at,received_at,signed_at,body_hash)
+            SELECT ?,?,?,?,?,?,?,${sqlNow()},?,? WHERE EXISTS(SELECT 1 FROM memory_ops.lifecycle_jwt_proofs WHERE event_id=? AND body_hash=?)
+              AND NOT EXISTS(SELECT 1 FROM memory_ops.lifecycle_events WHERE id=?)`,
             [value.eventId, value.issuer, value.subject, value.sequence, value.kind, value.address, value.occurredAt, at, proof.issuedAt, value.hash, value.eventId, value.hash, value.eventId]),
-    ]));
-    const accepted = await one<{ count: number }>(db, `SELECT count(*) AS count FROM json_each(?) head
-        JOIN release_webhook_events w ON w.provider='identity' AND w.event_id=json_extract(head.value,'$.eventId')
-            AND w.body_hash=json_extract(head.value,'$.hash')`, [JSON.stringify(heads)]);
+    ]}));
+    await batch(db, capture ? capture.providerStatements(db,primitives) : primitives.flatMap(p => p.commands));
+    const accepted = await one<{ count: number }>(db, `SELECT count(*) AS count FROM jsonb_array_elements(?::jsonb) head
+        JOIN memory_ops.webhook_events w ON w.provider='identity' AND w.event_id=head.value->>'eventId'
+            AND w.body_hash=head.value->>'hash'`, [JSON.stringify(heads)]);
     if (accepted?.count !== heads.length || proof.expiresAt <= clock()) fail(401, 'invalid_identity_lifecycle');
 }
 
 /** Called only after Admin verifies the original request's HMAC signature. */
-export async function receiveLifecycle(db: Database, clock: () => number, event: Record<string, unknown>, raw: string, timestamp: number): Promise<Response> {
+export async function receiveLifecycle(db: Database, clock: () => number, event: Record<string, unknown>, raw: string, timestamp: number, capture?: SeoulProjectionCapture): Promise<Response> {
+    capture?.assertDatabase(db);
     const { eventId, subject, kind, sequence, occurredAt, address, issuer } = lifecycleEvent(event, timestamp);
     const hash = await digest(raw);
-    const accepted = () => one<{ hash: string }>(db, "SELECT body_hash AS hash FROM release_webhook_events WHERE provider='identity' AND event_id=?", [eventId]);
+    const accepted = () => one<{ hash: string }>(db, "SELECT body_hash AS hash FROM memory_ops.webhook_events WHERE provider='identity' AND event_id=?", [eventId]);
     const existing = await accepted();
     if (existing) {
         if (existing.hash !== hash) fail(409, 'webhook_conflict');
@@ -75,13 +79,14 @@ export async function receiveLifecycle(db: Database, clock: () => number, event:
     const at = clock();
     if (Math.abs(at - timestamp) > 300000) fail(401, 'invalid_signature');
     try {
-        await batch(db, [
-            stmt(db, `INSERT INTO release_webhook_events(provider,event_id,body_hash,created_at)
+        const commands = [
+            stmt(db, `INSERT INTO memory_ops.webhook_events(provider,event_id,body_hash,created_at)
                 SELECT 'identity',?,?,${sqlNow()} WHERE ${sqlNow()} BETWEEN ? AND ?`, [eventId, hash, at, at, timestamp - 300000, timestamp + 300000]),
-            stmt(db, `INSERT INTO release_identity_lifecycle_events(id,issuer,subject,sequence,kind,address,occurred_at,received_at,signed_at,body_hash)
-                SELECT ?,?,?,?,?,?,?,${sqlNow()},?,? WHERE EXISTS(SELECT 1 FROM release_webhook_events WHERE provider='identity' AND event_id=? AND body_hash=?)`,
+            stmt(db, `INSERT INTO memory_ops.lifecycle_events(id,issuer,subject,sequence,kind,address,occurred_at,received_at,signed_at,body_hash)
+                SELECT ?,?,?,?,?,?,?,${sqlNow()},?,? WHERE EXISTS(SELECT 1 FROM memory_ops.webhook_events WHERE provider='identity' AND event_id=? AND body_hash=?)`,
                 [eventId, issuer, subject, sequence, kind, address, occurredAt, at, timestamp, hash, eventId, hash]),
-        ]);
+        ];
+        await batch(db, capture ? capture.providerStatements(db,[{event:{eventId,issuer,subject,kind,sequence,occurredAt,address,hash},commands}]) : commands);
     } catch (error) {
         const receipt = await accepted();
         if (receipt) {

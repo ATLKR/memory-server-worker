@@ -10,15 +10,21 @@
   "routes": [{ "pattern": "memory.allenlabs.org", "custom_domain": true }],
   "vars": {
     "DEPLOYMENT_ENVIRONMENT": "production",
-    "RELEASE_MODE": "pilot",
+    "RELEASE_MODE": "ga",
     "GA_PROFILE": "managed-ai-metered",
+    "LIVE_ACCEPTANCE_PUBLIC_KEY": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAP9vpX8756IIGSEgR5jr0Lh5neFZdSoh265B/urFASN4=\n-----END PUBLIC KEY-----\n",
     "PAID_BILLING_ENABLED": "false",
     "ENROLLMENT_MODE": "invite",
     "AI_MONTHLY_BUDGET_MICROUSD": "20000000",
     "AUTO_ERASURE_ENABLED": "false",
     "BACKGROUND_JOBS_ENABLED": "true",
-    "STORAGE_MODE": "sharded",
-    "STORAGE_SHARDS_JSON": "[{\"id\":\"hot-01\",\"binding\":\"HOT_01\",\"mode\":\"active\"},{\"id\":\"hot-02\",\"binding\":\"HOT_02\",\"mode\":\"active\"}]",
+    "MEMORY_SQL_BACKEND": "postgres",
+    "STORAGE_MODE": "inline",
+    "MEMORY_KR_ENABLED": "true",
+    "MEMORY_KR_TRANSPORT": "hyperdrive",
+    "MEMORY_KR_TARGET_JSON": "{\"database\":\"postgres\",\"deploymentId\":\"memory-seoul\",\"expectedRole\":\"memory_runtime\"}",
+    "MEMORY_KR_CONTROL_TRANSPORT": "hyperdrive",
+    "MEMORY_KR_CONTROL_TARGET_JSON": "{\"database\":\"memoryservice-control\",\"deploymentId\":\"memory-control\",\"expectedRole\":\"memory_runtime\"}",
     "MAIL_FROM": "memory@allenlabs.org",
     "PUBLIC_ORIGIN": "https://memory.allenlabs.org",
     "SSO_CLIENT_ID": "M5w1jhX2WjRD3PyJDwS_QosyAaHm4TWSyVCkzebqNrA",
@@ -28,32 +34,22 @@
     "PRODUCT_SUPPORT_EMAIL": "allenlim@allenlabs.org",
     "PRODUCT_ACCENT_COLOR": "#276747"
   },
-  "d1_databases": [{
-    "binding": "DB",
-    "database_name": "allenlabs-memory-production",
-    // Dedicated SaaS database, isolated from the legacy personal service.
-    "database_id": "a186c3b4-9092-4619-97b0-cda5b99d9b5d",
-    "migrations_dir": "migrations"
-  }, {
-    "binding": "HOT_01",
-    "database_name": "allenlabs-memory-production-hot-01",
-    "database_id": "037bcfea-0bbd-4937-8616-91206faf82b1",
-    "migrations_dir": "shard-migrations"
-  }, {
-    "binding": "HOT_02",
-    "database_name": "allenlabs-memory-production-hot-02",
-    "database_id": "5e16ed77-d614-4166-8154-e234295e7793",
-    "migrations_dir": "shard-migrations"
-  }],
+  "hyperdrive": [
+    { "binding": "KR_HYPERDRIVE", "id": "aeb032913eb94398a04587d8080952e6" },
+    { "binding": "MEMORY_KR_CONTROL_HYPERDRIVE", "id": "0b76cf08a44443d39d12f0d51ed059f5" }
+  ],
   "r2_buckets": [{ "binding": "MEMORY_PAYLOADS", "bucket_name": "allenlabs-memory-production-payloads" }],
   "ai": { "binding": "AI" },
   "vectorize": [{ "binding": "MEMORY_INDEX", "index_name": "allenlabs-memory-production-index" }],
   "analytics_engine_datasets": [{ "binding": "METRICS", "dataset": "allenlabs_memory_production" }],
   "ratelimits": [{ "name": "REQUEST_LIMITER", "namespace_id": "2086090801", "simple": { "limit": 120, "period": 60 } }],
   "send_email": [{ "name": "EMAIL", "allowed_sender_addresses": ["memory@allenlabs.org"] }],
-  // Physical payload cleanup and bounded provider jobs run every five minutes.
-  // Legacy body backfill is enabled separately after a verified production backup.
-  "triggers": { "crons": ["* * * * *"] },
+  // No cron here: allenlabs-memory and allenlabs-memory-kr-seoul attest the same
+  // Seoul database, and duplicate per-minute maintenance writers serialized on
+  // lifecycle_apply_head upserts until lock_timeout canceled them (sqlState
+  // 57014) — heartbeats stayed stale for hours. The regional worker owns
+  // scheduled maintenance; this worker serves HTTP only.
+  "triggers": { "crons": [] },
   // Auth callback URLs contain codes: invocation/request logs stay disabled.
   "observability": { "enabled": false },
   "limits": { "cpu_ms": 1000 }

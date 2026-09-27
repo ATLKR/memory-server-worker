@@ -1,9 +1,20 @@
 import type { Database, Memory } from './types.ts';
 import { SQL_NOW_MS, sqlNow } from '../sql-clock.ts';
 import { authority, params, requireSpace, interactive, recentSql, INTERACTIVE, shareGrantorAuthority, accessExpiry } from './authority.ts';
+import { accountGrantAdmission } from '../postgres/enrollment.ts';
 import { memoryRow, MemoryStore, type MemoryRow } from './memory.ts';
 import type { PayloadBackend } from './payload-intents.ts';
 import { decodeCursor, encodeCursor, fail, id, integer, one, rows, str, tokenHash } from './util.ts';
+/** Cross-border share federation is deferred (migration 0011): share writes are
+ * denied by an immutable-record guard. Surface a stable denial, not a 500.
+ * The Postgres adapter wraps driver errors, so check the whole cause chain. */
+function deferredShare(error: unknown): never {
+    for (let e: unknown = error; e instanceof Error; e = e.cause) {
+        if (e.message.includes('memory_immutable_record'))
+            return fail(403, 'share_unavailable');
+    }
+    throw error;
+}
 interface OutboundShare {
     id: string;
     spaceId: string;
@@ -17,7 +28,8 @@ export class Transfers {
     db: Database;
     clock: () => number;
     store: MemoryStore;
-    constructor(db: Database, clock: () => number = Date.now, payloads?: PayloadBackend) { this.db = db; this.clock = clock; this.store = new MemoryStore(db, clock, payloads); }
+    control?: Database;
+    constructor(db: Database, clock: () => number = Date.now, payloads?: PayloadBackend, control?: Database) { this.db = db; this.clock = clock; this.store = new MemoryStore(db, clock, payloads); this.control = control; }
     async startExport(token: string, spaceId: string): Promise<{
         id: string;
         expiresAt: number;
@@ -25,9 +37,9 @@ export class Transfers {
         const hash = await tokenHash(token), exportId = crypto.randomUUID();
         await requireSpace(this.db, token, spaceId, 'export', this.clock);
         const at = this.clock();
-        const r = await this.db.prepare(`INSERT INTO release_export_sessions(id,account_id,space_id,watermark,expires_at,created_at)
-   SELECT ?,c.account_id,s.id,coalesce((SELECT max(id) FROM memory_audit_events),0),${sqlNow()}+3600000,${sqlNow()} FROM spaces s CROSS JOIN active_credentials c WHERE s.id=? AND ${authority('export')}
-   RETURNING expires_at AS expiresAt`).bind(exportId, at, at, id(spaceId), ...params(hash, at, 'export')).first<{ expiresAt: number }>();
+        const r = await this.db.prepare(`INSERT INTO memory_ops.export_sessions(id,account_id,space_id,watermark,expires_at,created_at)
+   SELECT ?,c.account_id,s.id,coalesce((SELECT max(id) FROM memory_ops.memory_audit_events),0),${sqlNow()}+3600000,${sqlNow()} FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c WHERE s.id=? AND ${authority('export')}
+   RETURNING expires_at AS "expiresAt"`).bind(exportId, at, at, id(spaceId), ...params(hash, at, 'export')).first<{ expiresAt: number }>();
         if (!r)
             fail(403, 'access_denied');
         return { id: exportId, expiresAt: r.expiresAt };
@@ -45,7 +57,7 @@ export class Transfers {
         const at = this.clock();
         const session = await one<{
             watermark: number;
-        }>(this.db, `SELECT watermark FROM release_export_sessions WHERE id=? AND account_id=? AND space_id=? AND expires_at>${sqlNow()}`, [exportId, actor.accountId, spaceId, at]);
+        }>(this.db, `SELECT watermark FROM memory_ops.export_sessions WHERE id=? AND account_id=? AND space_id=? AND expires_at>${sqlNow()}`, [exportId, actor.accountId, spaceId, at]);
         if (!session)
             fail(404, 'export_not_found');
         let after = '';
@@ -59,24 +71,24 @@ export class Transfers {
         // index, then hydrate those exact revisions. Erasure can omit content
         // without losing the target cursor and skipping later snapshot rows.
         const targets = await rows<{ memoryId: string; revision: number }>(this.db,
-            `SELECT memory_id AS memoryId,max(revision) AS revision FROM memory_audit_events
+            `SELECT memory_id AS "memoryId",max(revision) AS revision FROM memory_ops.memory_audit_events
                 WHERE space_id=? AND memory_id>? AND id<=? GROUP BY memory_id ORDER BY memory_id LIMIT ?`,
             [spaceId, after, session.watermark, limit + 1]);
         const page = targets.slice(0, limit), last = page.at(-1), fresh = this.clock();
         const all = page.length ? await rows<MemoryRow>(this.db, `WITH target AS MATERIALIZED (
-    SELECT json_extract(value,'$.memoryId') AS memory_id,json_extract(value,'$.revision') AS revision FROM json_each(?)
+    SELECT value->>'memoryId' AS memory_id,(value->>'revision')::bigint AS revision FROM jsonb_array_elements(?::jsonb)
    ), versions AS (
-    SELECT r.id,r.space_id,r.body,r.source,r.revision,r.created_at,r.updated_at,r.deleted_at,r.event_time,r.kind,r.provenance,r.supersedes_id,
+    SELECT r.id,r.space_id,r.body,r.source,r.revision,r.created_at,r.updated_at,r.deleted_at,r.event_time,r.kind,r.provenance::text AS provenance,r.supersedes_id,
         r.payload_id,r.payload_shard_id,r.payload_object_key,r.payload_sha256,r.payload_bytes,r.logical_bytes
-      FROM target t JOIN memories r ON r.id=t.memory_id AND r.revision=t.revision
-    UNION ALL SELECT v.memory_id,v.space_id,v.body,v.source,v.revision,v.created_at,v.updated_at,v.deleted_at,v.event_time,v.kind,v.provenance,v.supersedes_id,
+      FROM target t JOIN memory_content.memories r ON r.id=t.memory_id AND r.revision=t.revision
+    UNION ALL SELECT v.memory_id,v.space_id,v.body,v.source,v.revision,v.created_at,v.updated_at,v.deleted_at,v.event_time,v.kind,v.provenance::text,v.supersedes_id,
         v.payload_id,v.payload_shard_id,v.payload_object_key,v.payload_sha256,v.payload_bytes,v.logical_bytes
-      FROM target t JOIN memory_versions v ON v.memory_id=t.memory_id AND v.revision=t.revision
-   ) SELECT v.id,v.space_id AS spaceId,v.body,v.source,v.revision,v.created_at AS createdAt,v.updated_at AS updatedAt,v.deleted_at AS deletedAt,v.event_time AS eventTime,v.kind,v.provenance,v.supersedes_id AS supersedesMemoryId,NULL AS erasedAt,
-        v.payload_id AS payloadId,v.payload_shard_id AS payloadShardId,v.payload_object_key AS payloadObjectKey,
-        v.payload_sha256 AS payloadSha256,v.payload_bytes AS payloadBytes,v.logical_bytes AS logicalBytes
-   FROM versions v JOIN memories current ON current.id=v.id AND current.erased_at IS NULL
-   JOIN spaces s ON s.id=v.space_id CROSS JOIN active_credentials c WHERE s.id=? AND ${authority('export')} ORDER BY v.id`, [JSON.stringify(page), spaceId, ...params(hash, fresh, 'export')]) : [];
+      FROM target t JOIN memory_content.memory_versions v ON v.memory_id=t.memory_id AND v.revision=t.revision
+   ) SELECT v.id,v.space_id AS "spaceId",v.body,v.source,v.revision,v.created_at AS "createdAt",v.updated_at AS "updatedAt",v.deleted_at AS "deletedAt",v.event_time AS "eventTime",v.kind,v.provenance,v.supersedes_id AS "supersedesMemoryId",NULL AS "erasedAt",
+        v.payload_id AS "payloadId",v.payload_shard_id AS "payloadShardId",v.payload_object_key AS "payloadObjectKey",
+        v.payload_sha256 AS "payloadSha256",v.payload_bytes AS "payloadBytes",v.logical_bytes AS "logicalBytes"
+   FROM versions v JOIN memory_content.memories current ON current.id=v.id AND current.erased_at IS NULL
+   JOIN memory_control.spaces s ON s.id=v.space_id CROSS JOIN memory_identity.active_credentials c WHERE s.id=? AND ${authority('export')} ORDER BY v.id`, [JSON.stringify(page), spaceId, ...params(hash, fresh, 'export')]) : [];
         const hydrated = await this.store.hydrateRows(all, { omitErased: true });
         // Session validity and current authority share the final SQL snapshot.
         // Compare expiry facts after its await too, without opening another read
@@ -89,13 +101,13 @@ export class Transfers {
             exportExpiresAt: number | null;
             checkedAt: number;
             memoryIds: string;
-        }>(this.db, `/* export-disclosure */ SELECT c.expires_at AS credentialExpiresAt,c.membership_expires_at AS credentialMembershipExpiresAt,${SQL_NOW_MS} AS checkedAt,
-            (SELECT json_group_array(r.id) FROM memories r WHERE r.id IN (SELECT value FROM json_each(?))
-                AND r.space_id=s.id AND r.erased_at IS NULL) AS memoryIds,
+        }>(this.db, `/* export-disclosure */ SELECT c.expires_at AS "credentialExpiresAt",c.membership_expires_at AS "credentialMembershipExpiresAt",${SQL_NOW_MS} AS "checkedAt",
+            coalesce((SELECT jsonb_agg(r.id) FROM memory_content.memories r WHERE r.id IN (SELECT value FROM jsonb_array_elements_text(?::jsonb))
+                AND r.space_id=s.id AND r.erased_at IS NULL)::text,'[]') AS "memoryIds",
             CASE WHEN s.organization_id IS NULL THEN 9007199254740991 ELSE
-                (SELECT m.expires_at FROM active_memberships m WHERE m.organization_id=s.organization_id AND m.account_id=c.account_id)
-            END AS spaceMembershipExpiresAt,x.expires_at AS exportExpiresAt
-            FROM spaces s CROSS JOIN active_credentials c LEFT JOIN release_export_sessions x
+                (SELECT m.expires_at FROM memory_identity.active_memberships m WHERE m.organization_id=s.organization_id AND m.account_id=c.account_id)
+            END AS "spaceMembershipExpiresAt",x.expires_at AS "exportExpiresAt"
+            FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c LEFT JOIN memory_ops.export_sessions x
                 ON x.id=? AND x.account_id=c.account_id AND x.space_id=s.id
             WHERE s.id=? AND ${authority('export')}`, [JSON.stringify(all.map(row => row.id)), exportId, spaceId, ...params(hash, checkedAt, 'export')]);
         const returnedAt = Math.max(this.clock(), current?.checkedAt ?? 0);
@@ -114,19 +126,29 @@ export class Transfers {
         integer(days, 1, 30);
         str(email, 254);
         const hash = await tokenHash(token), shareId = crypto.randomUUID();
-        await interactive(this.db, token, this.clock, true);
+        const actor = await interactive(this.db, token, this.clock, true);
         await requireSpace(this.db, token, spaceId, 'update', this.clock);
+        // Enrollment admission: a share grants the recipient a read in the
+        // Space's region. Both accounts must be enrolled here — region-only
+        // accounts (no provider bindings) are enrolled by regional existence.
+        const recipient = this.control === undefined ? null : await one<{ accountId: string }>(this.db,
+            'SELECT account_id AS "accountId" FROM memory_identity.runtime_account_emails WHERE address=? AND revoked_at IS NULL',
+            [email.trim().toLowerCase()]);
+        if (!await accountGrantAdmission(this.db, this.control, actor.accountId)
+            || (recipient !== null && !await accountGrantAdmission(this.db, this.control, recipient.accountId)))
+            fail(403, 'recipient_or_authority_unavailable');
         const at = this.clock();
-        const r = await this.db.prepare(`INSERT INTO release_shares
+        const r = await this.db.prepare(`INSERT INTO memory_identity.shares
             (id,space_id,recipient_email_id,creator_credential_id,expires_at,created_at,creator_membership_id,creator_email_id)
-   SELECT ?,s.id,e.id,c.id,${sqlNow()}+?,${sqlNow()},m.id,m.email_id FROM spaces s CROSS JOIN active_credentials c CROSS JOIN account_emails e
-   LEFT JOIN memberships m ON m.id=(SELECT candidate.id FROM active_memberships candidate
+   SELECT ?,s.id,e.id,c.id,${sqlNow()}+?,${sqlNow()},m.id,m.email_id FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c CROSS JOIN memory_identity.runtime_account_emails e
+   LEFT JOIN memory_identity.runtime_memberships m ON m.id=(SELECT candidate.id FROM memory_identity.active_memberships candidate
      WHERE candidate.account_id=c.account_id AND candidate.organization_id=s.organization_id
        AND candidate.expires_at>${sqlNow()} AND candidate.role IN ('owner','admin'))
    WHERE s.id=? AND e.address=? AND e.revoked_at IS NULL
-     AND EXISTS(SELECT 1 FROM accounts recipient WHERE recipient.id=e.account_id AND recipient.disabled_at IS NULL)
-     AND ${authority('update')} AND ${recentSql()} RETURNING expires_at AS expiresAt`)
-            .bind(shareId, at, days * 86400000, at, at, id(spaceId), email.trim().toLowerCase(), ...params(hash, at, 'update'), at - 300000, at).first<{ expiresAt: number }>();
+     AND EXISTS(SELECT 1 FROM memory_identity.runtime_accounts recipient WHERE recipient.id=e.account_id AND recipient.disabled_at IS NULL)
+     AND ${authority('update')} AND ${recentSql()} RETURNING expires_at AS "expiresAt"`)
+            .bind(shareId, at, days * 86400000, at, at, id(spaceId), email.trim().toLowerCase(), ...params(hash, at, 'update'), at - 300000, at).first<{ expiresAt: number }>()
+            .catch(deferredShare);
         if (!r)
             fail(403, 'recipient_or_authority_unavailable');
         return { id: shareId, expiresAt: r.expiresAt };
@@ -150,19 +172,19 @@ export class Transfers {
         // final primary snapshot, with no later awaited disclosure boundary.
         const current = await one<{ expiresAt: number; shares: string }>(this.db, `/* outbound-share-page */
             WITH authorized AS MATERIALIZED (
-                SELECT s.id AS spaceId,min(c.expires_at,c.membership_expires_at,${accessExpiry('update')}) AS expiresAt
-                FROM spaces s CROSS JOIN active_credentials c WHERE s.id=? AND c.account_id=?
+                SELECT s.id AS "spaceId",least(c.expires_at,c.membership_expires_at,${accessExpiry('update')}) AS "expiresAt"
+                FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c WHERE s.id=? AND c.account_id=?
                     AND ${authority('update')} AND ${INTERACTIVE} AND c.permission='write'
             ), page AS MATERIALIZED (
-                SELECT sh.id,sh.space_id AS spaceId,e.address AS recipientEmail,sh.created_at AS createdAt,
-                    sh.expires_at AS expiresAt,sh.accepted_at AS acceptedAt,sh.revoked_at AS revokedAt
-                FROM release_shares sh JOIN account_emails e ON e.id=sh.recipient_email_id
-                WHERE sh.space_id=(SELECT spaceId FROM authorized)
+                SELECT sh.id,sh.space_id AS "spaceId",e.address AS "recipientEmail",sh.created_at AS "createdAt",
+                    sh.expires_at AS "expiresAt",sh.accepted_at AS "acceptedAt",sh.revoked_at AS "revokedAt"
+                FROM memory_identity.shares sh JOIN memory_identity.runtime_account_emails e ON e.id=sh.recipient_email_id
+                WHERE sh.space_id=(SELECT "spaceId" FROM authorized)
                     ${after ? 'AND sh.created_at<=? AND (sh.created_at<? OR sh.id<?)' : ''}
                 ORDER BY sh.created_at DESC,sh.id DESC LIMIT ?
-            ) SELECT expiresAt,(SELECT json_group_array(json_object('id',id,'spaceId',spaceId,'recipientEmail',recipientEmail,
-                'createdAt',createdAt,'expiresAt',expiresAt,'acceptedAt',acceptedAt,'revokedAt',revokedAt))
-                FROM (SELECT * FROM page ORDER BY createdAt DESC,id DESC)) AS shares FROM authorized`,
+            ) SELECT "expiresAt",coalesce((SELECT jsonb_agg(jsonb_build_object('id',id,'spaceId',"spaceId",'recipientEmail',"recipientEmail",
+                'createdAt',"createdAt",'expiresAt',"expiresAt",'acceptedAt',"acceptedAt",'revokedAt',"revokedAt"))
+                FROM (SELECT * FROM page ORDER BY "createdAt" DESC,id DESC))::text,'[]') AS shares FROM authorized`,
             [spaceId, actor.accountId, ...params(hash, at, 'update'), ...(after ? [after[0], after[0], after[1]] : []), limit + 1]);
         if (!current || current.expiresAt <= this.clock())
             fail(403, 'access_denied');
@@ -182,26 +204,26 @@ export class Transfers {
         // Page raw targets before expiry/grant filtering. Each verified claim
         // contributes at most a page, even when a sender's whole backlog has
         // expired. The cursor advances across omitted targets as well.
-        const all = await rows<Record<string, unknown> & { id: string; createdAt: number }>(this.db, `SELECT sh.id,sh.space_id AS spaceId,s.name,sh.expires_at AS expiresAt,sh.accepted_at AS acceptedAt,sh.created_at AS createdAt
-            FROM account_emails e JOIN release_shares sh ON sh.id IN (
-                SELECT sh.id FROM release_shares sh
+        const all = await rows<Record<string, unknown> & { id: string; createdAt: number }>(this.db, `SELECT sh.id,sh.space_id AS "spaceId",s.name,sh.expires_at AS "expiresAt",sh.accepted_at AS "acceptedAt",sh.created_at AS "createdAt"
+            FROM memory_identity.runtime_account_emails e JOIN memory_identity.shares sh ON sh.id IN (
+                SELECT sh.id FROM memory_identity.shares sh
                 WHERE sh.recipient_email_id=e.id AND sh.revoked_at IS NULL
                     AND sh.created_at>=? AND (sh.created_at>? OR (sh.created_at=? AND sh.id>?))
                 ORDER BY sh.created_at,sh.id LIMIT ?)
-            JOIN spaces s ON s.id=sh.space_id WHERE e.account_id=? AND e.revoked_at IS NULL
+            JOIN memory_control.spaces s ON s.id=sh.space_id WHERE e.account_id=? AND e.revoked_at IS NULL
             ORDER BY sh.created_at,sh.id LIMIT ?`,
             [afterTime, afterTime, afterTime, afterId, limit + 1, actor.accountId, limit + 1]);
         const invitations = all.slice(0, limit), last = invitations.at(-1);
         const fresh = this.clock();
-        const current = await one<{ shareIds: string; expiresAt: number }>(this.db, `SELECT (
-            SELECT json_group_array(json_object('id',sh.id,'expiresAt',min(sh.expires_at,
+        const current = await one<{ shareIds: string; expiresAt: number }>(this.db, `SELECT coalesce((
+            SELECT jsonb_agg(jsonb_build_object('id',sh.id,'expiresAt',least(sh.expires_at,
                 CASE WHEN s.organization_id IS NULL THEN 9007199254740991 ELSE
-                    (SELECT gm.expires_at FROM active_memberships gm WHERE gm.id=sh.creator_membership_id) END)))
-            FROM release_shares sh JOIN spaces s ON s.id=sh.space_id
-                JOIN account_emails e ON e.id=sh.recipient_email_id
-            WHERE sh.id IN (SELECT value FROM json_each(?)) AND e.account_id=c.account_id
+                    (SELECT gm.expires_at FROM memory_identity.active_memberships gm WHERE gm.id=sh.creator_membership_id) END)))
+            FROM memory_identity.shares sh JOIN memory_control.spaces s ON s.id=sh.space_id
+                JOIN memory_identity.runtime_account_emails e ON e.id=sh.recipient_email_id
+            WHERE sh.id IN (SELECT value FROM jsonb_array_elements_text(?::jsonb)) AND e.account_id=c.account_id
                 AND e.revoked_at IS NULL AND sh.revoked_at IS NULL AND sh.expires_at>${sqlNow()} AND ${shareGrantorAuthority()}
-          ) AS shareIds,min(c.expires_at,c.membership_expires_at) AS expiresAt FROM active_credentials c WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND c.membership_expires_at>${sqlNow()}
+          )::text,'[]') AS "shareIds",least(c.expires_at,c.membership_expires_at) AS "expiresAt" FROM memory_identity.active_credentials c WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND c.membership_expires_at>${sqlNow()}
               AND ${INTERACTIVE} AND c.permission='write'`,
             [JSON.stringify(invitations.map(row => row.id)), fresh, fresh, hash, fresh, fresh]);
         const returnedAt = this.clock();
@@ -212,16 +234,19 @@ export class Transfers {
     }
     async accept(token: string, shareId: string): Promise<void> {
         const hash = await tokenHash(token);
-        await interactive(this.db, token, this.clock);
+        const actor = await interactive(this.db, token, this.clock);
+        // Accepting activates the recipient's grant in this region.
+        if (!await accountGrantAdmission(this.db, this.control, actor.accountId))
+            fail(403, 'share_unavailable');
         const at = this.clock();
         // A lost success response may be retried. Preserve the original consent
         // timestamp while rechecking the recipient and grantor on every attempt.
-        const r = await this.db.prepare(`UPDATE release_shares SET accepted_at=coalesce(accepted_at,${sqlNow()}) WHERE id=? AND revoked_at IS NULL AND expires_at>${sqlNow()}
-            AND EXISTS(SELECT 1 FROM account_emails e JOIN active_credentials c ON c.account_id=e.account_id
-                WHERE e.id=release_shares.recipient_email_id AND e.revoked_at IS NULL AND c.token_digest=? AND c.expires_at>${sqlNow()}
+        const r = await this.db.prepare(`UPDATE memory_identity.shares SET accepted_at=coalesce(accepted_at,${sqlNow()}) WHERE id=? AND revoked_at IS NULL AND expires_at>${sqlNow()}
+            AND EXISTS(SELECT 1 FROM memory_identity.runtime_account_emails e JOIN memory_identity.active_credentials c ON c.account_id=e.account_id
+                WHERE e.id=shares.recipient_email_id AND e.revoked_at IS NULL AND c.token_digest=? AND c.expires_at>${sqlNow()}
                     AND ${INTERACTIVE} AND c.permission='write')
-            AND EXISTS(SELECT 1 FROM spaces s WHERE s.id=release_shares.space_id AND ${shareGrantorAuthority('release_shares')})`)
-            .bind(at, id(shareId), at, hash, at, at).run();
+            AND EXISTS(SELECT 1 FROM memory_control.spaces s WHERE s.id=shares.space_id AND ${shareGrantorAuthority('memory_identity.shares')})`)
+            .bind(at, id(shareId), at, hash, at, at).run().catch(deferredShare);
         if (!r.success || !r.meta.changes)
             fail(403, 'share_unavailable');
     }
@@ -229,7 +254,7 @@ export class Transfers {
         const hash = await tokenHash(token);
         await interactive(this.db, token, this.clock, true);
         const at = this.clock();
-        const r = await this.db.prepare(`UPDATE release_shares SET revoked_at=coalesce(revoked_at,${sqlNow()}) WHERE id=? AND space_id=? AND EXISTS(SELECT 1 FROM spaces s CROSS JOIN active_credentials c WHERE s.id=release_shares.space_id AND ${authority('update')} AND ${recentSql()})`).bind(at, id(shareId), id(spaceId), ...params(hash, at, 'update'), at - 300000, at).run();
+        const r = await this.db.prepare(`UPDATE memory_identity.shares SET revoked_at=coalesce(revoked_at,${sqlNow()}) WHERE id=? AND space_id=? AND EXISTS(SELECT 1 FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c WHERE s.id=shares.space_id AND ${authority('update')} AND ${recentSql()})`).bind(at, id(shareId), id(spaceId), ...params(hash, at, 'update'), at - 300000, at).run().catch(deferredShare);
         if (!r.success || !r.meta.changes)
             fail(403, 'access_denied');
     }

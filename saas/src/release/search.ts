@@ -8,7 +8,7 @@ import { reserveProvider } from './provider-budget.ts';
 import { digest, fail, id, integer, object, rows, str, tokenHash, stmt, batch } from './util.ts';
 import { unicode61Token } from './unicode61.ts';
 export const EMBEDDING_MODEL = '@cf/baai/bge-m3';
-export function ftsQuery(query: string): string {
+function ftsTerms(query: string): string[] {
     // FTS stores original text. Let unicode61 apply the same case/diacritic
     // rules to both sides; query-only compatibility folding loses exact words.
     // Retain existing mark/underscore groups and every native token character.
@@ -24,7 +24,15 @@ export function ftsQuery(query: string): string {
     const terms = [...new Set(groups)].slice(0, 20);
     if (terms.some(term => Array.from(term).length > 31))
         fail(400, 'search_token_too_long');
-    return terms.map(s => '"' + s.replaceAll('"', '""') + '"*').join(' OR ');
+    return terms;
+}
+export function ftsQuery(query: string): string {
+    return ftsTerms(query).map(s => s.replaceAll("'", "''") + ':*').join(' | ');
+}
+/** The hot payload shards still run FTS5, whose MATCH grammar is the quoted
+ * prefix form; the same token list is rendered once per dialect. */
+export function ftsShardQuery(query: string): string {
+    return ftsTerms(query).map(s => '"' + s.replaceAll('"', '""') + '"*').join(' OR ');
 }
 export async function deadline<T>(promise: Promise<T>, ms = 20000): Promise<T> { let timer: ReturnType<typeof setTimeout> | undefined; try {
     return await Promise.race([promise, new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error('provider_timeout')), ms); })]);
@@ -50,7 +58,7 @@ export class Search {
     clock: () => number;
     store: MemoryStore;
     payloads: PayloadStore;
-    constructor(env: ReleaseEnv, clock: () => number = Date.now) { this.env = env; this.clock = clock; this.payloads = new PayloadStore(env, clock); this.store = new MemoryStore(env.DB, clock, this.payloads); }
+    constructor(env: ReleaseEnv, clock: () => number = Date.now) { this.env = env; this.clock = clock; this.payloads = new PayloadStore(env, clock); this.store = new MemoryStore(env.DB, clock, this.payloads, env.CONTROL_DB); }
     async query(token: string, spaceId: string, query: string, limit = 10, operationId = crypto.randomUUID()): Promise<{
         results: (Memory & {
             snippet: string;
@@ -64,32 +72,31 @@ export class Search {
         integer(limit, 1, 50);
         const expression = ftsQuery(query);
         const db = this.env.DB, hash = await tokenHash(token);
-        const operation = await this.store.commit(token, spaceId, 'search', 'read', operationId, { query, limit }, null, null, 1, () => []);
-        const at = this.clock(), tenant = 't' + [...new TextEncoder().encode(spaceId)].map(value => value.toString(16).padStart(2, '0')).join('');
+        const operation = await this.store.commit(token, spaceId, 'search', 'read', operationId, { query, limit }, null, null, 1, 0, () => []);
+        const at = this.clock();
         const candidateLimit = Math.max(40, limit);
         let lexical: LexicalHead[] = [];
         if (expression)
             lexical = await rows(db, `/* lexical-candidates */ SELECT r.id,r.revision,
-                (length(CAST(highlight(release_fts,2,'[',']') AS BLOB))-length(CAST(release_fts.body AS BLOB)))*1.0
-                    /(length(CAST(release_fts.body AS BLOB))+80) AS score
-                FROM release_fts JOIN memories r ON r.id=release_fts.memory_id JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
-    WHERE release_fts MATCH ? AND s.id=? AND r.deleted_at IS NULL AND r.erased_at IS NULL
+                ts_rank_cd(r.search_vector,to_tsquery('simple',?)) AS score
+                FROM memory_content.memories r JOIN memory_control.spaces s ON s.id=r.space_id CROSS JOIN memory_identity.active_credentials c
+    WHERE r.search_vector @@ to_tsquery('simple',?) AND s.id=? AND r.deleted_at IS NULL AND r.erased_at IS NULL
     AND r.payload_id IS NULL
-    AND NOT EXISTS(SELECT 1 FROM memories successor WHERE successor.supersedes_id=r.id)
+    AND NOT EXISTS(SELECT 1 FROM memory_content.memories successor WHERE successor.supersedes_id=r.id)
     AND ${authority('read')}
     ORDER BY score DESC,r.id LIMIT ?`,
-                [`tenant : "${tenant}" AND body : (${expression})`, spaceId, ...params(hash, at, 'read'), candidateLimit]);
+                [expression, expression, spaceId, ...params(hash, at, 'read'), candidateLimit]);
         // The source reads can straddle archival or an update. Resolve their
         // bounded union before truncating: a stronger stale revision must not
         // displace a weaker current match, and archival earns only one rank.
-        const combined = [...lexical, ...await shardedLexical(db, this.payloads, hash, spaceId, expression, candidateLimit, this.clock)];
+        const combined = [...lexical, ...await shardedLexical(db, this.payloads, hash, spaceId, ftsShardQuery(query), candidateLimit, this.clock)];
         const distinct = uniqueLexical(combined, combined.length);
         const currentLexical = distinct.length ? await rows<LexicalHead>(db, `/* lexical-current-heads */
-            SELECT r.id,r.revision,json_extract(candidate.value,'$.score') AS score FROM json_each(?) candidate
-            JOIN memories r ON r.id=json_extract(candidate.value,'$.id') AND r.revision=json_extract(candidate.value,'$.revision')
-            JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
+            SELECT r.id,r.revision,(candidate.value->>'score')::float8 AS score FROM jsonb_array_elements(?::jsonb) candidate
+            JOIN memory_content.memories r ON r.id=candidate.value->>'id' AND r.revision=(candidate.value->>'revision')::bigint
+            JOIN memory_control.spaces s ON s.id=r.space_id CROSS JOIN memory_identity.active_credentials c
             WHERE s.id=? AND r.deleted_at IS NULL AND r.erased_at IS NULL
-                AND NOT EXISTS(SELECT 1 FROM memories successor WHERE successor.supersedes_id=r.id)
+                AND NOT EXISTS(SELECT 1 FROM memory_content.memories successor WHERE successor.supersedes_id=r.id)
                 AND ${authority('read')}`, [JSON.stringify(distinct), spaceId, ...params(hash, this.clock(), 'read')]) : [];
         lexical = uniqueLexical(currentLexical, candidateLimit);
         // Retain each revision until D1 identifies the current one. A stale
@@ -136,9 +143,9 @@ export class Search {
         // current authorization predicates under D1's SQL parameter limit.
         const ids = [...candidates.keys()];
         const fresh = this.clock();
-        const final = ids.length ? await rows<MemoryRow>(db, `SELECT ${columns} FROM memories r JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
-   WHERE s.id=? AND r.id IN (SELECT value FROM json_each(?)) AND r.deleted_at IS NULL AND r.erased_at IS NULL
-   AND NOT EXISTS(SELECT 1 FROM memories successor WHERE successor.supersedes_id=r.id) AND ${authority('read')}`, [spaceId, JSON.stringify(ids), ...params(hash, fresh, 'read')]) : [];
+        const final = ids.length ? await rows<MemoryRow>(db, `SELECT ${columns} FROM memory_content.memories r JOIN memory_control.spaces s ON s.id=r.space_id CROSS JOIN memory_identity.active_credentials c
+   WHERE s.id=? AND r.id IN (SELECT value FROM jsonb_array_elements_text(?::jsonb)) AND r.deleted_at IS NULL AND r.erased_at IS NULL
+   AND NOT EXISTS(SELECT 1 FROM memory_content.memories successor WHERE successor.supersedes_id=r.id) AND ${authority('read')}`, [spaceId, JSON.stringify(ids), ...params(hash, fresh, 'read')]) : [];
         const hydrated = await this.store.hydrateRows(final, { omitErased: true });
         const allowed = await this.store.confirmRead(hash, spaceId, hydrated, { deleted: false, currentFact: true });
         const results = hydrated.filter(r => allowed.has(r.id) && candidates.get(r.id)?.has(r.revision)).map(r => ({ ...memoryRow(r), snippet: Array.from(r.body).slice(0, 500).join(''), score: candidates.get(r.id)!.get(r.revision)! })).sort(compareLexical).slice(0, limit);
@@ -155,9 +162,9 @@ export class Search {
         const at = this.clock();
         // One job per current revision. Resetting a leased job is forbidden; an
         // in-flight revision will finish or become reclaimable through its lease.
-        await db.prepare(`INSERT INTO release_jobs(id,memory_id,space_id,revision,kind,available_at,created_at)
-   SELECT r.id||':'||r.revision,r.id,s.id,r.revision,CASE WHEN r.deleted_at IS NULL THEN 'upsert' ELSE 'delete' END,${sqlNow()},${sqlNow()} FROM memories r JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c WHERE s.id=? AND ${authority('update')} AND ${recentSql()}
-   ON CONFLICT(id) DO UPDATE SET state='pending',attempt=0,available_at=excluded.available_at,last_error=NULL,next_chunk=0,cleanup_cursor='',cleanup_pending='[]',cleanup_retry_at=0,cleanup_retry_delay=60000,cleanup_only=0 WHERE release_jobs.state<>'leased'`).bind(at, at, id(spaceId), ...params(hash, at, 'update'), at - 300000, at).run();
+        await db.prepare(`INSERT INTO memory_jobs.release_jobs(id,memory_id,space_id,revision,kind,available_at,created_at)
+   SELECT r.id||':'||r.revision,r.id,s.id,r.revision,CASE WHEN r.deleted_at IS NULL THEN 'upsert' ELSE 'delete' END,${sqlNow()},${sqlNow()} FROM memory_content.memories r JOIN memory_control.spaces s ON s.id=r.space_id CROSS JOIN memory_identity.active_credentials c WHERE s.id=? AND ${authority('update')} AND ${recentSql()}
+   ON CONFLICT(id) DO UPDATE SET state='pending',attempt=0,available_at=excluded.available_at,last_error=NULL,next_chunk=0,cleanup_cursor='',cleanup_pending='[]'::jsonb,cleanup_retry_at=0,cleanup_retry_delay=60000,cleanup_only=0 WHERE release_jobs.state<>'leased'`).bind(at, at, id(spaceId), ...params(hash, at, 'update'), at - 300000, at).run();
         await requireSpace(db, token, spaceId, 'update', this.clock);
         await interactive(db, token, this.clock, true);
     }

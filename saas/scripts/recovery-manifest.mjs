@@ -218,7 +218,7 @@ function argsFor(argv) {
 }
 async function sourceSchemas() {
   const latest = async folder => { const versions = (await readdir(resolve(PROJECT_DIRECTORY, folder))).filter(name => /^\d{4}_.+\.sql$/.test(name)).map(name => Number(name.slice(0, 4))); if (!versions.length) fail('Source migrations unavailable.'); return Math.max(...versions); };
-  return { centralSchemaVersion: await latest('migrations'), hotSchemaVersion: await latest('shard-migrations') };
+  return { centralSchemaVersion: await latest('d1-migrations'), hotSchemaVersion: await latest('d1-shard-migrations') };
 }
 export async function runRecoveryCommand(argv, { cwd = process.cwd(), inspectSource = inspectGitSource, schemas, clock = Date.now, processEnvironment = process.env } = {}) {
   const { mode, values } = argsFor(argv), load = async path => {

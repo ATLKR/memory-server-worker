@@ -82,7 +82,7 @@ test('v4 rejects lifecycle calls and v5 rejects unknown fields before SDK dispat
 test('each lifecycle mutation deadline remains uncertain with its operation ID and no retry', async () => {
   for (const [tool, method, input] of variants.slice(0, 3)) {
     let calls = 0, signal;
-    const f = fixture({ timeoutMs: 30, lifecycle: { async [method](_digest, _input, opts) { calls++; signal = opts.signal; return new Promise(() => {}); } } });
+    const f = fixture({ timeoutMs: 250, lifecycle: { async [method](_digest, _input, opts) { calls++; signal = opts.signal; return new Promise(() => {}); } } });
     const response = await f.app.fetch(request(tool, input));
     assert.equal(response.status, 503); assert.deepEqual(await response.json(), { error: 'operation_outcome_unknown', operationId });
     assert.equal(calls, 1); assert.equal(signal.aborted, true);

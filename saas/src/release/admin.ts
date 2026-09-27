@@ -1,11 +1,13 @@
 import { sqlNow } from '../sql-clock.ts';
+import type { SeoulProjectionCapture } from './seoul-projection-capture.ts';
 import { receiveLifecycle } from './lifecycle.ts';
 import type { Database, ReleaseEnv, Capability } from './types.ts';
 import { readSettings } from '../config.ts';
 import { requireMethod } from '../api.ts';
 import { canonicalEmail, IdentityInvalid } from '../identity.ts';
 import { INTERACTIVE, interactive, requireSpace, recentSql, acceptedShareAuthority } from './authority.ts';
-import { batch, canonical, capabilities, digest, equal, fail, hmac, id, integer, json, object, one, randomToken, readBytes, remoteJson, requestObject, requestText, rows, stmt, str, tokenHash } from './util.ts';
+import { accountGrantAdmission, organizationGrantAdmission } from '../postgres/enrollment.ts';
+import { batch, canonical, capabilities, digest, equal, fail, hmac, id, integer, json, object, one, randomToken, readBytes, ReleaseError, remoteJson, requestObject, requestText, rows, stmt, str, tokenHash } from './util.ts';
 const ISSUER = 'https://auth-api.allen.company';
 const SCIM_USER_SCHEMA = 'urn:ietf:params:scim:schemas:core:2.0:User';
 function scimObject(value: unknown, allowed: string[]): Record<string, unknown> {
@@ -48,10 +50,10 @@ function scimVisible(alias: 'm' | 'memberships' | 'target'): string {
     // Membership history is retained and cannot be deleted or replaced. The
     // latest insertion owns this SCIM username; a deleted successor must still
     // suppress its predecessors, without transferring any credential authority.
-    return `NOT EXISTS(SELECT 1 FROM release_scim_deletions deleted WHERE deleted.membership_id=${alias}.id)
-        AND NOT EXISTS(SELECT 1 FROM memberships newer JOIN account_emails newer_email ON newer_email.id=newer.email_id
-            WHERE newer.organization_id=${alias}.organization_id AND newer.rowid>${alias}.rowid
-              AND newer_email.address=(SELECT address FROM account_emails WHERE id=${alias}.email_id))`;
+    return `NOT EXISTS(SELECT 1 FROM memory_identity.scim_deletions deleted WHERE deleted.membership_id=${alias}.id)
+        AND NOT EXISTS(SELECT 1 FROM memory_identity.runtime_memberships newer JOIN memory_identity.runtime_account_emails newer_email ON newer_email.id=newer.email_id
+            WHERE newer.organization_id=${alias}.organization_id AND newer.seq>${alias}.seq
+              AND newer_email.address=(SELECT address FROM memory_identity.runtime_account_emails WHERE id=${alias}.email_id))`;
 }
 function scimPage(url: URL, name: 'startIndex' | 'count', fallback: number): number {
     const raw = url.searchParams.get(name);
@@ -93,7 +95,8 @@ export class Admin {
     db: Database;
     clock: () => number;
     fetcher: typeof fetch;
-    constructor(env: ReleaseEnv, clock: () => number = Date.now) { this.env = env; this.db = env.DB; this.clock = clock; this.fetcher = env.fetch ?? globalThis.fetch; }
+    private readonly capture?: SeoulProjectionCapture;
+    constructor(env: ReleaseEnv, clock: () => number = Date.now, capture?: SeoulProjectionCapture) { capture?.assertDatabase(env.DB); this.env = env; this.db = env.DB; this.clock = clock; this.fetcher = env.fetch ?? globalThis.fetch; this.capture = capture; }
     async orgAdmin(token: string, org: string): Promise<{
         accountId: string;
         membershipId: string;
@@ -105,9 +108,9 @@ export class Admin {
         credentialExpiresAt: number;
         membershipExpiresAt: number;
         reauthenticatedAt: number;
-    }>(this.db, `SELECT c.account_id AS accountId,m.id AS membershipId,c.id AS credentialId,
-        c.expires_at AS credentialExpiresAt,m.expires_at AS membershipExpiresAt,c.reauthenticated_at AS reauthenticatedAt
-        FROM active_credentials c JOIN active_memberships m ON m.account_id=c.account_id WHERE ${adminSql()}`, adminValues(hash, at, id(org)));
+    }>(this.db, `SELECT c.account_id AS "accountId",m.id AS "membershipId",c.id AS "credentialId",
+        c.expires_at AS "credentialExpiresAt",m.expires_at AS "membershipExpiresAt",c.reauthenticated_at AS "reauthenticatedAt"
+        FROM memory_identity.active_credentials c JOIN memory_identity.active_memberships m ON m.account_id=c.account_id WHERE ${adminSql()}`, adminValues(hash, at, id(org)));
         const checkedAt = this.clock();
         if (!row || Math.min(row.credentialExpiresAt, row.membershipExpiresAt) <= checkedAt ||
             row.reauthenticatedAt < checkedAt - 300000 || row.reauthenticatedAt > checkedAt)
@@ -136,13 +139,13 @@ export class Admin {
             await requireSpace(this.db, token, s, granted === 'write' ? 'update' : 'read', this.clock);
             const row = await one<{
                 organizationId: string | null;
-            }>(this.db, 'SELECT organization_id AS organizationId FROM spaces WHERE id=?', [s]);
+            }>(this.db, 'SELECT organization_id AS "organizationId" FROM memory_control.spaces WHERE id=?', [s]);
             if (row?.organizationId !== org) {
                 const at = this.clock();
                 // Personal read keys can select a separately accepted share.
                 // Organization membership alone never satisfies this exception.
                 if (org !== null || granted !== 'read' || !await one(this.db,
-                    `SELECT s.id FROM spaces s CROSS JOIN active_credentials c WHERE s.id=?
+                    `SELECT s.id FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c WHERE s.id=?
                       AND c.token_digest=? AND c.expires_at>${sqlNow()} AND ${acceptedShareAuthority()}`,
                     [s, hash, at, at, at]))
                     fail(403, 'scope_tenant_mismatch');
@@ -150,33 +153,48 @@ export class Admin {
         }
         if (org && granted === 'write')
             await this.orgAdmin(token, org);
+        // Enrollment admission: a scoped key is a grant in this deployment's
+        // region — the actor, and an org context when named, must be enrolled.
+        if (!await accountGrantAdmission(this.db, this.env.CONTROL_DB, actor.accountId)
+            || (org !== null && !await organizationGrantAdmission(this.db, this.env.CONTROL_DB, org)))
+            fail(403, 'enrollment_required');
         const keyId = 'key:' + crypto.randomUUID(), raw = 'mem_' + randomToken(), keyHash = await tokenHash(raw);
         const at = this.clock(), expiresAt = at + input.expiresInDays * 86400000;
-        await batch(this.db, [
-            stmt(this.db, `INSERT INTO credentials(id,account_id,membership_id,email_id,kind,token_digest,expires_at,permission)
-    SELECT ?,c.account_id,m.id,m.email_id,CASE WHEN ? IS NULL THEN 'personal_key' ELSE 'api_key' END,?,?,? FROM active_credentials c
-    LEFT JOIN memberships m ON m.id=(SELECT candidate.id FROM active_memberships candidate WHERE candidate.account_id=c.account_id AND candidate.organization_id=?)
-    WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${recentSql()} AND (? IS NULL OR (m.id IS NOT NULL AND m.expires_at>${sqlNow()} AND (?='read' OR m.role IN ('owner','admin'))))
-    AND (SELECT count(*) FROM credentials k WHERE k.account_id=c.account_id AND k.kind<>'session' AND k.revoked_at IS NULL AND k.expires_at>${sqlNow()})<100`, [keyId, org, keyHash, expiresAt, granted, org, hash, at, at - 300000, at, org, at, granted, at]),
-            stmt(this.db, 'INSERT INTO release_credential_policies(credential_id,capabilities,space_ids) SELECT id,?,? FROM credentials WHERE id=?', [canonical(caps), spaceIds ? canonical(spaceIds) : null, keyId]),
-            stmt(this.db, 'INSERT INTO workspace_key_metadata(credential_id,label,actor_credential_id,created_at) SELECT id,?,?,? FROM credentials WHERE id=?', [label, actor.id, at, keyId]),
-            stmt(this.db, "INSERT INTO release_events(action,actor_credential_id,resource_id,created_at) SELECT 'scoped_key_issued',?,?,? FROM credentials WHERE id=?", [actor.id, keyId, at, keyId])
-        ]);
-        if (!await one(this.db, 'SELECT id FROM credentials WHERE id=?', [keyId]))
+        // The record's BEFORE-INSERT validator re-checks the session,
+        // permission and organization role owner-side; its apply mints the
+        // credential plus metadata row. The key-count bound stays in the
+        // record's own selection so the batch remains conditional.
+        const commands = [
+            stmt(this.db, `INSERT INTO memory_identity.workspace_key_issuances(id,actor_credential_id,organization_id,label,permission,token_digest,created_at,expires_at)
+    SELECT ?,?,?,?,?,?,?,? WHERE (SELECT count(*) FROM memory_identity.runtime_credentials k WHERE k.account_id=? AND k.kind<>'session' AND k.revoked_at IS NULL AND k.expires_at>${sqlNow()})<100
+      AND EXISTS(SELECT 1 FROM memory_identity.active_credentials c WHERE c.id=? AND ${recentSql()})`,
+                [keyId, actor.id, org, label, granted, keyHash, at, expiresAt, actor.accountId, at, actor.id, at - 300000, at]),
+            stmt(this.db, 'INSERT INTO memory_identity.credential_policies(credential_id,capabilities,space_ids) SELECT id,?::jsonb,?::jsonb FROM memory_identity.runtime_credentials WHERE id=?', [canonical(caps), spaceIds ? canonical(spaceIds) : null, keyId]),
+            stmt(this.db, "INSERT INTO memory_ops.release_events(action,actor_credential_id,resource_id,created_at) SELECT 'scoped_key_issued',?,?,? FROM memory_identity.runtime_credentials WHERE id=?", [actor.id, keyId, at, keyId])
+        ];
+        try {
+            await batch(this.db, this.capture ? this.capture.issueKeyStatements(this.db, { accountId: actor.accountId, keyId, organizationId: org, spaceIds }, commands) : commands);
+        }
+        catch (error) {
+            if (error instanceof ReleaseError && error.status === 403)
+                fail(403, 'key_limit_or_authority');
+            throw error;
+        }
+        if (!await one(this.db, 'SELECT id FROM memory_identity.runtime_credentials WHERE id=?', [keyId]))
             fail(403, 'key_limit_or_authority');
         await interactive(this.db, token, this.clock, true);
         return { id: keyId, token: raw, capabilities: caps, spaceIds, expiresAt };
     }
     private mailPredicate(hash: string, at: number, recipient: string, challengeId: string, recent: boolean) {
-        return { sql: `FROM active_credentials c JOIN ${recent ? 'email_challenges' : 'release_reauth_challenges'} p
+        return { sql: `FROM memory_identity.active_credentials c JOIN ${recent ? 'memory_identity.email_challenges' : 'memory_identity.reauth_challenges'} p
               ON ${recent ? 'p.account_id=c.account_id' : 'p.credential_id=c.id'}
-            ${recent ? '' : 'JOIN account_emails e ON e.id=p.email_id AND e.account_id=c.account_id AND e.revoked_at IS NULL'}
+            ${recent ? '' : 'JOIN memory_identity.runtime_account_emails e ON e.id=p.email_id AND e.account_id=c.account_id AND e.revoked_at IS NULL'}
             WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND c.membership_expires_at>${sqlNow()} AND ${INTERACTIVE} AND c.permission='write'
               AND p.id=? AND p.used_at IS NULL AND p.expires_at>${sqlNow()}
               AND ${recent ? 'p.address=? AND p.invalidated_at IS NULL' : 'e.address=?'}
-              AND NOT EXISTS(SELECT 1 FROM email_blocks b WHERE b.address=?)
-              AND NOT EXISTS(SELECT 1 FROM release_external_email_blocks b WHERE b.account_id=c.account_id AND b.address=?)
-              ${recent ? `AND NOT EXISTS(SELECT 1 FROM account_emails claimed WHERE claimed.address=p.address AND claimed.revoked_at IS NULL) AND ${recentSql()}` : ''}`,
+              AND NOT EXISTS(SELECT 1 FROM memory_identity.email_blocks b WHERE b.address=?)
+              AND NOT EXISTS(SELECT 1 FROM memory_identity.external_email_blocks b WHERE b.account_id=c.account_id AND b.address=?)
+              ${recent ? `AND NOT EXISTS(SELECT 1 FROM memory_identity.runtime_account_emails claimed WHERE claimed.address=p.address AND claimed.revoked_at IS NULL) AND ${recentSql()}` : ''}`,
             values: [hash, at, at, id(challengeId), at, recipient, recipient, recipient, ...(recent ? [at - 300000, at] : [])] };
     }
     private async mailAuthority(token: string, recipient: string, challengeId: string, kind: 'reauth' | 'email_link'): Promise<void> {
@@ -185,7 +203,7 @@ export class Admin {
         // Compare expiry facts after the read; no asynchronous work precedes send.
         const predicate = this.mailPredicate(hash, at, recipient, challengeId, recent);
         const proof = await one<{ expiresAt: number; reauthenticatedAt: number }>(this.db, `
-            SELECT min(c.expires_at,c.membership_expires_at,p.expires_at) AS expiresAt,c.reauthenticated_at AS reauthenticatedAt
+            SELECT least(c.expires_at,c.membership_expires_at,p.expires_at) AS "expiresAt",c.reauthenticated_at AS "reauthenticatedAt"
             ${predicate.sql}`, predicate.values);
         const checkedAt = this.clock();
         if (!proof || proof.expiresAt <= checkedAt || (recent &&
@@ -204,9 +222,9 @@ export class Admin {
         const hash = await tokenHash(token), at = this.clock(), predicate = this.mailPredicate(hash, at, message.to, challengeId, kind === 'email_link');
         let charged = false;
         try {
-            const result = await this.db.prepare(`INSERT INTO release_mail_budget(account_id,day,quantity)
-                SELECT c.account_id,strftime('%Y-%m-%d',${sqlNow()}/1000.0,'unixepoch'),1 ${predicate.sql}
-                ON CONFLICT(account_id,day) DO UPDATE SET quantity=quantity+1`).bind(at, ...predicate.values).run();
+            const result = await this.db.prepare(`INSERT INTO memory_ops.mail_budget(account_id,day,quantity)
+                SELECT c.account_id,to_char(to_timestamp(${sqlNow()}/1000.0) AT TIME ZONE 'UTC','YYYY-MM-DD'),1 ${predicate.sql}
+                ON CONFLICT(account_id,day) DO UPDATE SET quantity=memory_ops.mail_budget.quantity+1`).bind(at, ...predicate.values).run();
             charged = result.success && !!result.meta.changes;
         }
         catch {
@@ -240,19 +258,21 @@ export class Admin {
         const hash = await tokenHash(token), actor = await interactive(this.db, token, this.clock), challengeId = crypto.randomUUID(), proof = randomToken();
         const address = await one<{
             address: string;
-        }>(this.db, 'SELECT address FROM account_emails WHERE id=? AND account_id=? AND revoked_at IS NULL', [id(emailId), actor.accountId]);
+        }>(this.db, 'SELECT address FROM memory_identity.runtime_account_emails WHERE id=? AND account_id=? AND revoked_at IS NULL', [id(emailId), actor.accountId]);
         if (!address)
             fail(403, 'email_unavailable');
         const proofHash = await tokenHash(proof), at = this.clock();
-        const r = await this.db.prepare(`INSERT INTO release_reauth_challenges(id,credential_id,email_id,token_digest,expires_at)
-   SELECT ?,c.id,e.id,?,? FROM active_credentials c JOIN account_emails e ON e.account_id=c.account_id WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE} AND e.id=? AND e.revoked_at IS NULL`).bind(challengeId, proofHash, at + 600000, hash, at, emailId).run();
+        const r = await this.db.prepare(`INSERT INTO memory_identity.reauth_challenges(id,credential_id,email_id,token_digest,expires_at)
+   SELECT ?,c.id,e.id,?,? FROM memory_identity.active_credentials c JOIN memory_identity.runtime_account_emails e ON e.account_id=c.account_id WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE} AND e.id=? AND e.revoked_at IS NULL`).bind(challengeId, proofHash, at + 600000, hash, at, emailId).run();
         if (!r.success || !r.meta.changes)
             fail(403, 'access_denied');
         try {
             await this.mail(token, address!.address, displayName + ': 추가 본인 확인', `본인이 요청한 경우에만 ${displayName} 관리 화면에 아래 증명을 입력하세요.\nChallenge: ${challengeId}\nProof: ${proof}\n10분 후 만료되며 이 브라우저 로그인에만 사용할 수 있습니다.`, challengeId);
         }
         catch (e) {
-            await this.db.prepare('DELETE FROM release_reauth_challenges WHERE id=?').bind(challengeId).run();
+            // Only an unused challenge needs compensation; a concurrently
+            // consumed one is already permanently spent and retained.
+            await this.db.prepare('DELETE FROM memory_identity.reauth_challenges WHERE id=? AND used_at IS NULL').bind(challengeId).run();
             throw e;
         }
         return { id: challengeId, expiresAt: at + 600000 };
@@ -268,9 +288,9 @@ export class Admin {
         // refresh a credential after the proof or credential has expired.
         const marker = await digest(randomToken()), at = this.clock();
         await batch(this.db, [
-            stmt(this.db, `UPDATE release_reauth_challenges SET used_at=${sqlNow()},token_digest=? WHERE id=? AND token_digest=? AND used_at IS NULL AND expires_at>${sqlNow()} AND EXISTS(SELECT 1 FROM active_credentials c JOIN account_emails e ON e.account_id=c.account_id WHERE c.id=release_reauth_challenges.credential_id AND e.id=release_reauth_challenges.email_id AND e.revoked_at IS NULL AND c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE})`, [at, marker, id(challengeId), proofHash, at, hash, at])
+            stmt(this.db, `UPDATE memory_identity.reauth_challenges SET used_at=${sqlNow()},token_digest=? WHERE id=? AND token_digest=? AND used_at IS NULL AND expires_at>${sqlNow()} AND EXISTS(SELECT 1 FROM memory_identity.active_credentials c JOIN memory_identity.runtime_account_emails e ON e.account_id=c.account_id WHERE c.id=reauth_challenges.credential_id AND e.id=reauth_challenges.email_id AND e.revoked_at IS NULL AND c.token_digest=? AND c.expires_at>${sqlNow()} AND ${INTERACTIVE})`, [at, marker, id(challengeId), proofHash, at, hash, at])
         ]);
-        if (!await one(this.db, 'SELECT id FROM release_reauth_challenges WHERE id=? AND token_digest=?', [challengeId, marker]))
+        if (!await one(this.db, 'SELECT id FROM memory_identity.reauth_challenges WHERE id=? AND token_digest=?', [challengeId, marker]))
             fail(403, 'reauthentication_failed');
     }
     async beginDomain(token: string, org: string, domain: string): Promise<{
@@ -282,8 +302,8 @@ export class Admin {
     }> {
         await this.orgAdmin(token, org);
         const hash = await tokenHash(token), d = domainName(domain), challengeId = crypto.randomUUID(), proof = 'memory-verification=' + randomToken(), at = this.clock();
-        const r = await this.db.prepare(`INSERT INTO release_domain_challenges(id,organization_id,actor_account_id,domain,proof,expires_at)
-   SELECT ?,m.organization_id,c.account_id,?,?,? FROM active_credentials c JOIN active_memberships m ON m.account_id=c.account_id WHERE ${adminSql()}`).bind(challengeId, d, proof, at + 3600000, ...adminValues(hash, at, org)).run();
+        const r = await this.db.prepare(`INSERT INTO memory_identity.domain_challenges(id,organization_id,actor_account_id,domain,proof,expires_at)
+   SELECT ?,m.organization_id,c.account_id,?,?,? FROM memory_identity.active_credentials c JOIN memory_identity.active_memberships m ON m.account_id=c.account_id WHERE ${adminSql()}`).bind(challengeId, d, proof, at + 3600000, ...adminValues(hash, at, org)).run();
         if (!r.success || !r.meta.changes)
             fail(403, 'access_denied');
         return { id: challengeId, name: '_memory-verification.' + d, type: 'TXT', value: proof, expiresAt: at + 3600000 };
@@ -291,14 +311,14 @@ export class Admin {
     private async domainVerificationResult(token: string, challengeId: string): Promise<{ id: string; name: string; verifiedUntil: number }> {
         const hash = await tokenHash(token), at = this.clock();
         const result = await one<{ id: string; name: string; verifiedUntil: number; expiresAt: number; reauthenticatedAt: number }>(this.db,
-            `/* domain-verification-result */ SELECT d.id,d.name,v.verified_until AS verifiedUntil,
-                min(d.verified_until,v.verified_until,c.expires_at,c.membership_expires_at,m.expires_at) AS expiresAt,
-                c.reauthenticated_at AS reauthenticatedAt
-             FROM release_domain_verifications v JOIN release_domain_challenges p ON p.id=v.challenge_id
-             JOIN domains d ON d.id=v.domain_id AND d.organization_id=p.organization_id AND d.name=p.domain AND d.revoked_at IS NULL
-             JOIN active_credentials c ON c.account_id=p.actor_account_id
-             JOIN active_memberships m ON m.id=v.membership_id AND m.account_id=c.account_id AND m.organization_id=p.organization_id
-             JOIN domain_managers g ON g.domain_id=d.id AND g.membership_id=m.id AND g.revoked_at IS NULL
+            `/* domain-verification-result */ SELECT d.id,d.name,v.verified_until AS "verifiedUntil",
+                least(d.verified_until,v.verified_until,c.expires_at,c.membership_expires_at,m.expires_at) AS "expiresAt",
+                c.reauthenticated_at AS "reauthenticatedAt"
+             FROM memory_identity.domain_verifications v JOIN memory_identity.domain_challenges p ON p.id=v.challenge_id
+             JOIN memory_identity.domains d ON d.id=v.domain_id AND d.organization_id=p.organization_id AND d.name=p.domain AND d.revoked_at IS NULL
+             JOIN memory_identity.active_credentials c ON c.account_id=p.actor_account_id
+             JOIN memory_identity.active_memberships m ON m.id=v.membership_id AND m.account_id=c.account_id AND m.organization_id=p.organization_id
+             JOIN memory_identity.domain_managers g ON g.domain_id=d.id AND g.membership_id=m.id AND g.revoked_at IS NULL
              WHERE v.challenge_id=? AND c.token_digest=? AND c.expires_at>${sqlNow()} AND c.membership_expires_at>${sqlNow()}
                AND ${recentSql()} AND m.expires_at>${sqlNow()} AND m.role IN ('owner','admin')`,
             [challengeId, hash, at, at, at - 300000, at, at]);
@@ -316,14 +336,14 @@ export class Admin {
         challengeId = id(challengeId);
         // A completed command is a durable result. A retry must resolve that
         // exact live assignment, not consume DNS proof or extend its lease again.
-        if (await one(this.db, 'SELECT id FROM release_domain_verifications WHERE challenge_id=?', [challengeId]))
+        if (await one(this.db, 'SELECT id FROM memory_identity.domain_verifications WHERE challenge_id=?', [challengeId]))
             return this.domainVerificationResult(token, challengeId);
         const challenge = await one<{
             organizationId: string;
             domain: string;
             proof: string;
             expiresAt: number;
-        }>(this.db, `SELECT organization_id AS organizationId,domain,proof,expires_at AS expiresAt FROM release_domain_challenges WHERE id=? AND actor_account_id=? AND expires_at>${sqlNow()} AND used_at IS NULL`, [id(challengeId), actor.accountId, this.clock()]);
+        }>(this.db, `SELECT organization_id AS "organizationId",domain,proof,expires_at AS "expiresAt" FROM memory_identity.domain_challenges WHERE id=? AND actor_account_id=? AND expires_at>${sqlNow()} AND used_at IS NULL`, [id(challengeId), actor.accountId, this.clock()]);
         if (!challenge)
             return this.domainVerificationResult(token, challengeId);
         await this.orgAdmin(token, challenge.organizationId);
@@ -346,18 +366,18 @@ export class Admin {
             id: string;
             organizationId: string;
             revokedAt: number | null;
-        }>(this.db, 'SELECT id,organization_id AS organizationId,revoked_at AS revokedAt FROM domains WHERE name=? AND revoked_at IS NULL', [challenge!.domain]);
+        }>(this.db, 'SELECT id,organization_id AS "organizationId",revoked_at AS "revokedAt" FROM memory_identity.domains WHERE name=? AND revoked_at IS NULL', [challenge!.domain]);
         if (existing && existing.organizationId !== org)
             fail(409, 'domain_already_claimed');
         const at = this.clock(), domainId = existing?.id ?? crypto.randomUUID(), verification = crypto.randomUUID();
-        const command = stmt(this.db, `/* domain-verification-command */ INSERT INTO release_domain_verifications
+        const command = stmt(this.db, `/* domain-verification-command */ INSERT INTO memory_identity.domain_verifications
                 (id,challenge_id,domain_id,actor_credential_id,membership_id,created_at,verified_until)
-                SELECT ?,p.id,coalesce((SELECT d.id FROM domains d WHERE d.name=p.domain AND d.revoked_at IS NULL),?),
+                SELECT ?,p.id,coalesce((SELECT d.id FROM memory_identity.domains d WHERE d.name=p.domain AND d.revoked_at IS NULL),?),
                     c.id,m.id,${sqlNow()},${sqlNow()}+2592000000
-                FROM release_domain_challenges p JOIN active_credentials c ON c.account_id=p.actor_account_id
-                JOIN active_memberships m ON m.account_id=c.account_id AND m.organization_id=p.organization_id
+                FROM memory_identity.domain_challenges p JOIN memory_identity.active_credentials c ON c.account_id=p.actor_account_id
+                JOIN memory_identity.active_memberships m ON m.account_id=c.account_id AND m.organization_id=p.organization_id
                 WHERE p.id=? AND p.actor_account_id=? AND p.used_at IS NULL AND p.verification_id IS NULL AND p.expires_at>${sqlNow()}
-                  AND ${adminSql()} AND NOT EXISTS(SELECT 1 FROM release_domain_verifications v WHERE v.challenge_id=p.id)`,
+                  AND ${adminSql()} AND NOT EXISTS(SELECT 1 FROM memory_identity.domain_verifications v WHERE v.challenge_id=p.id)`,
                 [verification, domainId, at, at, challengeId, actor.accountId, at, ...adminValues(hash, at, org)]);
         try {
             const written = await command.run();
@@ -372,24 +392,24 @@ export class Admin {
         const hash = await tokenHash(token);
         await interactive(this.db, token, this.clock, true);
         const domain = id(domainId), target = id(membershipId);
-        const authorized = `FROM domains d JOIN active_memberships own ON own.organization_id=d.organization_id JOIN domain_managers manager ON manager.domain_id=d.id AND manager.membership_id=own.id AND manager.revoked_at IS NULL
-   JOIN active_credentials c ON c.account_id=own.account_id JOIN active_memberships target ON target.organization_id=d.organization_id
+        const authorized = `FROM memory_identity.domains d JOIN memory_identity.active_memberships own ON own.organization_id=d.organization_id JOIN memory_identity.domain_managers manager ON manager.domain_id=d.id AND manager.membership_id=own.id AND manager.revoked_at IS NULL
+   JOIN memory_identity.active_credentials c ON c.account_id=own.account_id JOIN memory_identity.active_memberships target ON target.organization_id=d.organization_id
    WHERE d.id=? AND target.id=? AND d.revoked_at IS NULL AND d.verified_until>${sqlNow()} AND own.expires_at>${sqlNow()} AND target.expires_at>${sqlNow()} AND own.role IN ('owner','admin') AND target.role IN ('owner','admin') AND c.token_digest=? AND c.expires_at>${sqlNow()} AND c.membership_expires_at>${sqlNow()} AND ${recentSql()}`;
         const values = (at: number) => [domain, target, at, at, at, hash, at, at, at - 300000, at];
         // Never replace a retained assignment, including a revoked one. This
         // predicate also makes concurrent first requests converge on one row.
-        const r = await this.db.prepare(`INSERT INTO domain_managers(domain_id,membership_id)
+        const r = await this.db.prepare(`INSERT INTO memory_identity.domain_managers(domain_id,membership_id)
    SELECT d.id,target.id ${authorized}
-     AND NOT EXISTS(SELECT 1 FROM domain_managers existing WHERE existing.domain_id=d.id AND existing.membership_id=target.id)`)
+     AND NOT EXISTS(SELECT 1 FROM memory_identity.domain_managers existing WHERE existing.domain_id=d.id AND existing.membership_id=target.id)`)
             .bind(...values(this.clock())).run();
         if (!r.success)
             fail(503, 'database_unavailable');
         if (r.meta.changes)
             return;
         const existing = await one<{ expiresAt: number; reauthenticatedAt: number }>(this.db, `/* domain-delegation-replay */
-            SELECT min(d.verified_until,own.expires_at,target.expires_at,c.expires_at,c.membership_expires_at) AS expiresAt,
-                c.reauthenticated_at AS reauthenticatedAt ${authorized}
-                AND EXISTS(SELECT 1 FROM domain_managers existing WHERE existing.domain_id=d.id
+            SELECT least(d.verified_until,own.expires_at,target.expires_at,c.expires_at,c.membership_expires_at) AS "expiresAt",
+                c.reauthenticated_at AS "reauthenticatedAt" ${authorized}
+                AND EXISTS(SELECT 1 FROM memory_identity.domain_managers existing WHERE existing.domain_id=d.id
                     AND existing.membership_id=target.id AND existing.revoked_at IS NULL)`, values(this.clock()));
         const checkedAt = this.clock();
         if (!existing || existing.expiresAt <= checkedAt || existing.reauthenticatedAt < checkedAt - 300000 || existing.reauthenticatedAt > checkedAt)
@@ -400,7 +420,7 @@ export class Admin {
         if (!/^\d{10}$/.test(timestamp) || !equal(await hmac(this.env.IDENTITY_WEBHOOK_SECRET ?? '', timestamp + '.' + raw), sig) || Math.abs(this.clock() / 1000 - Number(timestamp)) > 300)
             fail(401, 'invalid_signature');
         const event = requestObject(raw);
-        if (event.version === 2) return receiveLifecycle(this.db, this.clock, event, raw, Number(timestamp) * 1000);
+        if (event.version === 2) return receiveLifecycle(this.db, this.clock, event, raw, Number(timestamp) * 1000, this.capture);
         if (event.version !== undefined && event.version !== 1) fail(400, 'unsupported_identity_event');
         const eventId = id(event.id), subject = str(event.subject, 512), kind = str(event.type, 64);
         if (event.issuer !== ISSUER || !['email.revoked', 'account.disabled'].includes(kind))
@@ -408,7 +428,7 @@ export class Admin {
         const hash = await digest(raw);
         const existing = await one<{
             hash: string;
-        }>(this.db, "SELECT body_hash AS hash FROM release_webhook_events WHERE provider='identity' AND event_id=?", [eventId]);
+        }>(this.db, "SELECT body_hash AS hash FROM memory_ops.webhook_events WHERE provider='identity' AND event_id=?", [eventId]);
         if (existing) {
             if (existing.hash !== hash)
                 fail(409, 'webhook_conflict');
@@ -418,39 +438,28 @@ export class Admin {
         if (Math.abs(at / 1000 - Number(timestamp)) > 300)
             fail(401, 'invalid_signature');
         const revokedAddress = kind === 'email.revoked' ? email(event.email) : '';
-        const receipt = `EXISTS(SELECT 1 FROM release_webhook_events WHERE provider='identity' AND event_id=? AND body_hash=?)`;
-        const statements = [stmt(this.db, `INSERT INTO release_webhook_events(provider,event_id,body_hash,created_at) SELECT 'identity',?,?,? WHERE ${sqlNow()} BETWEEN ? AND ?`, [eventId, hash, at, at, Number(timestamp) * 1000 - 300000, Number(timestamp) * 1000 + 300000]),
-            stmt(this.db, `INSERT INTO release_provider_revocations(issuer,subject,kind,address,created_at) SELECT ?,?,?,?,? WHERE ${receipt} ON CONFLICT(issuer,subject,kind,address) DO NOTHING`, [ISSUER,subject,kind,revokedAddress,at,eventId,hash])];
-        // Resolve the mapping in the same atomic batch as the receipt and
-        // tombstone. A first sign-in may have committed since this request began.
-        if (kind === 'account.disabled') {
-            statements.push(stmt(this.db, `UPDATE accounts SET disabled_at=? WHERE disabled_at IS NULL
-                AND id IN (SELECT account_id FROM provider_identities WHERE issuer=? AND subject=?) AND ${receipt}`, [at, ISSUER, subject, eventId, hash]));
-        } else {
-            statements.push(
-                stmt(this.db, `INSERT INTO release_external_email_blocks(account_id,address,created_at)
-                    SELECT account_id,?,? FROM provider_identities WHERE issuer=? AND subject=? AND ${receipt}
-                    ON CONFLICT(account_id,address) DO NOTHING`, [revokedAddress, at, ISSUER, subject, eventId, hash]),
-                stmt(this.db, `UPDATE account_emails SET revoked_at=? WHERE address=? AND revoked_at IS NULL
-                    AND account_id IN (SELECT account_id FROM provider_identities WHERE issuer=? AND subject=?) AND ${receipt}`, [at, revokedAddress, ISSUER, subject, eventId, hash]),
-                stmt(this.db, `UPDATE email_challenges SET invalidated_at=${sqlNow()} WHERE used_at IS NULL AND invalidated_at IS NULL
-                    AND address=? AND account_id IN (SELECT account_id FROM provider_identities WHERE issuer=? AND subject=?)
-                    AND ${receipt}`, [at, revokedAddress, ISSUER, subject, eventId, hash])
-            );
-        }
+        const receipt = `EXISTS(SELECT 1 FROM memory_ops.webhook_events WHERE provider='identity' AND event_id=? AND body_hash=?)`;
+        // The apply resolves the provider mapping owner-side inside the same
+        // atomic batch as the receipt and tombstone; a missing receipt leaves
+        // it inert. A first sign-in may have committed since this request
+        // began, so the mapping cannot be resolved ahead of the batch.
+        const statements = [stmt(this.db, `INSERT INTO memory_ops.webhook_events(provider,event_id,body_hash,created_at) SELECT 'identity',?,?,? WHERE ${sqlNow()} BETWEEN ? AND ?`, [eventId, hash, at, at, Number(timestamp) * 1000 - 300000, Number(timestamp) * 1000 + 300000]),
+            stmt(this.db, `INSERT INTO memory_ops.provider_revocations(issuer,subject,kind,address,created_at_ms) SELECT ?,?,?,?,? WHERE ${receipt} ON CONFLICT(issuer,subject,kind,address) DO NOTHING`, [ISSUER,subject,kind,revokedAddress,at,eventId,hash]),
+            stmt(this.db, 'SELECT memory_ops.apply_provider_revocation(?,?,?,?,?,?,?)', [ISSUER, subject, kind, revokedAddress, at, eventId, hash])];
         try {
-            await batch(this.db, statements);
+            await batch(this.db, this.capture ? this.capture.providerV1Statements(this.db,
+                { eventId, issuer: ISSUER, subject, address: revokedAddress, kind, hash }, statements) : statements);
         }
         catch (error) {
             const accepted = await one<{
                 hash: string;
-            }>(this.db, "SELECT body_hash AS hash FROM release_webhook_events WHERE provider='identity' AND event_id=?", [eventId]);
+            }>(this.db, "SELECT body_hash AS hash FROM memory_ops.webhook_events WHERE provider='identity' AND event_id=?", [eventId]);
             if (!accepted)
                 throw error;
             if (accepted.hash !== hash)
                 fail(409, 'webhook_conflict');
         }
-        if (!await one(this.db, `SELECT event_id FROM release_webhook_events WHERE provider='identity' AND event_id=? AND body_hash=?`, [eventId, hash]))
+        if (!await one(this.db, `SELECT event_id FROM memory_ops.webhook_events WHERE provider='identity' AND event_id=? AND body_hash=?`, [eventId, hash]))
             fail(401, 'invalid_signature');
         return json({ received: true });
     }
@@ -460,10 +469,19 @@ export class Admin {
         expiresAt: number;
     }> {
         await this.orgAdmin(token, org);
-        const raw = 'scim_' + randomToken(), keyId = crypto.randomUUID(), hash = await tokenHash(token), keyHash = await tokenHash(raw), at = this.clock();
-        const r = await this.db.prepare(`INSERT INTO release_scim_keys
+        // A SCIM key is an org-administration grant: the actor and the
+        // organization must both hold a live enrollment in this region.
+        const hash = await tokenHash(token), at = this.clock();
+        const actor = await one<{ accountId: string }>(this.db,
+            `SELECT account_id AS "accountId" FROM memory_identity.active_credentials WHERE token_digest=? AND expires_at>${sqlNow()}`,
+            [hash, at]);
+        if (actor !== null && (!await accountGrantAdmission(this.db, this.env.CONTROL_DB, actor.accountId)
+            || !await organizationGrantAdmission(this.db, this.env.CONTROL_DB, org)))
+            fail(403, 'enrollment_required');
+        const raw = 'scim_' + randomToken(), keyId = crypto.randomUUID(), keyHash = await tokenHash(raw);
+        const r = await this.db.prepare(`INSERT INTO memory_identity.scim_keys
             (id,organization_id,token_digest,creator_credential_id,expires_at,creator_membership_id,creator_email_id,created_at)
-   SELECT ?,m.organization_id,?,c.id,?,m.id,m.email_id,? FROM active_credentials c JOIN active_memberships m ON m.account_id=c.account_id WHERE ${adminSql()}`).bind(keyId, keyHash, at + 30 * 86400000, at, ...adminValues(hash, at, org)).run();
+   SELECT ?,m.organization_id,?,c.id,?,m.id,m.email_id,? FROM memory_identity.active_credentials c JOIN memory_identity.active_memberships m ON m.account_id=c.account_id WHERE ${adminSql()}`).bind(keyId, keyHash, at + 30 * 86400000, at, ...adminValues(hash, at, org)).run();
         if (!r.success || !r.meta.changes)
             fail(403, 'access_denied');
         return { id: keyId, token: raw, expiresAt: at + 30 * 86400000 };
@@ -471,8 +489,8 @@ export class Admin {
     async scimAuthority(token: string, org: string): Promise<void> {
         const hash = await tokenHash(token), at = this.clock();
         const key = await one<{ expiresAt: number; membershipExpiresAt: number }>(this.db,
-            `SELECT k.id,k.expires_at AS expiresAt,m.expires_at AS membershipExpiresAt FROM release_scim_keys k JOIN credentials issuer ON issuer.id=k.creator_credential_id
-            JOIN active_memberships m ON m.id=k.creator_membership_id AND m.account_id=issuer.account_id
+            `SELECT k.id,k.expires_at AS "expiresAt",m.expires_at AS "membershipExpiresAt" FROM memory_identity.scim_keys k JOIN memory_identity.runtime_credentials issuer ON issuer.id=k.creator_credential_id
+            JOIN memory_identity.active_memberships m ON m.id=k.creator_membership_id AND m.account_id=issuer.account_id
                 AND m.email_id=k.creator_email_id AND m.organization_id=k.organization_id
             WHERE k.token_digest=? AND k.organization_id=? AND k.revoked_at IS NULL AND k.expires_at>${sqlNow()}
                 AND m.expires_at>${sqlNow()} AND m.role IN ('owner','admin')`, [hash, id(org), at, at]);
@@ -482,26 +500,22 @@ export class Admin {
     async scimDeactivate(token: string, org: string, membershipId: string): Promise<ScimUser> {
         await this.scimAuthority(token, org);
         const hash = await tokenHash(token), at = this.clock();
-        const result = await this.db.prepare(`UPDATE memberships SET revoked_at=? WHERE id=? AND organization_id=? AND revoked_at IS NULL
-            AND ${scimVisible('memberships')}
-            AND EXISTS(SELECT 1 FROM release_scim_keys k JOIN credentials issuer ON issuer.id=k.creator_credential_id
-                JOIN active_memberships admin ON admin.id=k.creator_membership_id AND admin.account_id=issuer.account_id
-                    AND admin.email_id=k.creator_email_id AND admin.organization_id=k.organization_id
-                WHERE k.token_digest=? AND k.organization_id=memberships.organization_id AND k.revoked_at IS NULL AND k.expires_at>${sqlNow()}
-                    AND admin.expires_at>${sqlNow()} AND admin.role IN ('owner','admin')
-                    AND (memberships.role<>'owner' OR (admin.role='owner' AND EXISTS(
-                        SELECT 1 FROM active_memberships other WHERE other.organization_id=memberships.organization_id
-                            AND other.role='owner' AND other.expires_at>${sqlNow()} AND other.id<>memberships.id))))
-            RETURNING id,(SELECT address FROM account_emails WHERE id=memberships.email_id) AS userName,0 AS active`)
-            .bind(at, id(membershipId), id(org), hash, at, at, at).first<ScimUser>();
+        // Deactivation keeps the member SCIM-visible, so it cannot ride the
+        // scim_deletions record; the definer re-evaluates the key,
+        // administrator and owner predicate owner-side and returns the row.
+        const sql = `SELECT id,"userName",active FROM memory_identity.scim_deactivate(?,?,?,?)`;
+        const values = [id(membershipId), id(org), hash, at];
+        const result = this.capture
+            ? ((await this.capture.ordinaryCommand(this.db, { commandType: 'scim-deactivate', entityId: membershipId, receiptId: null, actorDigest: hash, commandAt: at, organizationId: org }, sql, values)).results[0] as ScimUser | undefined) ?? null
+            : await this.db.prepare(sql).bind(...values).first<ScimUser>();
         if (result) return result;
         {
             // A repeated deactivation of the same already-revoked member is
             // idempotent. Live owner/authority denials must not look successful.
             await this.scimAuthority(token, org);
             const target = await one<ScimUser & { revokedAt: number | null }>(this.db,
-                `SELECT id,(SELECT address FROM account_emails WHERE id=memberships.email_id) AS userName,0 AS active,revoked_at AS revokedAt
-                 FROM memberships WHERE id=? AND organization_id=? AND ${scimVisible('memberships')}`, [membershipId, org]);
+                `SELECT id,(SELECT address FROM memory_identity.runtime_account_emails WHERE id=memberships.email_id) AS "userName",0 AS active,revoked_at AS "revokedAt"
+                 FROM memory_identity.runtime_memberships memberships WHERE id=? AND organization_id=? AND ${scimVisible('memberships')}`, [membershipId, org]);
             if (!target)
                 fail(404, 'scim_user_not_found');
             if (target.revokedAt === null)
@@ -513,18 +527,20 @@ export class Admin {
     async scimDelete(token: string, org: string, membershipId: string): Promise<void> {
         await this.scimAuthority(token, org);
         const hash = await tokenHash(token);
-        if (!await one(this.db, `SELECT id FROM memberships WHERE id=? AND organization_id=?
+        if (!await one(this.db, `SELECT id FROM memory_identity.runtime_memberships memberships WHERE id=? AND organization_id=?
             AND ${scimVisible('memberships')}`, [id(membershipId), id(org)]))
             fail(404, 'scim_user_not_found');
         const at = this.clock();
         // The tombstone trigger rechecks the exact key, current administrator and
         // owner rule, then revokes the membership in this same transaction.
-        await batch(this.db, [stmt(this.db, `INSERT INTO release_scim_deletions(membership_id,scim_key_id,deleted_at)
-            SELECT target.id,k.id,? FROM memberships target JOIN release_scim_keys k ON k.organization_id=target.organization_id
+        const sql = `INSERT INTO memory_identity.scim_deletions(membership_id,scim_key_id,deleted_at)
+            SELECT target.id,k.id,? FROM memory_identity.runtime_memberships target JOIN memory_identity.scim_keys k ON k.organization_id=target.organization_id
             WHERE target.id=? AND target.organization_id=? AND k.token_digest=?
-              AND ${scimVisible('target')}`,
-            [at, membershipId, org, hash])]);
-        if (!await one(this.db, 'SELECT membership_id FROM release_scim_deletions WHERE membership_id=?', [membershipId]))
+              AND ${scimVisible('target')}`;
+        const values = [at, membershipId, org, hash];
+        const command = stmt(this.db, sql, values);
+        await batch(this.db, this.capture ? this.capture.ordinaryStatements(this.db, { commandType: 'scim-delete', entityId: membershipId, receiptId: null, actorDigest: hash, commandAt: at, organizationId: org }, command) : [command]);
+        if (!await one(this.db, 'SELECT membership_id FROM memory_identity.scim_deletions WHERE membership_id=?', [membershipId]))
             fail(403, 'membership_deletion_denied');
     }
     async scim(request: Request, org: string, membershipId?: string): Promise<Response> {
@@ -543,7 +559,7 @@ export class Admin {
                 id: string;
                 userName: string;
                 activeUntil: number;
-            }>(this.db, `SELECT m.id,e.address AS userName,coalesce((SELECT live.expires_at FROM active_memberships live WHERE live.id=m.id),0) AS activeUntil FROM memberships m JOIN account_emails e ON e.id=m.email_id WHERE m.organization_id=?
+            }>(this.db, `SELECT m.id,e.address AS "userName",coalesce((SELECT live.expires_at FROM memory_identity.active_memberships live WHERE live.id=m.id),0) AS "activeUntil" FROM memory_identity.runtime_memberships m JOIN memory_identity.runtime_account_emails e ON e.id=m.email_id WHERE m.organization_id=?
                 AND ${scimVisible('m')}
                 ${membershipId ? 'AND m.id=?' : ''} ORDER BY m.id LIMIT ? OFFSET ?`, [org, ...(membershipId ? [id(membershipId)] : []), count, start - 1]);
             const resources = () => { const at = this.clock(); return values.map(value => project({ id: value.id, userName: value.userName, active: value.activeUntil > at ? 1 : 0 })); };
@@ -556,13 +572,13 @@ export class Admin {
             }
             const total = await one<{
                 n: number;
-            }>(this.db, `SELECT count(*) AS n FROM memberships WHERE organization_id=? AND ${scimVisible('memberships')}`, [org]);
+            }>(this.db, `SELECT count(*) AS n FROM memory_identity.runtime_memberships memberships WHERE organization_id=? AND ${scimVisible('memberships')}`, [org]);
             await this.scimAuthority(bearer, org);
             return json({ schemas: ['urn:ietf:params:scim:api:messages:2.0:ListResponse'], totalResults: total?.n ?? 0, startIndex: start, itemsPerPage: values.length, Resources: resources() }, 200, { 'content-type': 'application/scim+json; charset=utf-8' });
         }
         if (!membershipId)
             fail(404, 'scim_user_not_found');
-        if (!await one(this.db, `SELECT id FROM memberships WHERE id=? AND organization_id=?
+        if (!await one(this.db, `SELECT id FROM memory_identity.runtime_memberships memberships WHERE id=? AND organization_id=?
             AND ${scimVisible('memberships')}`, [id(membershipId), org]))
             fail(404, 'scim_user_not_found');
         if (request.method === 'PATCH') {

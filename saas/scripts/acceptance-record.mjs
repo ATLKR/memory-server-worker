@@ -65,7 +65,9 @@ export async function signAcceptanceRecord({ record, target, source, schemas, pr
   if (source.dirty || !/^[a-f\d]{40}$/.test(source.revision)) fail('Signing requires clean, committed source.');
   if (!object(record) || record.format !== 2 || record.profile !== GA_PROFILE || record.id === 'REPLACE-WITH-RECORD-ID' || !/^[A-Za-z\d][A-Za-z\d._:-]{0,127}$/.test(record.id ?? '')) fail('Invalid acceptance record identity or profile.');
   if (Object.entries(expected).some(([key, value]) => record[key] !== value)) fail('Acceptance record does not match the current source, schemas or deployment target.');
-  if (!date(schemas.centralSchemaVersion) || !date(schemas.hotSchemaVersion)) fail('Invalid acceptance schema versions.');
+  // Postgres-only deployments carry no hot shard schema: hotSchemaVersion 0
+  // is the attested "no hot store" value, not a missing version.
+  if (!date(schemas.centralSchemaVersion) || (schemas.hotSchemaVersion !== 0 && !date(schemas.hotSchemaVersion))) fail('Invalid acceptance schema versions.');
   const variables = target.config.vars;
   const budget = variables.AI_MONTHLY_BUDGET_MICROUSD ?? '';
   const cap = target.environment === 'production' ? 20000000 : target.environment === 'staging' ? 200000 : 0;
@@ -128,7 +130,7 @@ async function sourceSchemas() {
     if (!versions.length) fail('No source migrations found for acceptance.');
     return Math.max(...versions);
   };
-  return { centralSchemaVersion: await version('migrations'), hotSchemaVersion: await version('shard-migrations') };
+  return { centralSchemaVersion: await version('d1-migrations'), hotSchemaVersion: await version('d1-shard-migrations') };
 }
 
 async function privateOutput(path) {

@@ -173,6 +173,9 @@ export function createMemoryApi(db: IdentityDatabase, clock: () => number = Date
       if (error instanceof IdentityDenied || error instanceof MemoryDenied) return json({ error: 'access_denied' }, 403);
       if (error instanceof MemoryConflict) return json({ error: 'revision_conflict' }, 409);
       // Never log/reflect database errors, request text, tokens or memory bodies.
+      const kind = error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' && /^[A-Za-z0-9_:-]+$/.test(error.code) && error.code.length <= 96
+        ? error.code : error instanceof Error && /^[A-Za-z0-9_:-]+$/.test(error.name) ? error.name : 'unknown';
+      console.error('memory_internal_error', kind);
       return json({ error: 'internal_error' }, 500);
     }
   };

@@ -14,10 +14,10 @@ async function reviewable(t,spaceId='so') {
  return {...f,ingest,spaceId,ingestId:submitted.id};
 }
 
-function afterRead(db,boundary,mutate) {
+async function afterRead(db,boundary,mutate) {
  const prepare=db.prepare.bind(db);let changed=false;
- const prefix=boundary==='approved-replay'?'SELECT state,proposals,approval_hash':'SELECT result_ids AS resultIds';
- db.prepare=sql=>{
+ const prefix=boundary==='approved-replay'?'SELECT state,proposals,approval_hash':'SELECT result_ids AS "resultIds"';
+ db.prepare= sql=>{
   const statement=prepare(sql);
   if(sql.startsWith(prefix)) {
    const first=statement.first.bind(statement);
@@ -37,32 +37,32 @@ for(const boundary of ['approved-replay','committed-result'])for(const change of
   role:"UPDATE memberships SET role='member' WHERE id='m1'",
   expiry:"UPDATE credentials SET expires_at="+at+" WHERE id='session:alice'",
  };
- const changed=afterRead(f.db,boundary,()=>f.db.raw.exec(mutations[change]));
+ const changed=await afterRead(f.db,boundary,async ()=>(await f.db.raw.exec(mutations[change])));
  await assert.rejects(()=>f.ingest.approve(f.token,f.spaceId,f.ingestId,[0],'approve'),error=>error.status===403);
  assert.equal(changed(),true);
- assert.equal(f.db.raw.prepare('SELECT count(*) n FROM memories').get().n,1,'Already committed memory must remain committed');
- assert.equal(f.db.raw.prepare("SELECT count(*) n FROM release_operations WHERE action='approve_ingest'").get().n,1);
+ assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM memories').get()).n,1,'Already committed memory must remain committed');
+ assert.equal((await f.db.raw.prepare("SELECT count(*) n FROM release_operations WHERE action='approve_ingest'").get()).n,1);
 });
 
 test('overlapping same-key ingest approvals distinguish committed and replayed receipts',async t=>{
  const f=await reviewable(t);let winner;
- const changed=afterRead(f.db,'approved-replay',async()=>{winner=await f.ingest.approve(f.token,f.spaceId,f.ingestId,[0],'approve');});
+ const changed=await afterRead(f.db,'approved-replay',async()=>{winner=await f.ingest.approve(f.token,f.spaceId,f.ingestId,[0],'approve');});
  const replay=await f.ingest.approve(f.token,f.spaceId,f.ingestId,[0],'approve');
  assert.equal(changed(),true);assert.equal(winner.replayed,false);assert.equal(replay.replayed,true);
  assert.deepEqual(replay.memories,winner.memories);assert.equal(replay.memories.length,1);
- assert.equal(f.db.raw.prepare('SELECT count(*) n FROM memories').get().n,1);
- assert.equal(f.db.raw.prepare("SELECT sum(units) n FROM release_usage_events WHERE operation_id IN (SELECT id FROM release_operations WHERE action='approve_ingest')").get().n,1);
+ assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM memories').get()).n,1);
+ assert.equal((await f.db.raw.prepare("SELECT sum(units) n FROM release_usage_events WHERE operation_id IN (SELECT id FROM release_operations WHERE action='approve_ingest')").get()).n,1);
 });
 
 test('ingest approval and replay accept a current same-account session after original writer logout',async t=>{
  const f=await reviewable(t);
  const replacement='d'.repeat(64);
- f.db.raw.prepare("INSERT INTO credentials(id,account_id,kind,token_digest,expires_at,permission) VALUES('session:replacement','alice','session',?,?,'write')").run(await digest(replacement),at+900000);
- f.db.raw.exec("UPDATE credentials SET revoked_at=1 WHERE id='session:alice'");
+ (await f.db.raw.prepare("INSERT INTO credentials(id,account_id,kind,token_digest,expires_at,permission) VALUES('session:replacement','alice','session',?,?,'write')").run(await digest(replacement),at+900000));
+ (await f.db.raw.exec("UPDATE credentials SET revoked_at=1 WHERE id='session:alice'"));
  const first=await f.ingest.approve(replacement,f.spaceId,f.ingestId,[0],'approve');
  const replay=await f.ingest.approve(replacement,f.spaceId,f.ingestId,[0],'approve');
  assert.equal(first.replayed,false);assert.equal(replay.replayed,true);assert.deepEqual(replay.memories,first.memories);
- assert.equal(f.db.raw.prepare('SELECT actor_credential_id FROM memories').get().actor_credential_id,'session:replacement');
+ assert.equal((await f.db.raw.prepare('SELECT actor_credential_id FROM memories').get()).actor_credential_id,'session:replacement');
  await assert.rejects(()=>f.ingest.approve(f.other,f.spaceId,f.ingestId,[0],'approve'),error=>error.status===403);
  await assert.rejects(()=>f.ingest.approve(f.key,f.spaceId,f.ingestId,[0],'approve'),error=>error.status===403);
 });

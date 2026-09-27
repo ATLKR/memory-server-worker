@@ -6,9 +6,10 @@ import { WorkspaceService } from '../src/workspace.ts';
 import { createApplication } from '../src/app.ts';
 import { readSettings, PUBLIC_ORIGIN, AUTH_ISSUER, SERVICE_ID } from '../src/config.ts';
 import { SESSION_COOKIE } from '../src/auth.ts';
+import { renderManagement } from '../src/release/console.ts';
 
 async function fixture(t, options = {}) {
-  const f = createDatabase({ workspace: true }); t.after(f.close);
+  const f = await createDatabase(); t.after(f.close);
   const settings = readSettings({ SSO_CLIENT_ID: 'test-client', ...options.vars });
   let now = NOW;
   const workspace = new WorkspaceService(f.db, () => now);
@@ -21,7 +22,8 @@ async function fixture(t, options = {}) {
       ...(data !== undefined ? { body: typeof data === 'string' ? data : JSON.stringify(data) } : {}),
     }));
   }
-  return { ...f, settings, workspace, session, cookie, app, request, setNow: at => { now = at; } };
+  return { ...f, settings, workspace, session, cookie, app, request,
+    setNow: async at => { now = at; await f.setClockValue(at); } };
 }
 const sameOrigin = { origin: PUBLIC_ORIGIN };
 
@@ -64,6 +66,23 @@ test('console branding can change while stable origin, identity and stored memor
   assert.equal(metadata.resource_name, 'Future Registered Brand'); assert.equal(metadata.resource, PUBLIC_ORIGIN);
 });
 
+test('region path prefix reaches every URL the rendered pages and served bundles emit', async t => {
+  const f = await fixture(t, { vars: { PUBLIC_PATH: '/kr-seoul' } });
+  const html = await (await f.app(new Request(PUBLIC_ORIGIN + '/'))).text();
+  assert.match(html, /src="\/kr-seoul\/assets\/app\.js"/);
+  assert.match(html, /href="\/kr-seoul\/assets\/app\.css"/);
+  assert.match(html, /href="\/kr-seoul\/auth\/login"/);
+  assert.match(html, /data-mcp-endpoint="https:\/\/memory\.allenlabs\.org\/kr-seoul\/mcp"/);
+  const script = await (await f.app(new Request(PUBLIC_ORIGIN + '/assets/app.js'))).text();
+  assert.match(script, /const BASE='\/kr-seoul'/);
+  assert.ok(!script.includes('__PUBLIC_PATH__'));
+  const manage = renderManagement(f.settings.brand, f.settings.origin + f.settings.publicPath);
+  assert.match(manage, /src="\/kr-seoul\/assets\/release\.js"/);
+  assert.match(manage, /href="\/kr-seoul\/auth\/login"/);
+  assert.match(manage, /href="\/kr-seoul\/"/);
+  assert.ok(!manage.includes('__PUBLIC_PATH__'));
+});
+
 test('browser CSRF, invalid Host/Origin, missing authentication and duplicate cookies fail closed', async t => {
   const f = await fixture(t);
   const data = { name: 'Forged', emailId: 'x' };
@@ -74,7 +93,7 @@ test('browser CSRF, invalid Host/Origin, missing authentication and duplicate co
   assert.equal((await f.app(new Request('https://different.example/v1/workspace', { headers: { cookie: f.cookie } }))).status, 421);
   const anonymousMcp = await f.request('/mcp', { method: 'POST', data: {}, authenticated: true });
   assert.equal(anonymousMcp.status, 401); assert.match(anonymousMcp.headers.get('www-authenticate'), /oauth-protected-resource/);
-  f.setNow(NOW + 900001); assert.equal((await f.request('/v1/workspace')).status, 401);
+  await f.setNow(NOW + 900001); assert.equal((await f.request('/v1/workspace')).status, 401);
 });
 
 test('workspace owner can issue, use and revoke personal key across REST and MCP', async t => {
@@ -126,7 +145,7 @@ test('real signed OAuth callback provisions stable browser account; external gra
   const spaces = await (await f.request('/v1/spaces', { authenticated: false, headers: external })).json();
   assert.equal(spaces.results[0].id, snap.spaces[0].id);
   assert.equal((await f.request('/v1/spaces', { method: 'POST', authenticated: false, headers: external, data: { name: 'Escalated workspace' } })).status, 403);
-  const dbSession = f.raw.prepare("SELECT reauthenticated_at FROM credentials WHERE account_id=? LIMIT 1").get(snap.account.id);
+  const dbSession = await f.raw.prepare("SELECT reauthenticated_at FROM memory_identity.credentials WHERE account_id=? LIMIT 1").get(snap.account.id);
   assert.equal(dbSession.reauthenticated_at, null);
   const logout = await f.request('/auth/logout', { method: 'POST', headers: { ...sameOrigin, cookie: sessionCookie } }); assert.equal(logout.status, 303);
   assert.equal((await f.request('/v1/workspace', { headers: { cookie: sessionCookie } })).status, 401);

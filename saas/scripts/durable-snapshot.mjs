@@ -1,5 +1,5 @@
-import { parseDurableSqlIdentity, durableSqlObjectName } from '../src/durable-sql/types.ts';
-import { snapshotCanonical, snapshotHash, validateSnapshotPlan } from '../src/durable-sql/snapshot.ts';
+import { parseDurableSqlIdentity, durableSqlObjectName } from '../src/deprecated-durable-sql/types.ts';
+import { snapshotCanonical, snapshotHash, validateSnapshotPlan } from '../src/deprecated-durable-sql/snapshot.ts';
 import { createHash } from 'node:crypto';
 
 const limits = Object.freeze({ totalBytes: 16 * 1024 * 1024, rows: 100000, chunkBytes: 524288, chunkRows: 500, chunks: 1000 });

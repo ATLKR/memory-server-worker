@@ -10,7 +10,15 @@ export async function inspectStorage(env: ReleaseEnv): Promise<StorageReadiness>
     const result = { ready: false, hotSchemaVersion: 1, resourceFingerprint: BUILD_FINGERPRINT };
     try {
         const storage = new PayloadStore(env);
-        if (!storage.enabled || storage.shardIds().length < 2 || !env.MEMORY_PAYLOADS) return result;
+        if (!env.MEMORY_PAYLOADS) return result;
+        if (!storage.enabled) {
+            // Inline payload storage keeps bytes in the durable database —
+            // the schema probe covers it; only the bucket remains external.
+            if (env.STORAGE_MODE !== 'inline') return result;
+            await deadline(env.MEMORY_PAYLOADS.head('_health/provider-probe'), 3000);
+            return { ready: true, hotSchemaVersion: 0, resourceFingerprint: BUILD_FINGERPRINT };
+        }
+        if (storage.shardIds().length < 2) return result;
         if (env.MEMORY_SQL_BACKEND === 'durable') {
             // The adapter checks the object's immutable identity, epoch and
             // sealed ready state in this same SQL transaction. A configured

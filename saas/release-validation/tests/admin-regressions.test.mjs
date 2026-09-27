@@ -10,25 +10,15 @@ import {digest, hmac} from '../../src/release/util.ts';
 
 const principal=subject=>({issuer:'https://auth-api.allen.company',subject,email:subject+'@corp.example',emailVerified:true,permission:'write',expiresAt:NOW+900000});
 async function fixture(t){
-  const f=createDatabase({workspace:true}); t.after(f.close);
-  f.raw.exec(readFileSync(new URL('../../release-schema.sql',import.meta.url),'utf8'));
-  f.raw.exec(readFileSync(new URL('../../maintenance-schema.sql',import.meta.url),'utf8'));
-  f.raw.exec(readFileSync(new URL('../../checkout-schema.sql',import.meta.url),'utf8'));
-  f.raw.exec(readFileSync(new URL('../../job-progress-schema.sql',import.meta.url),'utf8'));
-  f.raw.exec(readFileSync(new URL('../../protocol-schema.sql',import.meta.url),'utf8'));
-  f.raw.exec(readFileSync(new URL('../../pagination-schema.sql',import.meta.url),'utf8'));
-  f.raw.exec(readFileSync(new URL('../../lookup-schema.sql',import.meta.url),'utf8'));
-  f.raw.exec(readFileSync(new URL('../../key-lookup-schema.sql',import.meta.url),'utf8'));
-  f.raw.exec(readFileSync(new URL('../../tenant-queue-schema.sql',import.meta.url),'utf8'));
-  f.raw.exec(readFileSync(new URL('../../workspace-lookup-schema.sql',import.meta.url),'utf8'));
-  f.raw.exec(readFileSync(new URL('../../retrieval-progress-schema.sql',import.meta.url),'utf8'));
-  f.raw.exec(readFileSync(new URL('../../vector-reconciliation-schema.sql',import.meta.url),'utf8'));
-  f.raw.exec(readFileSync(new URL('../../outbound-share-schema.sql',import.meta.url),'utf8'));
-  for(const schema of ['execution-time','domain-verification','domain-retention','payload','operational','lifecycle','queue-episode'])
-    f.raw.exec(readFileSync(new URL('../../'+schema+'-schema.sql',import.meta.url),'utf8'));
-  f.db.batch=async statements=>{f.raw.exec('BEGIN IMMEDIATE');try{const results=[];for(const statement of statements)results.push(await statement.all());f.raw.exec('COMMIT');return results;}catch(error){f.raw.exec('ROLLBACK');throw error;}};
+  const f=await createDatabase(); t.after(f.close);
+  // The lifecycle-journal staleness gate denies provider-bound accounts whose
+  // issuer has no fresh apply-head; these tests do not exercise lifecycle.
+  await f.raw.prepare('INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES(?,0,?)')
+    .run('https://auth-api.allen.company',9007199254740991);
+  await f.raw.prepare("INSERT INTO memory_ops.lifecycle_apply_head(issuer,applied_sequence,applied_at_ms) VALUES('memory:control',0,?)")
+    .run(9007199254740991);
   const workspace=new WorkspaceService(f.db,()=>NOW),owner=await workspace.signIn(principal('owner'));
-  f.raw.prepare('UPDATE credentials SET reauthenticated_at=? WHERE token_digest=?').run(NOW,await digest(owner.token));
+  (await f.raw.prepare('UPDATE credentials SET reauthenticated_at=? WHERE token_digest=?').run(NOW,await digest(owner.token)));
   const snapshot=await workspace.snapshot(owner.token),org=await workspace.createOrganization(owner.token,{name:'Root',emailId:snapshot.account.emails[0].id});
   return {...f,workspace,owner,snapshot,org,admin:new Admin({DB:f.db},()=>NOW)};
 }
@@ -40,45 +30,42 @@ const forbidden=fn=>assert.rejects(fn,error=>[401,403].includes(error.status));
 
 test('SCIM keys cannot regain authority through a new membership or email claim',async t=>{
   const f=await fixture(t),key=await f.admin.issueScimKey(f.owner.token,f.org.id);
-  const original=f.raw.prepare('SELECT * FROM memberships WHERE organization_id=?').get(f.org.id);
-  f.raw.prepare('UPDATE account_emails SET revoked_at=? WHERE id=?').run(NOW,original.email_id);
+  const original=(await f.raw.prepare('SELECT * FROM memberships WHERE organization_id=?').get(f.org.id));
+  (await f.raw.prepare('UPDATE account_emails SET revoked_at=? WHERE id=?').run(NOW,original.email_id));
   await forbidden(()=>f.admin.scimAuthority(key.token,f.org.id));
-  f.raw.prepare('INSERT INTO account_emails(id,account_id,address,domain,verified_at) VALUES(?,?,?,?,?)').run('new-claim',f.owner.accountId,'owner@corp.example','corp.example',NOW);
-  f.raw.prepare('INSERT INTO memberships(id,organization_id,account_id,email_id,role) VALUES(?,?,?,?,?)').run('new-membership',f.org.id,f.owner.accountId,'new-claim','owner');
+  (await f.raw.prepare('INSERT INTO account_emails(id,account_id,address,domain,verified_at) VALUES(?,?,?,?,?)').run('new-claim',f.owner.accountId,'owner@corp.example','corp.example',NOW));
+  (await f.raw.prepare('INSERT INTO memberships(id,organization_id,account_id,email_id,role) VALUES(?,?,?,?,?)').run('new-membership',f.org.id,f.owner.accountId,'new-claim','owner'));
   await forbidden(()=>f.admin.scimAuthority(key.token,f.org.id));
-  assert.equal(f.raw.prepare('SELECT revoked_at FROM release_scim_keys WHERE id=?').get(key.id).revoked_at,NOW);
+  assert.equal((await f.raw.prepare('SELECT revoked_at FROM release_scim_keys WHERE id=?').get(key.id)).revoked_at,NOW);
 });
 
 test('SCIM protects the final owner and requires owner authority to remove another owner',async t=>{
   const f=await fixture(t),key=await f.admin.issueScimKey(f.owner.token,f.org.id);
-  const original=f.raw.prepare('SELECT id FROM memberships WHERE organization_id=?').get(f.org.id).id;
+  const original=(await f.raw.prepare('SELECT id FROM memberships WHERE organization_id=?').get(f.org.id)).id;
   await forbidden(()=>f.admin.scimDeactivate(key.token,f.org.id,original));
   const second=await f.workspace.signIn(principal('second'));
   const secondSnapshot=await f.workspace.snapshot(second.token);
-  f.raw.prepare('INSERT INTO memberships(id,organization_id,account_id,email_id,role) VALUES(?,?,?,?,?)').run('second-owner',f.org.id,second.accountId,secondSnapshot.account.emails[0].id,'owner');
-  f.raw.prepare("UPDATE memberships SET role='admin' WHERE id=?").run(original);
+  (await f.raw.prepare('INSERT INTO memberships(id,organization_id,account_id,email_id,role) VALUES(?,?,?,?,?)').run('second-owner',f.org.id,second.accountId,secondSnapshot.account.emails[0].id,'owner'));
+  (await f.raw.prepare("UPDATE memberships SET role='admin' WHERE id=?").run(original));
   await forbidden(()=>f.admin.scimDeactivate(key.token,f.org.id,'second-owner'));
-  f.raw.prepare("UPDATE memberships SET role='owner' WHERE id=?").run(original);
+  (await f.raw.prepare("UPDATE memberships SET role='owner' WHERE id=?").run(original));
   await f.admin.scimDeactivate(key.token,f.org.id,'second-owner');
   await forbidden(()=>f.admin.scimDeactivate(key.token,f.org.id,original));
-  assert.equal(f.raw.prepare('SELECT revoked_at FROM memberships WHERE id=?').get(original).revoked_at,null);
+  assert.equal((await f.raw.prepare('SELECT revoked_at FROM memberships WHERE id=?').get(original)).revoked_at,null);
 });
 
 test('SCIM checks the exact organization and live role, expiry, and immutable key binding',async t=>{
   const f=await fixture(t),key=await f.admin.issueScimKey(f.owner.token,f.org.id);
   const child=await f.workspace.createOrganization(f.owner.token,{name:'Child',emailId:f.snapshot.account.emails[0].id,parentOrganizationId:f.org.id});
   await forbidden(()=>f.admin.scimAuthority(key.token,child.id));
-  const membership=f.raw.prepare('SELECT id FROM memberships WHERE organization_id=?').get(f.org.id).id;
-  f.raw.prepare("UPDATE memberships SET role='member' WHERE id=?").run(membership);
+  const membership=(await f.raw.prepare('SELECT id FROM memberships WHERE organization_id=?').get(f.org.id)).id;
+  (await f.raw.prepare("UPDATE memberships SET role='member' WHERE id=?").run(membership));
   await forbidden(()=>f.admin.scimAuthority(key.token,f.org.id));
-  f.raw.prepare("UPDATE memberships SET role='owner',expires_at=? WHERE id=?").run(NOW,membership);
+  (await f.raw.prepare("UPDATE memberships SET role='owner',expires_at=? WHERE id=?").run(NOW,membership));
   await forbidden(()=>f.admin.scimAuthority(key.token,f.org.id));
-  for(const mode of ['ON','OFF']){
-    f.raw.exec('PRAGMA recursive_triggers='+mode);
-    assert.throws(()=>f.raw.prepare('UPDATE release_scim_keys SET organization_id=? WHERE id=?').run(child.id,key.id));
-    assert.throws(()=>f.raw.exec('INSERT OR REPLACE INTO release_scim_keys SELECT * FROM release_scim_keys'));
-    assert.throws(()=>f.raw.exec('DELETE FROM release_scim_keys'));
-  }
+  await assert.rejects(async()=>(await f.raw.prepare('UPDATE release_scim_keys SET organization_id=? WHERE id=?').run(child.id,key.id)));
+  await assert.rejects(async()=>(await f.raw.exec('INSERT INTO release_scim_keys SELECT * FROM release_scim_keys')));
+  await assert.rejects(async()=>(await f.raw.exec('DELETE FROM release_scim_keys')));
 });
 
 for(const beforeMapping of [false,true])test('email-only revocation preserves personal sign-in and never restores claim authority; first mapping='+beforeMapping,async t=>{
@@ -108,10 +95,11 @@ for(const kind of ['account.disabled','email.revoked'])test('identity webhook at
 
 test('provider revocation rolls back webhook receipt and tombstone if the authority mutation fails',async t=>{
   const f=await fixture(t),admin=new Admin({DB:f.db,IDENTITY_WEBHOOK_SECRET:'x'.repeat(64)},()=>NOW);
-  f.raw.exec("CREATE TRIGGER reject_disable BEFORE UPDATE OF disabled_at ON accounts BEGIN SELECT RAISE(ABORT,'injected mutation failure'); END;");
+  (await f.raw.exec(`CREATE FUNCTION reject_disable() RETURNS trigger LANGUAGE plpgsql AS $f$ BEGIN RAISE EXCEPTION 'injected mutation failure'; END $f$;
+    CREATE TRIGGER reject_disable BEFORE UPDATE OF disabled_at ON accounts FOR EACH ROW EXECUTE FUNCTION reject_disable()`));
   await assert.rejects(()=>webhook(admin,{id:'failed-disable',subject:'owner',type:'account.disabled'}));
-  assert.equal(f.raw.prepare('SELECT count(*) n FROM release_webhook_events').get().n,0);
-  assert.equal(f.raw.prepare('SELECT count(*) n FROM release_provider_revocations').get().n,0);
+  assert.equal((await f.raw.prepare('SELECT count(*) n FROM release_webhook_events').get()).n,0);
+  assert.equal((await f.raw.prepare('SELECT count(*) n FROM release_provider_revocations').get()).n,0);
   await interactive(f.db,f.owner.token, () => NOW);
 });
 
@@ -129,11 +117,11 @@ test('checkout retry after a lost provider response retains the original Stripe 
   now+=1000;
   assert.equal((await billing.checkout(f.owner.token,space,'price_test','same-operation')).url,'https://checkout.stripe.com/c/pay/test');
   assert.equal(sessionCalls,2);
-  const expiration=f.raw.prepare('SELECT expires_at FROM release_checkout_requests').get().expires_at;
+  const expiration=(await f.raw.prepare('SELECT expires_at FROM release_checkout_requests').get()).expires_at;
   assert.equal(Number(new URLSearchParams(firstBody).get('expires_at')),Math.floor(expiration/1000));
   // A fresh session cannot revive the expired operation or obtain its old URL.
   now=expiration;
-  f.raw.prepare('UPDATE credentials SET expires_at=?,reauthenticated_at=? WHERE token_digest=?').run(now+900000,now,await digest(f.owner.token));
+  (await f.raw.prepare('UPDATE credentials SET expires_at=?,reauthenticated_at=? WHERE token_digest=?').run(now+900000,now,await digest(f.owner.token)));
   await assert.rejects(()=>billing.checkout(f.owner.token,space,'price_test','same-operation'),error=>error.code==='checkout_expired');
   assert.equal(sessionCalls,2);
 });

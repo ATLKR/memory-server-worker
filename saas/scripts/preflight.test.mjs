@@ -27,7 +27,7 @@ function stagingConfig() {
   config.analytics_engine_datasets = [{ binding: 'METRICS', dataset: 'memory_target_test_staging_metrics' }];
   config.vars.PUBLIC_ORIGIN = 'https://memory-staging.example.org';
   config.routes = [{ pattern: 'memory-staging.example.org', custom_domain: true }];
-  config.d1_databases = [{ binding: 'DB', database_name: 'memory-target-test-staging', database_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', migrations_dir: 'migrations' }];
+  config.d1_databases = [{ binding: 'DB', database_name: 'memory-target-test-staging', database_id: 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee', migrations_dir: 'd1-migrations' }];
   config.r2_buckets = [{ binding: 'ARCHIVE', bucket_name: 'memory-target-test-staging-archive' }];
   return config;
 }
@@ -37,8 +37,8 @@ function shardedConfig() {
   config.vars.STORAGE_MODE = 'sharded';
   config.vars.STORAGE_SHARDS_JSON = JSON.stringify([{ id: 'hot-a', binding: 'HOT_A', mode: 'active' }, { id: 'hot-b', binding: 'HOT_B', mode: 'draining' }]);
   config.d1_databases.push(
-    { binding: 'HOT_A', database_name: 'memory-hot-a-staging', database_id: '11111111-2222-4333-8444-555555555555', migrations_dir: 'shard-migrations' },
-    { binding: 'HOT_B', database_name: 'memory-hot-b-staging', database_id: '22222222-3333-4444-8555-666666666666', migrations_dir: 'shard-migrations' });
+    { binding: 'HOT_A', database_name: 'memory-hot-a-staging', database_id: '11111111-2222-4333-8444-555555555555', migrations_dir: 'd1-shard-migrations' },
+    { binding: 'HOT_B', database_name: 'memory-hot-b-staging', database_id: '22222222-3333-4444-8555-666666666666', migrations_dir: 'd1-shard-migrations' });
   config.r2_buckets = [{ binding: 'MEMORY_PAYLOADS', bucket_name: 'memory-payloads-staging' }];
   return config;
 }
@@ -70,8 +70,8 @@ test('explicit valid staging config is identified, including a path containing s
 });
 
 for (const [name, mutate, message] of [
-  ['production database ID', c => { c.d1_databases[0].database_id = production.d1_databases[0].database_id; }, /production.*D1|D1.*production/i],
-  ['production database name', c => { c.d1_databases[0].database_name = production.d1_databases[0].database_name; }, /production.*D1|D1.*production/i],
+  // Production D1 identity collisions moved to the injected-production test
+  // below: production no longer owns D1 databases after the PostgreSQL cutover.
   ['production domain', c => { c.vars.PUBLIC_ORIGIN = production.vars.PUBLIC_ORIGIN; c.routes = production.routes; }, /production.*origin|origin.*production/i],
   ['production worker name', c => { c.name = production.name; }, /production.*Worker|Worker.*production/i],
   ['extra public route', c => c.routes.push({ pattern: 'unexpected.example.org', custom_domain: true }), /route|domain/i],
@@ -132,7 +132,7 @@ test('staging checks all production D1/R2 resources, including preview targets',
   const { dir, path } = await fixture(t);
   const baseline = structuredClone(production);
   const extraDatabase = { binding: 'OTHER_DB', database_name: 'other-production-db', database_id: '22222222-3333-4444-8555-666666666666', preview_database_id: '33333333-4444-4555-8666-777777777777' };
-  baseline.d1_databases.push(extraDatabase);
+  baseline.d1_databases = [extraDatabase];
   baseline.r2_buckets = [{ binding: 'ARCHIVE', bucket_name: 'production-archive', preview_bucket_name: 'production-preview-archive' }];
   const productionConfigPath = join(dir, 'production.jsonc');
   await writeFile(productionConfigPath, JSON.stringify(baseline));
@@ -191,7 +191,7 @@ for (const operation of ['build', 'db:local', 'db:remote', 'deploy']) {
 
 test('invalid targets and unknown arguments execute no child and never forward credentials', async t => {
   const { runDeploymentCommand } = await import('./deployment-command.mjs');
-  const config = stagingConfig(); config.d1_databases[0] = production.d1_databases[0];
+  const config = stagingConfig(); config.name = production.name;
   const { path } = await fixture(t, config);
   const calls = [];
   const runner = async (...args) => calls.push(args);
@@ -353,8 +353,8 @@ for (const [name, mutate] of [
   ['one hot shard', c => { c.d1_databases.pop(); c.vars.STORAGE_SHARDS_JSON = JSON.stringify([{ id: 'hot-a', binding: 'HOT_A', mode: 'active' }]); }],
   ['physical database alias', c => { c.d1_databases[2].database_id = c.d1_databases[1].database_id; }],
   ['central database alias', c => { c.d1_databases[1].database_id = c.d1_databases[0].database_id; }],
-  ['wrong hot migrations directory', c => { c.d1_databases[1].migrations_dir = 'migrations'; }],
-  ['wrong central migrations directory', c => { c.d1_databases[0].migrations_dir = 'shard-migrations'; }],
+  ['wrong hot migrations directory', c => { c.d1_databases[1].migrations_dir = 'd1-migrations'; }],
+  ['wrong central migrations directory', c => { c.d1_databases[0].migrations_dir = 'd1-shard-migrations'; }],
   ['missing payload bucket', c => { c.r2_buckets = []; }],
   ['malformed registry JSON', c => { c.vars.STORAGE_SHARDS_JSON = '{'; }],
   ['unregistered D1 binding', c => { c.d1_databases[2].binding = 'HOT_OTHER'; }],

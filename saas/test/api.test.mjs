@@ -7,12 +7,10 @@ import { body as readBody, createMemoryApi } from '../src/api.ts';
 const NOW = 1_800_000_000_000;
 const TOKEN = 'synthetic-api-session-token-0000000000000000';
 async function fixture(t) {
-  const f = createDatabase();
+  const f = await createDatabase();
   t.after(() => f.close());
-  const { readFileSync } = await import('node:fs');
-  f.raw.exec(readFileSync(new URL('../memory-schema.sql', import.meta.url), 'utf8'));
-  f.raw.prepare('INSERT INTO accounts(id) VALUES (?)').run('api-account');
-  f.raw.prepare(`INSERT INTO credentials(id,account_id,kind,token_digest,expires_at,reauthenticated_at)
+  await f.raw.prepare('INSERT INTO memory_identity.accounts(id) VALUES (?)').run('api-account');
+  await f.raw.prepare(`INSERT INTO memory_identity.credentials(id,account_id,kind,token_digest,expires_at,reauthenticated_at)
     VALUES (?,?, 'session',?,?,?)`).run('api-session', 'api-account', await digestToken(TOKEN), NOW + 60_000, NOW);
   const api = createMemoryApi(f.db, () => NOW);
   const request = async (path, { method = 'GET', body, token = TOKEN, headers = {} } = {}) => {
@@ -67,7 +65,7 @@ test('revocation immediately denies previously working HTTP access', async t => 
   const space = await request('/v1/spaces', { method: 'POST', body: { name: 'private' } });
   const base = `/v1/spaces/${space.data.id}/memories`;
   const created = await request(base, { method: 'POST', body: { body: 'private memory' } });
-  raw.prepare('UPDATE credentials SET revoked_at=? WHERE id=?').run(NOW, 'api-session');
+  await raw.prepare('UPDATE memory_identity.credentials SET revoked_at=? WHERE id=?').run(NOW, 'api-session');
   assert.equal((await request(`${base}/${created.data.id}`)).res.status, 403);
 });
 

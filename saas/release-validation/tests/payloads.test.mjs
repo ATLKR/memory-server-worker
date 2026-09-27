@@ -4,7 +4,9 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { PayloadStore } from '../../src/release/payloads.ts';
 import { canonical, digest } from '../../src/release/util.ts';
-import { ftsQuery } from '../../src/release/search.ts';
+// ftsQuery() now emits PostgreSQL tsquery for the inline lexical path; the hot
+// shards remain FTS5, so searchPage inputs use the FTS5 MATCH dialect.
+const ftsQuery = query => `"${query.replaceAll('"', '""')}"*`;
 
 const content = { body: '₿budget alpha', source: 'source', provenance: { originKind: 'user' } };
 const context = { spaceId: 'space-a', memoryId: 'memory-a' };
@@ -21,7 +23,7 @@ test('descriptor is pure, deterministic, bounded and selects only configured act
   assert.equal(f.store.enabled, true); assert.deepEqual(f.store.shardIds(), ['one', 'two']);
   assert.deepEqual(await f.store.descriptor(context, { provenance: content.provenance, source: content.source, body: content.body }, 'payload-a'), ref);
   assert.equal(ref.sha256, await digest(canonical(content))); assert.equal(ref.bytes, new TextEncoder().encode(canonical(content)).length);
-  assert.equal(f.r2.calls.length, 0); assert.equal(f.first.raw.prepare('SELECT count(*) AS n FROM payloads').get().n, 0);
+  assert.equal(f.r2.calls.length, 0); assert.equal((await f.first.raw.prepare('SELECT count(*) AS n FROM payloads').get()).n, 0);
   const seen = new Set(); for (let n = 0; n < 30; n++) seen.add((await f.store.descriptor({ ...context, spaceId: 'space-' + n }, content, 'payload-' + n)).shardId);
   assert.deepEqual([...seen].sort(), ['one', 'two']);
   const oneSpace = new Set(); for (let n = 0; n < 30; n++) oneSpace.add((await f.store.descriptor(context, content, 'one-space-' + n)).shardId);
@@ -48,7 +50,7 @@ test('stage verifies both stores, repeats without overwrite, and reads the exact
   const f = setup(t), ref = await f.store.descriptor(context, content, 'payload-a');
   await f.store.stage(context, ref, content); const stored = f.r2.objects.get(ref.objectKey), etag = stored.etag;
   await f.store.stage(context, ref, content); assert.equal(f.r2.objects.get(ref.objectKey).etag, etag);
-  assert.equal(f.selected(ref).raw.prepare('SELECT count(*) AS n FROM payloads').get().n, 1);
+  assert.equal((await f.selected(ref).raw.prepare('SELECT count(*) AS n FROM payloads').get()).n, 1);
   assert.deepEqual(await f.store.read(context, ref), content);
   await assert.rejects(() => f.store.stage(context, { ...ref, shardId: ref.shardId === 'one' ? 'two' : 'one' }, content), expectCode('payload_context_mismatch'));
   assert.equal(f.r2.objects.get(ref.objectKey).text, canonical(content));
@@ -70,8 +72,8 @@ test('mismatching immutable object or descriptor never overwrites retained bytes
 test('hot retirement keeps R2 history and blocks a late hot insertion', async t => {
   const f = setup(t), ref = await f.store.descriptor(context, content, 'payload-a'); await f.store.stage(context, ref, content);
   await f.store.retireHot(context, ref); await f.store.retireHot(context, ref);
-  assert.equal(f.selected(ref).raw.prepare('SELECT count(*) AS n FROM payloads').get().n, 0);
-  assert.equal(f.selected(ref).raw.prepare('SELECT count(*) AS n FROM payload_fts').get().n, 0);
+  assert.equal((await f.selected(ref).raw.prepare('SELECT count(*) AS n FROM payloads').get()).n, 0);
+  assert.equal((await f.selected(ref).raw.prepare('SELECT count(*) AS n FROM payload_fts').get()).n, 0);
   assert.deepEqual(await f.store.read(context, ref), content);
   await assert.rejects(() => f.store.stage(context, ref, content), expectCode('payload_retired'));
   assert.equal(f.r2.objects.get(ref.objectKey).text, canonical(content));
@@ -79,7 +81,7 @@ test('hot retirement keeps R2 history and blocks a late hot insertion', async t 
 
 test('R2 or shard staging failure remains observable and exact retry recovers partial state', async t => {
   const f = setup(t), ref = await f.store.descriptor(context, content, 'payload-a'); f.r2.beforePut = async () => { throw Error('synthetic_R2_down'); };
-  await assert.rejects(() => f.store.stage(context, ref, content), /synthetic_R2_down/); assert.equal(f.selected(ref).raw.prepare('SELECT count(*) AS n FROM payloads').get().n, 0);
+  await assert.rejects(() => f.store.stage(context, ref, content), /synthetic_R2_down/); assert.equal((await f.selected(ref).raw.prepare('SELECT count(*) AS n FROM payloads').get()).n, 0);
   f.r2.beforePut = null; const db = f.selected(ref), prepare = db.prepare.bind(db);
   db.prepare = sql => { if (sql.startsWith('INSERT INTO payloads')) throw Error('synthetic_D1_down'); return prepare(sql); };
   await assert.rejects(() => f.store.stage(context, ref, content), /synthetic_D1_down/); assert.equal(f.r2.objects.get(ref.objectKey).text, canonical(content));
@@ -92,20 +94,20 @@ test('purge tombstone prevents a held create-only R2 upload from resurrecting pl
   f.r2.beforePut = async (key, value) => { if (value.length) { entered(); await held; } };
   const uploading = f.store.stage(context, ref, content); await started;
   await f.store.purge(context, ref); release(); await assert.rejects(() => uploading, expectCode('payload_purged'));
-  assert.equal(f.r2.objects.get(ref.objectKey).size, 0); assert.equal(f.selected(ref).raw.prepare('SELECT count(*) AS n FROM payloads').get().n, 0);
+  assert.equal(f.r2.objects.get(ref.objectKey).size, 0); assert.equal((await f.selected(ref).raw.prepare('SELECT count(*) AS n FROM payloads').get()).n, 0);
   await f.store.purge(context, ref); await assert.rejects(() => f.store.read(context, ref), expectCode('payload_purged'));
 });
 
 test('purge fences a held shard INSERT after R2 upload and preserves terminal tombstones', async t => {
   const f = setup(t), ref = await f.store.descriptor(context, content, 'payload-a'), db = f.selected(ref); let entered, release;
   const started = new Promise(resolve => { entered = resolve; }), held = new Promise(resolve => { release = resolve; });
-  const prepare = db.prepare.bind(db); db.prepare = sql => {
+  const prepare = db.prepare.bind(db); db.prepare =  sql => {
     const statement = prepare(sql); if (sql.startsWith('INSERT INTO payloads')) { const run = statement.run.bind(statement); statement.run = async () => { entered(); await held; return run(); }; } return statement;
   };
   const uploading = f.store.stage(context, ref, content); await started; await f.store.purge(context, ref); release();
   await assert.rejects(() => uploading, expectCode('payload_retired')); assert.equal(f.r2.objects.get(ref.objectKey).size, 0);
-  assert.equal(db.raw.prepare('SELECT count(*) AS n FROM payloads').get().n, 0);
-  assert.throws(() => db.raw.exec('DELETE FROM payload_tombstones'), /payload_tombstone_immutable/);
+  assert.equal((await db.raw.prepare('SELECT count(*) AS n FROM payloads').get()).n, 0);
+  await assert.rejects(async()=> (await db.raw.exec('DELETE FROM payload_tombstones')), /payload_tombstone_immutable/);
 });
 
 test('cold read detects missing, corrupt and oversized objects without fabricated content', async t => {
@@ -154,7 +156,7 @@ test('wrong context cannot poison an absent R2 key while a hot payload or tombst
 
 test('shard schema rejects ordinary payload edits and preserves generated migration bytes', async t => {
   const f = setup(t), ref = await f.store.descriptor(context, content, 'payload-a'); await f.store.stage(context, ref, content); const db = f.selected(ref);
-  for (const sql of ["UPDATE payloads SET content='{}'", 'DELETE FROM payloads', 'INSERT OR REPLACE INTO payloads SELECT * FROM payloads']) assert.throws(() => db.raw.exec(sql), /payload_immutable/);
+  for (const sql of ["UPDATE payloads SET content='{}'", 'DELETE FROM payloads', 'INSERT OR REPLACE INTO payloads SELECT * FROM payloads']) await assert.rejects(async()=> (await db.raw.exec(sql)), /payload_immutable/);
   const source = readFileSync(new URL('../../shard-schema.sql', import.meta.url), 'utf8').replaceAll('\r\n', '\n');
-  assert.equal(readFileSync(new URL('../../shard-migrations/0001_payloads.sql', import.meta.url), 'utf8').replaceAll('\r\n', '\n'), '-- Generated from shard-schema.sql; independent hot-shard migration 1.\n' + source);
+  assert.equal(readFileSync(new URL('../../d1-shard-migrations/0001_payloads.sql', import.meta.url), 'utf8').replaceAll('\r\n', '\n'), '-- Generated from shard-schema.sql; independent hot-shard migration 1.\n' + source);
 });

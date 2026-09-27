@@ -1,7 +1,7 @@
 import test from 'node:test';import assert from 'node:assert/strict';
 import {fixture,at} from './db.mjs';import {MemoryStore} from '../../src/release/memory.ts';
 let Search,Jobs;try{({Search}=await import('../../src/release/search.ts'));({Jobs}=await import('../../src/release/jobs.ts'));}catch{}
-for(const name of ['lexical','cross-space-vector','stale-vector','revoked-during-search','outbox-retry','index-rebuild','erasure-index'])test(name,async()=>{
+for(const name of ['lexical','cross-space-vector','stale-vector','revoked-during-search','outbox-retry','index-rebuild','erasure-index'])test(name,async t=>{
  assert.ok(Search&&Jobs,'search/outbox implementation missing');const {db,token,other}=await fixture();
  const store=new MemoryStore(db,()=>at);let now=at;let vectors=new Map();let failUpsert=false;
  const ai={run:async()=>({data:[Array(1024).fill(0.1)]})};
@@ -11,10 +11,13 @@ for(const name of ['lexical','cross-space-vector','stale-vector','revoked-during
  if(name==='lexical'){const r=await search.query(token,'s1','alpha',10,'search');assert.equal(r.results[0].id,m.id);}
  if(name==='cross-space-vector'){const otherM=await store.create(other,'s2',{body:'classified'},'other-add');vectors.set('foreign',{id:'foreign',metadata:{memoryId:otherM.id,revision:1}});const r=await search.query(token,'s1','unmatched',10,'search');assert.equal(r.results.length,0);}
  if(name==='stale-vector'){vectors.set('stale',{id:'stale',metadata:{memoryId:m.id,revision:1}});await store.update(token,'s1',m.id,{body:'gamma',expectedRevision:1},'update');const r=await search.query(token,'s1','unmatched',10,'search');assert.equal(r.results.length,0);}
- if(name==='revoked-during-search'){index.query=async()=>{db.raw.exec("UPDATE credentials SET revoked_at=1 WHERE id='session:alice'");return {matches:[{id:'v',score:1,metadata:{memoryId:m.id,revision:1}}]};};await assert.rejects(()=>search.query(token,'s1','alpha',10,'search'),e=>e.status===403);}
- if(name==='outbox-retry'){failUpsert=true;await jobs.drain(1);assert.equal(db.raw.prepare('SELECT state FROM release_jobs').get().state,'pending');failUpsert=false;now+=120000;await jobs.drain(1);assert.equal(db.raw.prepare('SELECT state FROM release_jobs').get().state,'done');assert.ok(vectors.size>0);}
+ if(name==='revoked-during-search'){index.query=async()=>{(await db.raw.exec("UPDATE credentials SET revoked_at=1 WHERE id='session:alice'"));return {matches:[{id:'v',score:1,metadata:{memoryId:m.id,revision:1}}]};};await assert.rejects(()=>search.query(token,'s1','alpha',10,'search'),e=>e.status===403);}
+ if(name==='outbox-retry'){failUpsert=true;await jobs.drain(1);assert.equal((await db.raw.prepare('SELECT state FROM release_jobs').get()).state,'pending');failUpsert=false;now+=120000;await jobs.drain(1);assert.equal((await db.raw.prepare('SELECT state FROM release_jobs').get()).state,'done');assert.ok(vectors.size>0);}
  if(name==='index-rebuild'){await jobs.drain(1);vectors.clear();await search.rebuild(token,'s1');await jobs.drain(5);assert.ok(vectors.size>0);}
- if(name==='erasure-index'){await jobs.drain(1);await store.remove(token,'s1',m.id,1,'delete');await store.erase(token,'s1',m.id,2,m.id,'erase');await jobs.drain(10);assert.equal(vectors.size,0);assert.ok(db.raw.prepare('SELECT vector_erased_at v FROM release_erasure_ledger').get().v);}
+ if(name==='erasure-index'){await jobs.drain(1);await store.remove(token,'s1',m.id,1,'delete');await store.erase(token,'s1',m.id,2,m.id,'erase');await jobs.drain(10);assert.equal(vectors.size,0);
+  // 0008's erasure_ledger completion trigger exempts the NULL→stamp
+  // vector_erased_at write; it is the only mutable column on the ledger.
+  assert.equal((await db.raw.prepare("SELECT vector_erased_at FROM erasure_ledger WHERE memory_id=?").get(m.id)).vector_erased_at!==null,true);return;}
  }finally{db.close();}
 });
 test('hybrid ranking counts a memory once despite multiple matching chunks',async()=>{
@@ -34,9 +37,9 @@ test('replayed search meters once and never repeats external provider work',asyn
    const replay=await search.query(token,'s1','alpha',10,'search-once');assert.equal(embeddings,1);assert.equal(queries,1);
    assert.equal(replay.mode,'lexical');assert.equal(replay.degradedReason,'semantic_skipped_on_replay');assert.equal(replay.results[0].id,memory.id);
   }
-  assert.equal(db.raw.prepare("SELECT sum(units) n FROM release_usage_events WHERE operation_id IN (SELECT id FROM release_operations WHERE action='search')").get().n,1);
+  assert.equal((await db.raw.prepare("SELECT sum(units) n FROM release_usage_events WHERE operation_id IN (SELECT id FROM release_operations WHERE action='search')").get()).n,1);
   await assert.rejects(()=>search.query(token,'s1','different',10,'search-once'),e=>e.status===409);
-  db.raw.exec("UPDATE credentials SET revoked_at=1 WHERE id='session:alice'");
+  (await db.raw.exec("UPDATE credentials SET revoked_at=1 WHERE id='session:alice'"));
   await assert.rejects(()=>search.query(token,'s1','alpha',10,'search-once'),e=>e.status===403);assert.equal(embeddings,1);
  } finally {db.close();}
 });
@@ -72,7 +75,7 @@ test('a deletion job cannot remove vectors created by a concurrent restore',asyn
   const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',AI:{run:async()=>({data:[Array(1024).fill(.1)]})},MEMORY_INDEX:index};const jobs=new Jobs(env,()=>at),store=new MemoryStore(db,()=>at);
   const memory=await store.create(token,'s1',{body:'Restorable'},'create');await jobs.drain(1);await store.remove(token,'s1',memory.id,1,'delete');const deletion=await jobs.claim();
   const prepare=db.prepare.bind(db);let restored=false;
-  db.prepare=sql=>{const statement=prepare(sql);if(sql.startsWith('SELECT vector_id AS vectorId')){const all=statement.all.bind(statement);statement.all=async()=>{if(!restored){restored=true;await store.restore(token,'s1',memory.id,2,'restore');await jobs.index(await jobs.claim());}return all();};}return statement;};
+  db.prepare= sql=>{const statement=prepare(sql);if(sql.startsWith('SELECT vector_id AS "vectorId"')){const all=statement.all.bind(statement);statement.all=async()=>{if(!restored){restored=true;await store.restore(token,'s1',memory.id,2,'restore');await jobs.index(await jobs.claim());}return all();};}return statement;};
   await jobs.index(deletion);
   assert.equal(restored,true);assert.ok([...vectors.values()].some(value=>value.metadata.revision===3));
  } finally {db.close();}
@@ -82,15 +85,15 @@ for(const flag of [undefined,'false','true']) test('automatic memory erasure req
  const {db,token}=await fixture();
  try {
   const store=new MemoryStore(db,()=>at),memory=await store.create(token,'s1',{body:'Retained original'},'create');await store.remove(token,'s1',memory.id,1,'delete');
-  db.raw.prepare("INSERT INTO release_jobs(id,space_id,revision,kind,available_at,created_at) VALUES('transient','s1',0,'ingest',?,?)").run(at,at);
-  db.raw.prepare("INSERT INTO release_ingests(id,account_id,space_id,actor_credential_id,ciphertext,proposals,expires_at,created_at) VALUES('transient','alice','s1','session:alice','encrypted-temporary','[]',?,?)").run(at+1,at);
-  db.raw.prepare("INSERT INTO release_export_sessions(id,account_id,space_id,watermark,expires_at,created_at) VALUES('export','alice','s1',0,?,?)").run(at+1,at);
+  (await db.raw.prepare("INSERT INTO release_jobs(id,space_id,revision,kind,available_at,created_at) VALUES('transient','s1',0,'ingest',?,?)").run(at,at));
+  (await db.raw.prepare("INSERT INTO release_ingests(id,account_id,space_id,actor_credential_id,ciphertext,proposals,expires_at,created_at) VALUES('transient','alice','s1','session:alice','encrypted-temporary','[]',?,?)").run(at+1,at));
+  (await db.raw.prepare("INSERT INTO release_export_sessions(id,account_id,space_id,watermark,expires_at,created_at) VALUES('export','alice','s1',0,?,?)").run(at+1,at));
   await new Jobs({DB:db,...(flag===undefined?{}:{AUTO_ERASURE_ENABLED:flag})},()=>at+31*86400000).maintain();
-  const current=db.raw.prepare('SELECT body,erased_at FROM memories WHERE id=?').get(memory.id);
+  const current=(await db.raw.prepare('SELECT body,erased_at FROM memories WHERE id=?').get(memory.id));
   assert.equal(current.body,flag==='true'?'[erased]':'Retained original');assert.equal(current.erased_at!==null,flag==='true');
-  assert.equal(db.raw.prepare('SELECT count(*) n FROM memory_versions WHERE memory_id=?').get(memory.id).n,flag==='true'?0:1);
-  const transient=db.raw.prepare("SELECT ciphertext,proposals,state FROM release_ingests WHERE id='transient'").get();assert.equal(transient.ciphertext,null);assert.equal(transient.proposals,null);assert.equal(transient.state,'expired');
-  assert.equal(db.raw.prepare('SELECT count(*) n FROM release_export_sessions').get().n,0);
+  assert.equal((await db.raw.prepare('SELECT count(*) n FROM memory_versions WHERE memory_id=?').get(memory.id)).n,flag==='true'?0:1);
+  const transient=(await db.raw.prepare("SELECT ciphertext,proposals,state FROM release_ingests WHERE id='transient'").get());assert.equal(transient.ciphertext,null);assert.equal(transient.proposals,null);assert.equal(transient.state,'expired');
+  assert.equal((await db.raw.prepare('SELECT count(*) n FROM release_export_sessions').get()).n,0);
  } finally {db.close();}
 });
 
@@ -100,7 +103,7 @@ test('indexing renews a live lease across many individually successful provider 
   const memory=await new MemoryStore(db,()=>at).create(token,'s1',{body:'x'.repeat(16000)},'long-memory');
   const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',AI:{run:async()=>{embeddings++;now+=19000;return{data:[Array(1024).fill(.1)]};}},MEMORY_INDEX:{upsert:async values=>values.forEach(v=>vectors.set(v.id,v)),deleteByIds:async ids=>ids.forEach(id=>vectors.delete(id)),getByIds:async ids=>ids.flatMap(id=>vectors.has(id)?[{id}]:[])}};
   await new Jobs(env,()=>now).drain(1);
-  const job=db.raw.prepare('SELECT state,attempt,last_error FROM release_jobs WHERE memory_id=?').get(memory.id);
+  const job=(await db.raw.prepare('SELECT state,attempt,last_error FROM release_jobs WHERE memory_id=?').get(memory.id));
   assert.equal(job.state,'done');assert.equal(job.attempt,1);assert.equal(job.last_error,null);
   assert.equal(embeddings,10);assert.equal(vectors.size,10);assert.ok(now-at>120000);
  }finally{db.close();}
@@ -114,7 +117,7 @@ test('an expired or replaced indexing lease cannot be renewed or send another pr
    const env={DB:db,BACKGROUND_JOBS_ENABLED:'true',AI:{run:async()=>{calls++;return{data:[Array(1024).fill(.1)]};}},MEMORY_INDEX:{upsert:async()=>{},deleteByIds:async()=>{},getByIds:async()=>[]}};
    const jobs=new Jobs(env,()=>now),job=await jobs.claim();
    if(scenario==='expired')now+=120001;
-   else db.raw.prepare('UPDATE release_jobs SET lease_token=? WHERE id=?').run('new-owner',job.id);
+   else (await db.raw.prepare('UPDATE release_jobs SET lease_token=? WHERE id=?').run('new-owner',job.id));
    await assert.rejects(()=>jobs.index(job),e=>e.message==='lease_lost');assert.equal(calls,0,scenario);
   }finally{db.close();}
  }
@@ -141,6 +144,6 @@ for(const boundary of ['first-renewal','between-chunks'])for(const change of ['u
   await jobs.drain(1);
   assert.equal(changed,true);
   assert.equal(sent.length,boundary==='first-renewal'?0:1,'A new embedding request received stale or erased plaintext');
-  assert.equal(db.raw.prepare('SELECT state FROM release_jobs WHERE memory_id=? AND revision=1').get(memory.id).state,'done');
+  assert.equal((await db.raw.prepare('SELECT state FROM release_jobs WHERE memory_id=? AND revision=1').get(memory.id)).state,'done');
  }finally{db.close();}
 });

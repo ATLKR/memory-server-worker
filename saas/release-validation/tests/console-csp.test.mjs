@@ -50,7 +50,7 @@ test('management script still submits memory and proof through same-origin JSON 
  await until(()=>!memory.querySelector('button').disabled,()=>w.document.querySelector('#status').textContent);await settle();
  const created=calls.find(call=>call.method==='POST'&&call.path==='/v1/spaces/s1/memories');
  assert.ok(created);assert.equal(created.contentType,'application/json');assert.equal(JSON.parse(created.body).body,'SYNTHETIC_PRIVATE_MEMORY');
- assert.equal(f.db.raw.prepare("SELECT count(*) n FROM memories WHERE body='SYNTHETIC_PRIVATE_MEMORY'").get().n,1);
+ assert.equal((await f.db.raw.prepare("SELECT count(*) n FROM memories WHERE body='SYNTHETIC_PRIVATE_MEMORY'").get()).n,1);
  const proof=w.document.querySelector('#reauth-complete');proof.elements.challengeId.value='synthetic-challenge';proof.elements.proof.value='SYNTHETIC_PRIVATE_PROOF';
  assert.equal(proof.dispatchEvent(new w.Event('submit',{bubbles:true,cancelable:true})),false);
  await until(()=>!proof.querySelector('button').disabled,()=>w.document.querySelector('#status').textContent);await settle();

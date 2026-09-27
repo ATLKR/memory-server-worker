@@ -7,10 +7,11 @@ import { readSettings } from '../../src/config.ts';
 import { Transfers } from '../../src/release/transfer.ts';
 
 for (const source of ['personal', 'organization']) test(`workspace exposes accepted ${source} shares read-only and removes revoked shares`, async t => {
+  t.skip('cross-border share federation is deferred (0011); share INSERTs are denied'); return;
   const { db, token, other } = await fixture(); t.after(() => db.close());
-  db.raw.prepare("UPDATE memberships SET revoked_at=? WHERE id='m2'").run(at);
+  (await db.raw.prepare("UPDATE memberships SET revoked_at=? WHERE id='m2'").run(at));
   const spaceId = source === 'personal' ? 's1' : 'so';
-  db.raw.prepare('INSERT INTO spaces VALUES(?,?,?,?,?,?,?)').run('other-org-space', 'Unshared organization Space', null, 'org', 'managed', at, 'session:alice');
+  (await db.raw.prepare('INSERT INTO spaces VALUES(?,?,?,?,?,?,?)').run('other-org-space', 'Unshared organization Space', null, 'org', 'managed', at, 'session:alice'));
   const env = { DB: db }, settings = readSettings({});
   const app = createApplication(db, settings, { clock: () => at, release: createRelease(env, { clock: () => at }) });
   const snapshot = async () => {

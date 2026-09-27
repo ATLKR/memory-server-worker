@@ -34,12 +34,12 @@ export async function shardedLexical(db: Database, storage: ShardSearch, hash: s
             for (let pageNumber = 0; pageNumber < MAX_PAGES; pageNumber++) {
                 const page = await storage.searchPage(shardId, spaceId, expression, cursor, PAGE_SIZE);
                 const current = page.results.length ? await rows<{ id: string; revision: number; payloadId: string }>(db,
-                    `SELECT r.id,r.revision,r.payload_id AS payloadId FROM json_each(?) candidate
-                        JOIN memories r ON r.id=json_extract(candidate.value,'$.memoryId')
-                            AND r.payload_id=json_extract(candidate.value,'$.payloadId')
-                        JOIN spaces s ON s.id=r.space_id CROSS JOIN active_credentials c
+                    `SELECT r.id,r.revision,r.payload_id AS "payloadId" FROM jsonb_array_elements(?::jsonb) candidate
+                        JOIN memory_content.memories r ON r.id=candidate.value->>'memoryId'
+                            AND r.payload_id=candidate.value->>'payloadId'
+                        JOIN memory_control.spaces s ON s.id=r.space_id CROSS JOIN memory_identity.active_credentials c
                         WHERE s.id=? AND r.payload_shard_id=? AND r.deleted_at IS NULL AND r.erased_at IS NULL
-                            AND NOT EXISTS(SELECT 1 FROM memories successor WHERE successor.supersedes_id=r.id)
+                            AND NOT EXISTS(SELECT 1 FROM memory_content.memories successor WHERE successor.supersedes_id=r.id)
                             AND ${authority('read')}`,
                     [JSON.stringify(page.results), spaceId, shardId, ...params(hash, clock(), 'read')]) : [];
                 const authorized = new Map(current.map(row => [row.payloadId, row]));

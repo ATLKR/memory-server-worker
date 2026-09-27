@@ -17,7 +17,7 @@ test('daily live-memory cleanup removes delayed old upserts without re-embedding
   releaseOld();await work;assert.deepEqual([...vectors.values()].map(v=>v.metadata.revision).sort(),[1,2]);assert.equal(embeddings,2);
   for(let day=0;day<3;day++){now+=86400001;await jobs.maintain();await jobs.drain(5);}
   assert.deepEqual([...vectors.values()].map(v=>v.metadata.revision),[2]);assert.equal(embeddings,2);
-  assert.equal(db.raw.prepare('SELECT count(*) n FROM release_vector_refs').get().n,2);
+  assert.equal((await db.raw.prepare('SELECT count(*) n FROM release_vector_refs').get()).n,2);
  }finally{releaseOld?.();if(work)await work;db.close();}
 });
 
@@ -27,16 +27,16 @@ test('large live cleanup resumes bounded pages with no AI binding and preserves 
   const store=new MemoryStore(db,()=>now),memory=await store.create(token,'s1',{body:'x'.repeat(16000)},'create');
   for(let revision=1;revision<=111;revision++){
    if(revision>1)await store.update(token,'s1',memory.id,{body:'x'.repeat(16000),expectedRevision:revision-1},'update-'+revision);
-   for(let chunk=0;chunk<10;chunk++){const id=String(revision).padStart(3,'0')+':'+chunk;vectors.add(id);db.raw.prepare('INSERT INTO release_vector_refs VALUES(?,?,?)').run(memory.id,id,revision);}
+   for(let chunk=0;chunk<10;chunk++){const id=String(revision).padStart(3,'0')+':'+chunk;vectors.add(id);(await db.raw.prepare('INSERT INTO release_vector_refs VALUES(?,?,?)').run(memory.id,id,revision));}
   }
   // Completed jobs created before durable checkpoints retain next_chunk=0.
-  db.raw.prepare("UPDATE release_jobs SET state='done',available_at=?,next_chunk=0").run(now);
+  (await db.raw.prepare("UPDATE release_jobs SET state='done',available_at=?,next_chunk=0").run(now));
   const jobs=new Jobs({DB:db,BACKGROUND_JOBS_ENABLED:'true',MEMORY_INDEX:{async deleteByIds(ids){calls++;ids.forEach(id=>vectors.delete(id));},async getByIds(ids){calls++;return ids.filter(id=>vectors.has(id)).map(id=>({id}));}}},()=>now);
   now+=86400001;await jobs.maintain();await jobs.drain(1);
-  const jobId=memory.id+':111',partial=db.raw.prepare('SELECT state,attempt,next_chunk,cleanup_cursor FROM release_jobs WHERE id=?').get(jobId);
+  const jobId=memory.id+':111',partial=(await db.raw.prepare('SELECT state,attempt,next_chunk,cleanup_cursor FROM release_jobs WHERE id=?').get(jobId));
   assert.equal(calls,20);assert.equal(partial.state,'pending');assert.equal(partial.attempt,0);assert.equal(partial.next_chunk,0);assert.ok(partial.cleanup_cursor);
   now++;await jobs.drain(1);assert.equal(calls,22);assert.equal(vectors.size,10);assert.ok([...vectors].every(id=>id.startsWith('111:')));
-  assert.equal(db.raw.prepare('SELECT state FROM release_jobs WHERE id=?').get(jobId).state,'done');
-  assert.equal(db.raw.prepare('SELECT count(*) n FROM release_vector_refs').get().n,1110);
+  assert.equal((await db.raw.prepare('SELECT state FROM release_jobs WHERE id=?').get(jobId)).state,'done');
+  assert.equal((await db.raw.prepare('SELECT count(*) n FROM release_vector_refs').get()).n,1110);
  }finally{db.close();}
 });

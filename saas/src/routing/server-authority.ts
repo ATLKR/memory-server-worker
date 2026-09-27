@@ -39,10 +39,10 @@ export async function resolveRoutingAuthority(db: Database, token: string, space
   const cap = operation === 'memory_ingest' ? 'create' : 'read';
   const hash = await tokenHash(token), now = routingNow(clock);
   const row = await db.withSession('first-primary').prepare(`/* routing-authority */
-    SELECT c.id AS credentialId,c.account_id AS accountId,c.kind AS credentialKind,
-      s.organization_id AS organizationId,s.id AS spaceId,m.id AS membershipId,m.email_id AS emailId,m.role,
-      min(c.expires_at,c.membership_expires_at,m.expires_at,${accessExpiry(cap)}) AS authorityExpiresAtMs
-    FROM spaces s CROSS JOIN active_credentials c JOIN active_memberships m
+    SELECT c.id AS "credentialId",c.account_id AS "accountId",c.kind AS "credentialKind",
+      s.organization_id AS "organizationId",s.id AS "spaceId",m.id AS "membershipId",m.email_id AS "emailId",m.role,
+      least(c.expires_at,c.membership_expires_at,m.expires_at,${accessExpiry(cap)}) AS "authorityExpiresAtMs"
+    FROM memory_control.spaces s CROSS JOIN memory_identity.active_credentials c JOIN memory_identity.active_memberships m
       ON m.account_id=c.account_id AND m.organization_id=s.organization_id
       AND (c.kind<>'api_key' OR c.membership_id=m.id)
     WHERE s.id=? AND m.expires_at>${sqlNow()} AND ${authority(cap)}
@@ -65,14 +65,14 @@ export async function resolveOrganizationAdmin(db: Database, token: string, orga
   for (const space of spaceIds) routingIdentifier(space);
   const hash = await tokenHash(token), now = routingNow(clock);
   const row = await db.withSession('first-primary').prepare(`/* routing-organization-admin */
-    SELECT c.id AS credentialId,c.account_id AS accountId,m.id AS membershipId,m.organization_id AS organizationId,
-      min(c.expires_at,c.membership_expires_at,m.expires_at) AS authorityExpiresAtMs,c.reauthenticated_at AS reauthenticatedAt
-    FROM active_credentials c JOIN active_memberships m ON m.account_id=c.account_id
+    SELECT c.id AS "credentialId",c.account_id AS "accountId",m.id AS "membershipId",m.organization_id AS "organizationId",
+      least(c.expires_at,c.membership_expires_at,m.expires_at) AS "authorityExpiresAtMs",c.reauthenticated_at AS "reauthenticatedAt"
+    FROM memory_identity.active_credentials c JOIN memory_identity.active_memberships m ON m.account_id=c.account_id
     WHERE c.token_digest=? AND c.expires_at>${sqlNow()} AND c.membership_expires_at>${sqlNow()}
       AND ${INTERACTIVE} AND m.organization_id=? AND m.expires_at>${sqlNow()} AND m.role IN ('owner','admin')
       ${options.recent ? 'AND ' + recentSql() : ''}
-      AND NOT EXISTS(SELECT 1 FROM json_each(?) wanted WHERE NOT EXISTS(
-        SELECT 1 FROM spaces s WHERE s.id=wanted.value AND s.organization_id=m.organization_id AND s.security_mode='managed'))
+      AND NOT EXISTS(SELECT 1 FROM jsonb_array_elements_text(?::jsonb) wanted WHERE NOT EXISTS(
+        SELECT 1 FROM memory_control.spaces s WHERE s.id=wanted.value AND s.organization_id=m.organization_id AND s.security_mode='managed'))
     ORDER BY m.expires_at DESC,m.id LIMIT 1`)
     .bind(hash,now,now,organizationId,now,...(options.recent ? [now-300000,now] : []),JSON.stringify(spaceIds))
     .first<OrganizationAdminAuthority & { reauthenticatedAt: number | null }>();

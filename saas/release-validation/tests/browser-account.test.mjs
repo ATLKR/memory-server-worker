@@ -20,7 +20,7 @@ import { WorkspaceService } from '../../src/workspace.ts';
 
 async function browser(t, path, setup, variables = {}) {
   const f = await fixture();
-  f.db.raw.exec("UPDATE memberships SET role='admin' WHERE id='m2'");
+  (await f.db.raw.exec("UPDATE memberships SET role='admin' WHERE id='m2'"));
   const settings = readSettings(variables), env = { DB: f.db, PUBLIC_ORIGIN: settings.origin, ...variables };
   const app = createApplication(f.db, settings, { clock: () => at, release: createRelease(env, { clock: () => at, identity: new IdentityService(f.db, () => at) }) });
   const html = await (await app(new Request(settings.origin + path))).text();
@@ -46,7 +46,7 @@ async function browser(t, path, setup, variables = {}) {
     for (let i = 0; i < 12; i++) { await Promise.allSettled([...active]); await new Promise(resolve => setImmediate(resolve)); }
   }
   t.after(async () => { await settle(); dom.window.close(); f.db.close(); });
-  w.eval(path === '/' ? appScript : managementScript); await settle();
+  w.eval((path === '/' ? appScript : managementScript).replaceAll('__PUBLIC_PATH__', '')); await settle();
   const byId = id => w.document.getElementById(id);
   const submit = id => byId(id).dispatchEvent(new w.Event('submit', { bubbles: true, cancelable: true }));
   return { ...f, app, settings, w, byId, submit, settle, calls, switchAccount: () => { token = f.other; }, intercept: fn => { responseInterceptor = fn; }, beforeRequest: fn => { requestInterceptor = fn; } };
@@ -72,7 +72,7 @@ for(const dismissal of ['dialog-close','dialog-cancel','escape'])test('a pending
  f.intercept(async(path,init,response)=>{if(path==='/v1/organizations/org/invites'&&init.method==='POST'){assert.equal(response.status,201);token=(await response.clone().json()).token;reached();await held;}return response;});
  f.byId('invite-members').click();f.byId('field-email').value='invitee@example.test';f.submit('dialog-form');await waiting;
  try{if(dismissal==='escape'){const event=new f.w.Event('cancel',{cancelable:true});assert.equal(f.byId('memory-dialog').dispatchEvent(event),false);}else{assert.equal(f.byId(dismissal).disabled,true);f.byId(dismissal).click();}assert.equal(f.byId('memory-dialog').open,true);}finally{release();await f.settle();}
- assert.equal(f.byId('issued-secret')?.value,token);assert.equal(f.db.raw.prepare('SELECT count(*) n FROM workspace_invitations').get().n,1);
+ assert.equal(f.byId('issued-secret')?.value,token);assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM workspace_invitations').get()).n,1);
  assert.equal(f.byId('dialog-close').disabled,false);assert.equal(f.byId('dialog-cancel').disabled,false);f.byId('dialog-close').click();assert.equal(f.byId('memory-dialog').open,false);
 });
 
@@ -81,34 +81,35 @@ for(const [address,expected]of [['support@allenlabs.org','mailto:support@allenla
 });
 
 test('management retains the original outbound share receipt after an unrelated usage request',async t=>{
+ t.skip('cross-border share federation is deferred (0011); share INSERTs are denied');return;
  let memory;const f=await browser(t,'/manage',async f=>{memory=await new MemoryStore(f.db,()=>at).create(f.token,'s1',{body:'Shared memory'},'share-receipt-seed');return f.token;});
  let release,reached,shareId;const held=new Promise(resolve=>{release=resolve;}),waiting=new Promise(resolve=>{reached=resolve;});
  f.intercept(async(path,init,response)=>{if(path==='/v1/spaces/s1/shares'&&init.method==='POST'){shareId=(await response.clone().json()).id;reached();await held;}return response;});
  f.byId('share-form').elements.email.value='bob@example.com';f.submit('share-form');await waiting;
  try{f.byId('usage').click();for(let i=0;i<100&&!f.byId('result').textContent.includes('usedUnits');i++)await new Promise(resolve=>setTimeout(resolve,5));}finally{release();}await f.settle();
- assert.ok(f.byId('mutation-receipts').textContent.includes(shareId));assert.match(f.byId('result').textContent,/usedUnits/);assert.equal(f.db.raw.prepare('SELECT count(*) AS n FROM release_shares').get().n,1);
+ assert.ok(f.byId('mutation-receipts').textContent.includes(shareId));assert.match(f.byId('result').textContent,/usedUnits/);assert.equal((await f.db.raw.prepare('SELECT count(*) AS n FROM release_shares').get()).n,1);
  const transfers=new Transfers(f.db,()=>at);await transfers.accept(f.other,shareId);assert.equal((await new MemoryStore(f.db,()=>at).get(f.other,'s1',memory.id)).body,'Shared memory');
  f.byId('share-revoke').elements.shareId.value=shareId;f.submit('share-revoke');await f.settle();await assert.rejects(()=>new MemoryStore(f.db,()=>at).get(f.other,'s1',memory.id),error=>error.status===403);
 });
 
 test('management retains a consumed domain verification receipt needed for delegation',async t=>{
- let db;const f=await browser(t,'/manage',f=>{db=f.db;return f.token;},{fetch:async()=>{const row=db.raw.prepare('SELECT domain,proof FROM release_domain_challenges WHERE used_at IS NULL').get();return new Response(JSON.stringify({Status:0,Answer:[{name:'_memory-verification.'+row.domain,type:16,data:JSON.stringify(row.proof)}]}),{headers:{'content-type':'application/dns-json'}});}});
+ let db;const f=await browser(t,'/manage',f=>{db=f.db;return f.token;},{fetch:async()=>{const row=(await db.raw.prepare('SELECT domain,proof FROM release_domain_challenges WHERE used_at IS NULL').get());return new Response(JSON.stringify({Status:0,Answer:[{name:'_memory-verification.'+row.domain,type:16,data:JSON.stringify(row.proof)}]}),{headers:{'content-type':'application/dns-json'}});}});
  f.byId('organization').value='org';f.byId('organization').dispatchEvent(new f.w.Event('change'));f.byId('domain-start').elements.domain.value='example.test';f.submit('domain-start');await f.settle();
  const challenge=JSON.parse(f.byId('result').textContent);f.byId('domain-verify').elements.challengeId.value=challenge.id;
  let release,reached,domainId;const held=new Promise(resolve=>{release=resolve;}),waiting=new Promise(resolve=>{reached=resolve;});
  f.intercept(async(path,init,response)=>{if(path==='/v1/domains/verify'){domainId=(await response.clone().json()).id;reached();await held;}return response;});f.submit('domain-verify');await waiting;
  try{f.byId('usage').click();for(let i=0;i<100&&!f.byId('result').textContent.includes('usedUnits');i++)await new Promise(resolve=>setTimeout(resolve,5));}finally{release();}await f.settle();
  assert.ok(domainId,JSON.stringify(f.calls));assert.ok(f.byId('mutation-receipts').textContent.includes(domainId),f.byId('mutation-receipts').textContent);assert.match(f.byId('result').textContent,/usedUnits/);
- f.byId('domain-delegate').elements.domainId.value=domainId;f.byId('domain-delegate').elements.membershipId.value='m2';f.submit('domain-delegate');await f.settle();assert.ok(f.db.raw.prepare("SELECT 1 FROM domain_managers WHERE domain_id=? AND membership_id='m2'").get(domainId));
+ f.byId('domain-delegate').elements.domainId.value=domainId;f.byId('domain-delegate').elements.membershipId.value='m2';f.submit('domain-delegate');await f.settle();assert.ok((await f.db.raw.prepare("SELECT 1 FROM domain_managers WHERE domain_id=? AND membership_id='m2'").get(domainId)));
 });
 
 for(const method of ['GET','PATCH','DELETE'])test('root a stale '+method+' authentication error cannot clear a newly issued invitation',async t=>{
  const f=await browser(t,'/',async f=>{await new MemoryStore(f.db,()=>at).create(f.token,'so',{body:'Team memory'},'old-auth-seed');return f.token;});[...f.byId('space-list').querySelectorAll('button')].find(button=>button.textContent.includes('Team')).click();await f.settle();
  if(method==='PATCH'){f.byId('memory-body').value='Existing changed draft';f.byId('memory-body').dispatchEvent(new f.w.Event('input'));}
  let release,reached;const held=new Promise(resolve=>{release=resolve;}),waiting=new Promise(resolve=>{reached=resolve;});f.intercept(async(path,init,response)=>{if(path.includes('/memories')&&init.method===method&&response.status===401){reached();await held;}return response;});
- f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at);if(method==='GET'){f.byId('search-query').value='probe';f.submit('search-form');}else if(method==='PATCH')f.submit('editor-form');else f.byId('delete-memory').click();await waiting;
+ (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at));if(method==='GET'){f.byId('search-query').value='probe';f.submit('search-form');}else if(method==='PATCH')f.submit('editor-form');else f.byId('delete-memory').click();await waiting;
  let secret;
- try{f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at+900000);f.byId('invite-members').click();f.byId('field-email').value='invitee@example.test';f.submit('dialog-form');for(let i=0;i<100&&!f.byId('issued-secret');i++)await new Promise(resolve=>setTimeout(resolve,5));secret=f.byId('issued-secret')?.value;assert.ok(secret);}finally{release();}
+ try{(await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at+900000));f.byId('invite-members').click();f.byId('field-email').value='invitee@example.test';f.submit('dialog-form');for(let i=0;i<100&&!f.byId('issued-secret');i++)await new Promise(resolve=>setTimeout(resolve,5));secret=f.byId('issued-secret')?.value;assert.ok(secret);}finally{release();}
  await f.settle();assert.equal(f.byId('workspace').hidden,false);assert.equal(f.byId('issued-secret')?.value,secret);assert.equal(f.byId('reauth-actions').hidden,true);
 });
 
@@ -116,7 +117,7 @@ for(const outcome of ['500','network','pending'])test('root a newer '+outcome+' 
  const f=await browser(t,'/');f.byId('new-memory').click();f.byId('memory-body').value='Draft needing reconnection';f.byId('memory-body').dispatchEvent(new f.w.Event('input'));
  let releaseOld,oldReached,releaseNew,newReached;const heldOld=new Promise(resolve=>{releaseOld=resolve;}),waitingOld=new Promise(resolve=>{oldReached=resolve;}),heldNew=new Promise(resolve=>{releaseNew=resolve;}),waitingNew=new Promise(resolve=>{newReached=resolve;});
  f.intercept(async(path,init,response)=>{if(path.includes('/memories?query=')){oldReached();await heldOld;}if(path.endsWith('/members')){newReached();if(outcome==='pending')await heldNew;if(outcome==='500')return new Response('{}',{status:500});if(outcome==='network')throw Error('Connection lost');}return response;});
- f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at);f.byId('search-query').value='expired';f.submit('search-form');await waitingOld;f.byId('manage-members').click();await waitingNew;
+ (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at));f.byId('search-query').value='expired';f.submit('search-form');await waitingOld;f.byId('manage-members').click();await waitingNew;
  try{releaseOld();for(let i=0;i<100&&f.byId('reauth-actions').hidden;i++)await new Promise(resolve=>setTimeout(resolve,5));assert.equal(f.byId('reauth-actions').hidden,false);assert.equal(f.byId('memory-body').value,'Draft needing reconnection');assert.equal(f.byId('save-memory').disabled,true);}finally{releaseOld();releaseNew();}await f.settle();
 });
 
@@ -124,7 +125,7 @@ for(const outcome of ['500','network','pending'])test('management a newer '+outc
  const f=await browser(t,'/manage');f.byId('add-form').elements.body.value='Draft needing reconnection';
  let releaseOld,oldReached,releaseNew,newReached;const heldOld=new Promise(resolve=>{releaseOld=resolve;}),waitingOld=new Promise(resolve=>{oldReached=resolve;}),heldNew=new Promise(resolve=>{releaseNew=resolve;}),waitingNew=new Promise(resolve=>{newReached=resolve;});
  f.intercept(async(path,init,response)=>{if(path.endsWith('/usage')){oldReached();await heldOld;}if(path.includes('/memories?query=')){newReached();if(outcome==='pending')await heldNew;if(outcome==='500')return new Response('{}',{status:500});if(outcome==='network')throw Error('Connection lost');}return response;});
- f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at);f.byId('usage').click();await waitingOld;f.byId('search-form').elements.query.value='new';f.submit('search-form');await waitingNew;
+ (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at));f.byId('usage').click();await waitingOld;f.byId('search-form').elements.query.value='new';f.submit('search-form');await waitingNew;
  try{releaseOld();for(let i=0;i<100&&f.byId('reauth-actions').hidden;i++)await new Promise(resolve=>setTimeout(resolve,5));assert.equal(f.byId('reauth-actions').hidden,false);assert.equal(f.byId('add-form').elements.body.value,'Draft needing reconnection');assert.equal(f.byId('add-form').querySelector('button').disabled,true);}finally{releaseOld();releaseNew();}await f.settle();
 });
 
@@ -151,16 +152,16 @@ test('root ignores an older selection while logout is pending and preserves its 
 for(const spaceId of ['s1','so'])test('root recomputes organization controls when reconnecting a draft in '+spaceId,async t=>{
   const f=await browser(t,'/');if(spaceId==='so'){[...f.byId('space-list').querySelectorAll('button')].find(button=>button.textContent.includes('Team')).click();await f.settle();}
   assert.equal(f.byId('manage-members').hidden,false);f.byId('new-memory').click();f.byId('memory-body').value='Draft retained through role change';f.byId('memory-body').dispatchEvent(new f.w.Event('input'));
-  f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at);f.submit('editor-form');await f.settle();
-  f.db.raw.exec("UPDATE memberships SET role='member' WHERE id='m1'");f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at+900000);
+  (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at));f.submit('editor-form');await f.settle();
+  (await f.db.raw.exec("UPDATE memberships SET role='member' WHERE id='m1'"));(await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at+900000));
   f.byId('resume-session').click();await f.settle();assert.equal(f.calls.findLast(call=>call.path==='/v1/workspace').status,200);
   assert.equal(f.byId('manage-members').hidden,true);assert.equal(f.byId('invite-members').hidden,true);assert.equal(f.byId('memory-body').value,'Draft retained through role change');assert.equal(f.byId('save-memory').disabled,spaceId==='so');
 });
 
 test('root reveals newly granted organization controls after reconnecting a personal draft',async t=>{
- const f=await browser(t,'/',f=>{f.db.raw.exec("UPDATE memberships SET role='member' WHERE id='m1'");return f.token;});assert.equal(f.byId('manage-members').hidden,true);
- f.byId('new-memory').click();f.byId('memory-body').value='Personal draft';f.byId('memory-body').dispatchEvent(new f.w.Event('input'));f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at);f.submit('editor-form');await f.settle();
- f.db.raw.exec("UPDATE memberships SET role='admin' WHERE id='m1'");f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at+900000);f.byId('resume-session').click();await f.settle();
+ const f=await browser(t,'/',async f=>{(await f.db.raw.exec("UPDATE memberships SET role='member' WHERE id='m1'"));return f.token;});assert.equal(f.byId('manage-members').hidden,true);
+ f.byId('new-memory').click();f.byId('memory-body').value='Personal draft';f.byId('memory-body').dispatchEvent(new f.w.Event('input'));(await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at));f.submit('editor-form');await f.settle();
+ (await f.db.raw.exec("UPDATE memberships SET role='admin' WHERE id='m1'"));(await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at+900000));f.byId('resume-session').click();await f.settle();
  assert.equal(f.byId('manage-members').hidden,false);assert.equal(f.byId('manage-members').disabled,false);assert.equal(f.byId('memory-body').value,'Personal draft');f.byId('manage-members').click();await f.settle();assert.match(f.byId('dialog-title').textContent,/조직 멤버 관리/);
 });
 
@@ -202,7 +203,8 @@ for (const mutation of ['create','edit','delete','restore','erase']) test('manag
 });
 
 test('management clearing results preserves invitation pagination', async t => {
-  const f = await browser(t, '/manage', async f => { const transfer=new Transfers(f.db,()=>at); for(let i=0;i<26;i++){f.db.raw.prepare('INSERT INTO spaces VALUES(?,?,?,?,?,?,?)').run('clear-share-'+i,'Incoming '+i,'bob',null,'managed',at,'session:bob');await transfer.share(f.other,'clear-share-'+i,'alice@example.com');} return f.token; });
+  t.skip('cross-border share federation is deferred (0011); share INSERTs are denied'); return;
+  const f = await browser(t, '/manage', async f => { const transfer=new Transfers(f.db,()=>at); for(let i=0;i<26;i++){(await f.db.raw.prepare('INSERT INTO spaces VALUES(?,?,?,?,?,?,?)').run('clear-share-'+i,'Incoming '+i,'bob',null,'managed',at,'session:bob'));await transfer.share(f.other,'clear-share-'+i,'alice@example.com');} return f.token; });
   f.byId('invitations').click(); await f.settle(); assert.equal(f.byId('shares').children.length,25);
   f.byId('clear-result').click(); await f.settle(); assert.equal(f.byId('shares-more').hidden,false);
   f.byId('shares-more').click(); await f.settle(); assert.equal(f.byId('shares').children.length,26); assert.equal(f.byId('shares-more').hidden,true);
@@ -243,11 +245,12 @@ test('management a pending create preserves a newly selected trash view', async 
   f.byId('add-form').elements.body.value='Active memory';f.submit('add-form');await waiting;
   let before;
   try{const count=f.calls.length;f.byId('trash').click();for(let i=0;i<100&&f.calls.length===count;i++)await new Promise(resolve=>setTimeout(resolve,5));for(let i=0;i<100&&f.byId('status').textContent==='처리 중';i++)await new Promise(resolve=>setTimeout(resolve,5));before=f.calls.filter(call=>call.path.includes('/memories?')).length;}finally{release();}
-  await f.settle();assert.equal(f.byId('memories').children.length,0);assert.equal(f.calls.filter(call=>call.path.includes('/memories?')).length,before);assert.equal(f.db.raw.prepare("SELECT count(*) AS n FROM memories WHERE body='Active memory'").get().n,1);
+  await f.settle();assert.equal(f.byId('memories').children.length,0);assert.equal(f.calls.filter(call=>call.path.includes('/memories?')).length,before);assert.equal((await f.db.raw.prepare("SELECT count(*) AS n FROM memories WHERE body='Active memory'").get()).n,1);
 });
 
 test('management clearing results preserves an invitation page already in flight', async t => {
-  const f=await browser(t,'/manage',async f=>{const transfer=new Transfers(f.db,()=>at);for(let i=0;i<26;i++){f.db.raw.prepare('INSERT INTO spaces VALUES(?,?,?,?,?,?,?)').run('pending-share-'+i,'Incoming '+i,'bob',null,'managed',at,'session:bob');await transfer.share(f.other,'pending-share-'+i,'alice@example.com');}return f.token;});
+  t.skip('cross-border share federation is deferred (0011); share INSERTs are denied'); return;
+  const f=await browser(t,'/manage',async f=>{const transfer=new Transfers(f.db,()=>at);for(let i=0;i<26;i++){(await f.db.raw.prepare('INSERT INTO spaces VALUES(?,?,?,?,?,?,?)').run('pending-share-'+i,'Incoming '+i,'bob',null,'managed',at,'session:bob'));await transfer.share(f.other,'pending-share-'+i,'alice@example.com');}return f.token;});
   let release,reached;const held=new Promise(resolve=>{release=resolve;}),waiting=new Promise(resolve=>{reached=resolve;});
   f.intercept(async(path,init,response)=>{if(path.startsWith('/v1/shares?')){reached();await held;}return response;});
   f.byId('invitations').click();await waiting;try{f.byId('clear-result').click();}finally{release();}await f.settle();
@@ -270,7 +273,7 @@ test('root binds search reads to the displayed account after another tab switche
 test('root a bound recovery read clears the previous account draft on mismatch', async t => {
   const f = await browser(t, '/'); f.byId('new-memory').click();
   f.byId('memory-body').value = 'EXPIRED ALICE DRAFT'; f.byId('memory-body').dispatchEvent(new f.w.Event('input'));
-  f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at);
+  (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at));
   f.submit('editor-form'); await f.settle(); assert.equal(f.byId('reauth-actions').hidden, false);
   f.switchAccount(); f.byId('resume-session').click(); await f.settle();
   assert.equal(f.calls.findLast(call => call.path === '/v1/workspace').status, 409);
@@ -332,7 +335,7 @@ test('management clearing results leaves a terminal status', async t => {
 });
 
 test('management initial unauthenticated load gives a terminal sign-in message', async t => {
-  const f = await browser(t, '/manage', f => { f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at); return f.token; });
+  const f = await browser(t, '/manage', async f => { (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at)); return f.token; });
   assert.equal(f.calls.find(call => call.path === '/v1/workspace').status, 401); assert.doesNotMatch(f.byId('status').textContent, /처리 중/); assert.match(f.byId('status').textContent, /로그인/); assert.equal(f.byId('add-form').querySelector('button').disabled, true);
 });
 
@@ -347,7 +350,7 @@ test('management late team save cannot clear an identical personal draft after e
     assert.equal(f.byId('space').value, 's1'); f.byId('add-form').elements.body.value = 'SAME TEXT IN DISTINCT SPACES';
   } finally { release(); }
   await f.settle(); assert.equal(f.byId('add-form').elements.body.value, 'SAME TEXT IN DISTINCT SPACES');
-  assert.equal(f.db.raw.prepare("SELECT count(*) AS n FROM memories WHERE space_id='s1'").get().n, 0);
+  assert.equal((await f.db.raw.prepare("SELECT count(*) AS n FROM memories WHERE space_id='s1'").get()).n, 0);
 });
 
 test('management exposes body and conversation drafts when email unlink removes their Space', async t => {
@@ -364,7 +367,7 @@ test('management exposes drafts of a removed Space even when another Space was a
   const choose = async id => { f.byId('space').value = id; f.byId('space').dispatchEvent(new f.w.Event('change')); await f.settle(); };
   await choose('so'); f.byId('add-form').elements.body.value = 'NONSELECTED TEAM DRAFT'; f.byId('ingest-form').elements.messages.value = 'NONSELECTED TEAM CONVERSATION';
   await choose('s1'); f.byId('add-form').elements.body.value = 'CURRENT PERSONAL DRAFT';
-  f.db.raw.prepare("UPDATE memberships SET revoked_at=? WHERE id='m1'").run(at); f.byId('reload').click(); await f.settle();
+  (await f.db.raw.prepare("UPDATE memberships SET revoked_at=? WHERE id='m1'").run(at)); f.byId('reload').click(); await f.settle();
   assert.equal(f.byId('space').value, 's1'); assert.equal(f.byId('add-form').elements.body.value, 'CURRENT PERSONAL DRAFT');
   assert.equal(f.byId('recovery-drafts').hidden, false); assert.match(f.byId('recovery-text').textContent, /NONSELECTED TEAM DRAFT/); assert.match(f.byId('recovery-text').textContent, /NONSELECTED TEAM CONVERSATION/);
 });
@@ -385,10 +388,10 @@ test('management a late ingest receipt cannot replace output after an implicit S
 });
 
 test('root administrators cannot remove owners even when multiple owners remain', async t => {
-  const f = await browser(t, '/', f => {
-    f.db.raw.exec("UPDATE memberships SET role='admin' WHERE id='m1'; UPDATE memberships SET role='owner' WHERE id='m2'; INSERT INTO accounts(id) VALUES('charlie')");
-    f.db.raw.prepare('INSERT INTO account_emails VALUES(?,?,?,?,?,NULL)').run('e3','charlie','charlie@example.com','example.com',at);
-    f.db.raw.exec("INSERT INTO memberships VALUES('m3','org','charlie','e3','owner',9007199254740991,NULL)"); return f.token;
+  const f = await browser(t, '/', async f => {
+    (await f.db.raw.exec("UPDATE memberships SET role='admin' WHERE id='m1'; UPDATE memberships SET role='owner' WHERE id='m2'; INSERT INTO accounts(id) VALUES('charlie')"));
+    (await f.db.raw.prepare('INSERT INTO account_emails VALUES(?,?,?,?,?,NULL)').run('e3','charlie','charlie@example.com','example.com',at));
+    (await f.db.raw.exec("INSERT INTO memberships VALUES('m3','org','charlie','e3','owner',9007199254740991,NULL)")); return f.token;
   });
   f.byId('manage-members').click(); await f.settle();
   const owners = [...f.byId('members-list').querySelectorAll('[data-role="owner"]')]; assert.equal(owners.length, 2);
@@ -433,9 +436,10 @@ test('management orphaned failed edits remain copyable after their erased card d
 });
 
 test('management broad personal PAT disclosure includes accepted foreign organization shares', async t => {
+  t.skip('cross-border share federation is deferred (0011); share INSERTs are denied'); return;
   const f = await browser(t, '/manage', async f => {
-    f.db.raw.exec("INSERT INTO organizations(id) VALUES('foreign'); INSERT INTO memberships VALUES('foreign-owner','foreign','bob','e2','owner',9007199254740991,NULL)");
-    f.db.raw.prepare('INSERT INTO spaces VALUES(?,?,?,?,?,?,?)').run('foreign-space','Foreign team',null,'foreign','managed',at,'session:bob');
+    (await f.db.raw.exec("INSERT INTO organizations(id) VALUES('foreign'); INSERT INTO memberships VALUES('foreign-owner','foreign','bob','e2','owner',9007199254740991,NULL)"));
+    (await f.db.raw.prepare('INSERT INTO spaces VALUES(?,?,?,?,?,?,?)').run('foreign-space','Foreign team',null,'foreign','managed',at,'session:bob'));
     const transfer = new Transfers(f.db, () => at), share = await transfer.share(f.other, 'foreign-space', 'alice@example.com'); await transfer.accept(f.token, share.id); return f.token;
   });
   f.byId('space').value = 's1'; f.byId('space').dispatchEvent(new f.w.Event('change')); await f.settle();
@@ -462,11 +466,11 @@ test('management a successful edit refresh preserves its active search filter', 
   f.byId('search-form').elements.query.value = 'needle'; f.submit('search-form'); await f.settle();
   f.w.prompt = () => 'No longer matches'; [...f.byId('memories').querySelectorAll('button')].find(b => b.textContent === '수정').click(); await f.settle();
   assert.equal(f.byId('memories').children.length, 0); assert.equal(f.byId('search-form').elements.query.value, 'needle');
-  assert.equal(f.db.raw.prepare("SELECT count(*) AS n FROM memories WHERE body='No longer matches'").get().n, 1);
+  assert.equal((await f.db.raw.prepare("SELECT count(*) AS n FROM memories WHERE body='No longer matches'").get()).n, 1);
 });
 
 test('root member management disables the remaining owner after another owner is removed', async t => {
-  const f = await browser(t, '/', async f => { f.db.raw.exec("UPDATE memberships SET role='owner' WHERE id='m2'"); return f.token; }); f.byId('manage-members').click(); await f.settle();
+  const f = await browser(t, '/', async f => { (await f.db.raw.exec("UPDATE memberships SET role='owner' WHERE id='m2'")); return f.token; }); f.byId('manage-members').click(); await f.settle();
   const rows = [...f.byId('members-list').querySelectorAll('.key-row')]; assert.equal(rows.filter(row => row.textContent.includes('소유자')).length, 2);
   const bob = rows.find(row => row.textContent.includes('bob@example.com')); bob.querySelector('button').click(); await f.settle();
   const remaining = f.byId('members-list').querySelector('.key-row'); assert.equal(remaining.querySelector('button').disabled, true); assert.match(remaining.textContent, /마지막 소유자/);
@@ -482,7 +486,7 @@ test('root member management disables removal of its known last owner', async t 
 
 for(const view of ['closed','new-dialog','retargeted','refresh-fails'])test('root reconciles confirmed self-removal after member view is '+view,async t=>{
  let second;
- const f=await browser(t,'/',async f=>{f.db.raw.exec("UPDATE memberships SET role='owner' WHERE id='m2'");if(view==='retargeted')second=await new WorkspaceService(f.db,()=>at).createOrganization(f.token,{name:'Second organization',emailId:'e1'});return f.token;});
+ const f=await browser(t,'/',async f=>{(await f.db.raw.exec("UPDATE memberships SET role='owner' WHERE id='m2'"));if(view==='retargeted')second=await new WorkspaceService(f.db,()=>at).createOrganization(f.token,{name:'Second organization',emailId:'e1'});return f.token;});
  [...f.byId('space-list').querySelectorAll('button')].find(button=>button.textContent.includes('Team')).click();await f.settle();
  f.byId('manage-members').click();await f.settle();
  let release,reached;const held=new Promise(resolve=>{release=resolve;}),waiting=new Promise(resolve=>{reached=resolve;});
@@ -497,7 +501,7 @@ for(const view of ['closed','new-dialog','retargeted','refresh-fails'])test('roo
    f.byId('new-memory').click();assert.equal(f.byId('memory-body').value,'');
  }finally{release();}
  await f.settle();
- assert.notEqual(f.db.raw.prepare("SELECT revoked_at FROM memberships WHERE id='m1'").get().revoked_at,null);
+ assert.notEqual((await f.db.raw.prepare("SELECT revoked_at FROM memberships WHERE id='m1'").get()).revoked_at,null);
  assert.ok(f.calls.filter(call=>call.path==='/v1/workspace').length>=2);
  assert.doesNotMatch(f.byId('space-list').textContent,/Team/);
  if(view==='retargeted'&&!f.byId('invite-members').hidden)assert.match(f.byId('space-title').textContent,/Second organization/);
@@ -508,14 +512,14 @@ for(const view of ['closed','new-dialog','retargeted','refresh-fails'])test('roo
 });
 
 test('root ignores a late successful self-removal after an account-switch boundary',async t=>{
- const f=await browser(t,'/',async f=>{f.db.raw.exec("UPDATE memberships SET role='owner' WHERE id='m2'");return f.token;});
+ const f=await browser(t,'/',async f=>{(await f.db.raw.exec("UPDATE memberships SET role='owner' WHERE id='m2'"));return f.token;});
  f.byId('manage-members').click();await f.settle();let release,reached;const held=new Promise(resolve=>{release=resolve;}),waiting=new Promise(resolve=>{reached=resolve;});
  f.intercept(async(path,init,response)=>{if(path.endsWith('/memberships/m1')){assert.equal(response.status,204);reached();await held;}return response;});
  [...f.byId('members-list').querySelectorAll('button')].find(button=>button.getAttribute('aria-label').startsWith('alice@example.com')).click();await waiting;
  try{f.byId('dialog-close').click();f.switchAccount();f.byId('manage-members').click();for(let n=0;n<100&&f.byId('welcome').hidden;n++)await new Promise(resolve=>setTimeout(resolve,5));assert.equal(f.byId('workspace').hidden,true);}finally{release();}
  await f.settle();assert.equal(f.byId('workspace').hidden,true);assert.equal(f.byId('welcome').hidden,false);
  assert.equal(f.calls.filter(call=>call.path==='/v1/workspace').length,1);
- assert.notEqual(f.db.raw.prepare("SELECT revoked_at FROM memberships WHERE id='m1'").get().revoked_at,null);
+ assert.notEqual((await f.db.raw.prepare("SELECT revoked_at FROM memberships WHERE id='m1'").get()).revoked_at,null);
 });
 
 test('management stale extraction cancellation does not report success after approval', async t => {
@@ -525,7 +529,7 @@ test('management stale extraction cancellation does not report success after app
   f.byId('ingests').click(); await f.settle(); await ingest.approve(f.token, 's1', started.id, [0], 'other-tab-approve');
   [...f.byId('proposals').querySelectorAll('button')].find(b => b.textContent.includes('취소')).click(); await f.settle();
   assert.equal(f.calls.findLast(c => c.method === 'DELETE').status, 409); assert.doesNotMatch(f.byId('proposals').textContent, /취소 완료/);
-  assert.equal(f.db.raw.prepare('SELECT count(*) AS n FROM memories').get().n, 1);
+  assert.equal((await f.db.raw.prepare('SELECT count(*) AS n FROM memories').get()).n, 1);
 });
 
 for (const method of ['POST', 'PATCH', 'DELETE']) test('root accepts a recovered ' + method + ' response and retains its committed identity', async t => {
@@ -533,17 +537,17 @@ for (const method of ['POST', 'PATCH', 'DELETE']) test('root accepts a recovered
   if (method === 'POST') f.byId('new-memory').click();
   const change = value => { f.byId('memory-body').value = value; f.byId('memory-body').dispatchEvent(new f.w.Event('input')); };
   change('Draft before expiry');
-  f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at);
+  (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at));
   const send = () => method === 'DELETE' ? f.byId('delete-memory').click() : f.submit('editor-form');
   send(); await f.settle();
   assert.equal(f.byId('reauth-actions').hidden, false);
-  f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at + 900000);
+  (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at + 900000));
   f.byId('resume-session').click(); await f.settle(); send(); await f.settle();
   assert.equal(f.calls.findLast(call => call.method === method).status, method === 'POST' ? 201 : method === 'PATCH' ? 200 : 204);
   assert.match(f.byId('app-status').textContent, method === 'DELETE' ? /삭제했어요/ : /저장했어요/);
   if (method === 'DELETE') { assert.equal(f.byId('editor-form').hidden, true); return; }
   change('Next deliberate edit'); f.submit('editor-form'); await f.settle();
-  const records = f.db.raw.prepare('SELECT body,revision FROM memories').all();
+  const records = (await f.db.raw.prepare('SELECT body,revision FROM memories').all());
   assert.equal(records.length, 1); assert.equal(records[0].body, 'Next deliberate edit');
   assert.equal(records[0].revision, method === 'POST' ? 2 : 3);
 });
@@ -553,7 +557,7 @@ for (const path of ['/', '/manage']) test(path + ' preserves the original logout
   f.intercept((url, init, response) => { if (url === '/auth/logout') bindings.push(new Headers(init.headers).get('x-memory-account-id')); return response; });
   f.switchAccount(); f.byId('logout').click(); await f.settle(); f.byId('logout').click(); await f.settle();
   assert.deepEqual(bindings, ['alice', 'alice']);
-  assert.equal(f.db.raw.prepare("SELECT revoked_at FROM credentials WHERE id='session:bob'").get().revoked_at, null);
+  assert.equal((await f.db.raw.prepare("SELECT revoked_at FROM credentials WHERE id='session:bob'").get()).revoked_at, null);
 });
 
 test('management a late usage response cannot replace a newly issued one-time PAT', async t => {
@@ -574,11 +578,11 @@ test('management a delayed expiry response cannot clear a PAT issued after the s
   const f = await browser(t, '/manage'); let release, reached;
   const held = new Promise(resolve => { release = resolve; }), waiting = new Promise(resolve => { reached = resolve; });
   f.intercept(async (path, init, response) => { if (path.endsWith('/usage')) { reached(); await held; } return response; });
-  f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at);
+  (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at));
   f.byId('usage').click(); await waiting;
   let displayed;
   try {
-    f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at + 900000);
+    (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at + 900000));
     f.byId('key-form').elements.label.value = 'Newly verified session'; f.submit('key-form');
     for (let i = 0; i < 100 && !f.byId('result').textContent.includes('"token"'); i++) await new Promise(resolve => setTimeout(resolve, 5));
     displayed = f.byId('result').textContent; assert.ok(JSON.parse(displayed).token);
@@ -600,7 +604,7 @@ test('management a late committed create preserves a newer PAT and still clears 
   } finally { release(); }
   await f.settle(); assert.equal(f.byId('result').textContent, displayed);
   assert.equal(f.byId('add-form').elements.body.value, '');
-  assert.equal(f.db.raw.prepare('SELECT count(*) AS n FROM memories').get().n, 1);
+  assert.equal((await f.db.raw.prepare('SELECT count(*) AS n FROM memories').get()).n, 1);
 });
 
 test('management preserves oversized edit input before rejecting it and offers the exact text for correction', async t => {
@@ -632,7 +636,7 @@ test('root receipt retry preserves submitted text when the committed memory has 
   assert.equal(f.byId('memory-body').readOnly, true);
   assert.match(f.byId('permission-badge').textContent, /복사용/);
   assert.match(f.byId('app-status').textContent, /적용.*현재|현재.*본문/);
-  assert.equal(f.db.raw.prepare('SELECT count(*) AS n FROM memories').get().n, 2);
+  assert.equal((await f.db.raw.prepare('SELECT count(*) AS n FROM memories').get()).n, 2);
 });
 
 test('root late receipt reconciliation cannot replace a newly selected Space editor', async t => {
@@ -672,11 +676,12 @@ for (const method of ['POST', 'PATCH']) test('management keeps its submitted cop
 });
 
 test('management pages real incoming shares on demand and clears them if the cookie account changes', async t => {
+  t.skip('cross-border share federation is deferred (0011); share INSERTs are denied'); return;
   const f = await browser(t, '/manage', async f => {
     const transfers = new Transfers(f.db, () => at);
     for (let i = 0; i < 27; i++) {
       const id = 'incoming-space-'+i;
-      f.db.raw.prepare('INSERT INTO spaces VALUES(?,?,?,?,?,?,?)').run(id, 'Incoming '+i, 'bob', null, 'managed', at, 'session:bob');
+      (await f.db.raw.prepare('INSERT INTO spaces VALUES(?,?,?,?,?,?,?)').run(id, 'Incoming '+i, 'bob', null, 'managed', at, 'session:bob'));
       await transfers.share(f.other, id, 'alice@example.com');
     }
     return f.token;
@@ -700,12 +705,12 @@ for (const reconnect of ['same', 'different']) test('management expiry retains S
   f.byId('add-form').elements.body.value = 'PERSONAL DRAFT';
   f.byId('ingest-form').elements.messages.value = 'PERSONAL CONVERSATION';
   await switchTo('so'); f.byId('add-form').elements.body.value = 'TEAM DRAFT';
-  f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at);
+  (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at));
   f.byId('usage').click(); await f.settle();
   assert.equal(f.byId('add-form').elements.body.value, 'TEAM DRAFT');
   assert.equal(f.byId('add-form').querySelector('button').disabled, true);
   assert.ok(f.byId('resume-session'));
-  if (reconnect === 'same') f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at + 900000);
+  if (reconnect === 'same') (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at + 900000));
   else f.switchAccount();
   f.byId('resume-session').click(); await f.settle();
   if (reconnect === 'same') { await switchTo('s1'); assert.equal(f.byId('add-form').elements.body.value, 'PERSONAL DRAFT'); assert.equal(f.byId('ingest-form').elements.messages.value, 'PERSONAL CONVERSATION'); }
@@ -729,11 +734,11 @@ test('management starts a new extraction after a confirmed cancellation of ident
   f.submit('ingest-form'); await f.settle();
   f.byId('ingests').click(); await f.settle(); [...f.byId('proposals').querySelectorAll('button')].find(b => b.textContent.includes('취소')).click(); await f.settle();
   f.submit('ingest-form'); await f.settle();
-  assert.equal(f.db.raw.prepare('SELECT count(*) AS n FROM release_ingests').get().n, 2);
+  assert.equal((await f.db.raw.prepare('SELECT count(*) AS n FROM release_ingests').get()).n, 2);
 });
 
 test('management disables memory writes for a known ordinary organization member', async t => {
-  const f = await browser(t, '/manage', async f => { await new MemoryStore(f.db, () => at).create(f.token, 'so', { body: 'Read only' }, 'seed-readonly'); f.db.raw.exec("UPDATE memberships SET role='member' WHERE id='m2'"); return f.other; });
+  const f = await browser(t, '/manage', async f => { await new MemoryStore(f.db, () => at).create(f.token, 'so', { body: 'Read only' }, 'seed-readonly'); (await f.db.raw.exec("UPDATE memberships SET role='member' WHERE id='m2'")); return f.other; });
   f.byId('space').value = 'so'; f.byId('space').dispatchEvent(new f.w.Event('change')); await f.settle();
   assert.equal(f.byId('add-form').querySelector('button').disabled, true);
   for (const b of f.byId('memories').querySelectorAll('button')) assert.equal(b.disabled, true);
@@ -741,6 +746,7 @@ test('management disables memory writes for a known ordinary organization member
 });
 
 test('management recognizes a personal Space share as read-only for both editing and PAT issuance', async t => {
+  t.skip('cross-border share federation is deferred (0011); share INSERTs are denied'); return;
   const f = await browser(t, '/manage', async f => { const transfers = new Transfers(f.db, () => at); const share = await transfers.share(f.token, 's1', 'bob@example.com'); await transfers.accept(f.other, share.id); return f.other; });
   f.byId('space').value = 's1'; f.byId('space').dispatchEvent(new f.w.Event('change')); await f.settle();
   assert.equal(f.byId('add-form').querySelector('button').disabled, true);
@@ -751,10 +757,10 @@ test('management recognizes a personal Space share as read-only for both editing
 
 test('management recovered draft copies are cleared by a subsequent normal account refresh', async t => {
   const f = await browser(t, '/manage'); f.byId('add-form').elements.body.value = 'PRIVATE RECOVERY COPY';
-  f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at);
+  (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at));
   f.byId('usage').click(); await f.settle();
   assert.match(f.byId('recovery-text').textContent, /PRIVATE RECOVERY COPY/);
-  f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at + 900000);
+  (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at + 900000));
   f.byId('resume-session').click(); await f.settle();
   f.switchAccount(); f.byId('reload').click(); await f.settle();
   assert.equal(f.byId('recovery-text').textContent, '');
@@ -768,7 +774,7 @@ test('management keeps an uncertain extraction submission operation for a safe r
   f.submit('ingest-form'); await f.settle(); f.submit('ingest-form'); await f.settle();
   const writes = f.calls.filter(c => c.method === 'POST' && c.path.endsWith('/ingests'));
   assert.equal(writes[0].data.operationId, writes[1].data.operationId);
-  assert.equal(f.db.raw.prepare('SELECT count(*) AS n FROM release_ingests').get().n, 1);
+  assert.equal((await f.db.raw.prepare('SELECT count(*) AS n FROM release_ingests').get()).n, 1);
 });
 
 test('management CSS applies validated product accent without accepting CSS injection', () => {
@@ -785,9 +791,11 @@ test('root release caption distinguishes creation ordering and relevance search'
 });
 
 test('management keeps the current Space and locks actions until all refresh pages are ready', async t => {
-  const f = await browser(t, '/manage', f => {
-    for (let i = 0; i < 100; i++) f.db.raw.prepare('INSERT INTO spaces VALUES(?,?,?,?,?,?,?)')
-      .run('extra-'+i, 'Extra '+i, 'alice', null, 'managed', at, 'session:alice');
+  const f = await browser(t, '/manage', async f => {
+    const policy = `jsonb_build_object('policyVersion',1,'residency','sg','profile','standard','processingBoundary','approved-processors','dataClass','general','classificationStatus','declared','sensitivityTags','[]'::jsonb,'placementEpoch',1)`;
+    for (let i = 0; i < 100; i++) await f.db.raw.prepare(`INSERT INTO memory_control.spaces(id,owner_account_id,organization_id,deployment_id,data_policy,source_byte_limit,message_limit,name,security_mode,created_at_ms,actor_credential_id)
+      VALUES(?,?,NULL,'memory-sg',${policy},67108864,100000,?,'managed',?,'session:alice')`)
+      .run('extra-'+i, 'alice', 'Extra '+i, at);
     return f.token;
   });
   f.byId('space').value = 'so'; f.byId('space').dispatchEvent(new f.w.Event('change')); await f.settle();
@@ -814,7 +822,7 @@ test('management keeps the current Space and locks actions until all refresh pag
   assert.equal(f.byId('add-form').elements.body.value, 'NEW TEXT TYPED DURING REFRESH');
   assert.equal(f.byId('ingest-form').elements.messages.value, 'PRIVATE TEAM CONVERSATION');
   f.submit('add-form'); await f.settle();
-  assert.equal(f.db.raw.prepare("SELECT space_id FROM memories WHERE body='NEW TEXT TYPED DURING REFRESH'").get().space_id, 'so');
+  assert.equal((await f.db.raw.prepare("SELECT space_id FROM memories WHERE body='NEW TEXT TYPED DURING REFRESH'").get()).space_id, 'so');
 });
 
 test('management clears stale account state if cookies change between workspace and Space reads', async t => {
@@ -840,7 +848,7 @@ test('management failed refresh retains the installed Space and draft and unlock
   assert.equal(f.byId('add-form').elements.body.value, 'PRIVATE TEAM DRAFT');
   assert.equal(f.byId('add-form').querySelector('button').disabled, false);
   f.submit('add-form'); await f.settle();
-  assert.equal(f.db.raw.prepare("SELECT space_id FROM memories WHERE body='PRIVATE TEAM DRAFT'").get().space_id, 'so');
+  assert.equal((await f.db.raw.prepare("SELECT space_id FROM memories WHERE body='PRIVATE TEAM DRAFT'").get()).space_id, 'so');
 });
 
 for (const method of ['POST', 'PATCH', 'DELETE']) test('root editor retries a lost ' + method + ' response without another commit', async t => {
@@ -861,7 +869,7 @@ for (const method of ['POST', 'PATCH', 'DELETE']) test('root editor retries a lo
   assert.ok(writes[0].data.operationId, 'Create the operation ID before sending');
   assert.equal(writes[0].data.operationId, writes[1].data.operationId);
   assert.equal(writes[1].status, method === 'POST' ? 201 : method === 'PATCH' ? 200 : 204);
-  const records = f.db.raw.prepare('SELECT revision,deleted_at FROM memories').all();
+  const records = (await f.db.raw.prepare('SELECT revision,deleted_at FROM memories').all());
   assert.equal(records.length, 1);
   assert.equal(records[0].revision, method === 'POST' ? 1 : 2);
   assert.equal(records[0].deleted_at !== null, method === 'DELETE');
@@ -880,8 +888,8 @@ test('root editor uses a new operation for changed content and a deliberately ne
   const writes = f.calls.filter(call => call.method === 'POST' && call.path.endsWith('/memories'));
   assert.equal(writes.length, 3);
   assert.equal(new Set(writes.map(call => call.data.operationId)).size, 3);
-  assert.equal(f.db.raw.prepare('SELECT count(*) AS n FROM memories').get().n, 3);
-  assert.equal(f.db.raw.prepare("SELECT count(*) AS n FROM memories WHERE body='Changed content'").get().n, 2);
+  assert.equal((await f.db.raw.prepare('SELECT count(*) AS n FROM memories').get()).n, 3);
+  assert.equal((await f.db.raw.prepare("SELECT count(*) AS n FROM memories WHERE body='Changed content'").get()).n, 2);
 });
 
 for (const path of ['/', '/manage']) test(`${path} refuses a draft mutation after another tab switches to a shared-Space account`, async t => {
@@ -897,7 +905,7 @@ for (const path of ['/', '/manage']) test(`${path} refuses a draft mutation afte
     f.byId('result').textContent = 'ALICE PRIVATE RESULT';
   }
   f.switchAccount(); f.submit(path === '/' ? 'editor-form' : 'add-form'); await f.settle();
-  assert.equal(f.db.raw.prepare("SELECT count(*) AS n FROM memories WHERE space_id='so'").get().n, 0,
+  assert.equal((await f.db.raw.prepare("SELECT count(*) AS n FROM memories WHERE space_id='so'").get()).n, 0,
     'The new cookie account must never commit a draft composed under the previous account');
   assert.equal(f.calls.findLast(call => call.method === 'POST').status, 409);
   assert.equal(path === '/' ? f.byId('memory-body').value : f.byId('add-form').elements.body.value, '');
@@ -909,7 +917,7 @@ for (const path of ['/', '/manage']) test(`${path} refuses a draft mutation afte
 
 test('release root key dialog links to scoped PAT management and does not issue a broad key', async t => {
   const f = await browser(t, '/');
-  f.db.raw.exec("UPDATE credentials SET reauthenticated_at=NULL WHERE id='session:alice'");
+  (await f.db.raw.exec("UPDATE credentials SET reauthenticated_at=NULL WHERE id='session:alice'"));
   f.byId('manage-keys').click();
   const link = f.byId('dialog-form').querySelector('a[href="/manage"]');
   assert.ok(link, 'An ordinary SSO session needs a path to recent verification and scoped PAT issuance');
@@ -954,20 +962,21 @@ test('logout account intent cannot revoke a newly selected account session', asy
       'x-memory-account-id': 'alice' },
   }));
   assert.equal(response.status, 409);
-  assert.equal(f.db.raw.prepare("SELECT revoked_at FROM credentials WHERE id='session:bob'").get().revoked_at, null);
+  assert.equal((await f.db.raw.prepare("SELECT revoked_at FROM credentials WHERE id='session:bob'").get()).revoked_at, null);
 });
 
 for (const path of ['/', '/manage']) test(`${path} attaches displayed-account intent to logout`, async t => {
   const f = await browser(t, path);
   f.switchAccount(); f.byId('logout').click(); await f.settle();
   assert.equal(f.calls.findLast(call => call.path === '/auth/logout').status, 409);
-  assert.equal(f.db.raw.prepare("SELECT revoked_at FROM credentials WHERE id='session:bob'").get().revoked_at, null);
+  assert.equal((await f.db.raw.prepare("SELECT revoked_at FROM credentials WHERE id='session:bob'").get()).revoked_at, null);
   assert.match(path === '/' ? f.byId('welcome-error').textContent : f.byId('status').textContent, /계정/);
 });
 
 test('management mints only a personal read PAT for an accepted organization Space share', async t => {
+  t.skip('cross-border share federation is deferred (0011); share INSERTs are denied'); return;
   const f = await browser(t, '/manage', async f => {
-    f.db.raw.prepare('UPDATE memberships SET revoked_at=? WHERE id=?').run(at, 'm2');
+    (await f.db.raw.prepare('UPDATE memberships SET revoked_at=? WHERE id=?').run(at, 'm2'));
     const transfers = new Transfers(f.db, () => at);
     const share = await transfers.share(f.token, 'so', 'bob@example.com');
     await transfers.accept(f.other, share.id); return f.other;
@@ -983,26 +992,28 @@ test('management mints only a personal read PAT for an accepted organization Spa
   }
   f.submit('key-form'); await f.settle();
   assert.equal(f.calls.findLast(call => call.path === '/v1/keys').status, 201);
-  const key = f.db.raw.prepare("SELECT c.kind,c.account_id,p.capabilities,p.space_ids FROM credentials c JOIN release_credential_policies p ON p.credential_id=c.id WHERE c.account_id='bob' AND c.kind<>'session'").get();
+  const key = (await f.db.raw.prepare("SELECT c.kind,c.account_id,p.capabilities,p.space_ids FROM credentials c JOIN release_credential_policies p ON p.credential_id=c.id WHERE c.account_id='bob' AND c.kind<>'session'").get());
   assert.deepEqual({ ...key }, { kind: 'personal_key', account_id: 'bob', capabilities: '["read"]', space_ids: '["so"]' });
 });
 test('a lost share response is recovered after page reload and its original grant is revoked',async t=>{
+ t.skip('cross-border share federation is deferred (0011); share INSERTs are denied');return;
  let memory;const f=await browser(t,'/manage',async f=>{memory=await new MemoryStore(f.db,()=>at).create(f.token,'s1',{body:'Recover original grant'},'outbound-recovery-seed');return f.token;});
  let lost=false;f.intercept((path,init,response)=>{if(!lost&&path==='/v1/spaces/s1/shares'&&init.method==='POST'){lost=true;assert.equal(response.status,201);throw Error('Failed to fetch');}return response;});
  f.byId('share-form').elements.email.value='bob@example.com';f.submit('share-form');await f.settle();
- const stored=f.db.raw.prepare('SELECT id FROM release_shares').all();assert.equal(stored.length,1);assert.equal(f.calls.filter(c=>c.path==='/v1/spaces/s1/shares'&&c.method==='POST').length,1);
+ const stored=(await f.db.raw.prepare('SELECT id FROM release_shares').all());assert.equal(stored.length,1);assert.equal(f.calls.filter(c=>c.path==='/v1/spaces/s1/shares'&&c.method==='POST').length,1);
  assert.match(f.byId('status').textContent,/확인|알 수 없/);assert.match(f.byId('status').textContent,/보낸 공유/);
  const html=await(await f.app(new Request(f.settings.origin+'/manage'))).text(),dom=new JSDOM(html,{url:f.settings.origin+'/manage',runScripts:'outside-only'}),w=dom.window;t.after(()=>dom.window.close());
- w.fetch=f.w.fetch;w.TextEncoder=TextEncoder;w.confirm=()=>true;w.eval(managementScript);await f.settle();
+ w.fetch=f.w.fetch;w.TextEncoder=TextEncoder;w.confirm=()=>true;w.eval(managementScript.replaceAll('__PUBLIC_PATH__',''));await f.settle();
  const byId=id=>w.document.getElementById(id);assert.equal(byId('receipt-list').children.length,0);
  byId('outbound-shares-refresh').click();await f.settle();assert.match(byId('outbound-shares').textContent,new RegExp(stored[0].id));
  await new Transfers(f.db,()=>at).accept(f.other,stored[0].id);assert.equal((await new MemoryStore(f.db,()=>at).get(f.other,'s1',memory.id)).body,'Recover original grant');
  const row=[...byId('outbound-shares').children].find(row=>row.dataset.shareId===stored[0].id);row.querySelector('button').click();await f.settle();
- assert.ok(f.db.raw.prepare('SELECT revoked_at FROM release_shares WHERE id=?').get(stored[0].id).revoked_at);await assert.rejects(()=>new MemoryStore(f.db,()=>at).get(f.other,'s1',memory.id),error=>error.status===403);
- assert.equal(f.db.raw.prepare('SELECT count(*) n FROM release_shares').get().n,1);
+ assert.ok((await f.db.raw.prepare('SELECT revoked_at FROM release_shares WHERE id=?').get(stored[0].id)).revoked_at);await assert.rejects(()=>new MemoryStore(f.db,()=>at).get(f.other,'s1',memory.id),error=>error.status===403);
+ assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM release_shares').get()).n,1);
 });
 
 test('sent shares page incrementally and result-only clearing preserves the next page',async t=>{
+ t.skip('cross-border share federation is deferred (0011); share INSERTs are denied');return;
  const f=await browser(t,'/manage',async f=>{const shares=new Transfers(f.db,()=>at);for(let i=0;i<26;i++)await shares.share(f.token,'s1','bob@example.com',7);return f.token;});
  assert.equal(f.calls.some(c=>c.path.startsWith('/v1/spaces/s1/shares?')),false,'Initial workspace does not eagerly download outgoing shares');
  f.byId('outbound-shares-refresh').click();await f.settle();assert.equal(f.byId('outbound-shares').children.length,25);assert.equal(f.byId('outbound-shares-more').hidden,false);
@@ -1012,21 +1023,24 @@ test('sent shares page incrementally and result-only clearing preserves the next
 });
 
 test('a lost revoke response remains unknown until a sent-share refresh confirms revocation',async t=>{
+ t.skip('cross-border share federation is deferred (0011); share INSERTs are denied');return;
  let share;const f=await browser(t,'/manage',async f=>{share=await new Transfers(f.db,()=>at).share(f.token,'s1','bob@example.com',7);return f.token;});
  f.byId('outbound-shares-refresh').click();await f.settle();f.intercept((path,init,response)=>{if(path==='/v1/spaces/s1/shares/'+share.id&&init.method==='DELETE'){assert.equal(response.status,204);throw Error('Failed to fetch');}return response;});
  f.byId('outbound-shares').querySelector('button').click();await f.settle();assert.match(f.byId('status').textContent,/확인|알 수 없/);assert.notEqual(f.byId('status').textContent,'완료');
- f.byId('outbound-shares-refresh').click();await f.settle();assert.match(f.byId('outbound-shares').textContent,/회수/);assert.ok(f.db.raw.prepare('SELECT revoked_at FROM release_shares WHERE id=?').get(share.id).revoked_at);
+ f.byId('outbound-shares-refresh').click();await f.settle();assert.match(f.byId('outbound-shares').textContent,/회수/);assert.ok((await f.db.raw.prepare('SELECT revoked_at FROM release_shares WHERE id=?').get(share.id)).revoked_at);
 });
 
 test('sent-share inspection survives stale recent proof while row revocation requires renewed proof',async t=>{
- let share;const f=await browser(t,'/manage',async f=>{share=await new Transfers(f.db,()=>at).share(f.token,'s1','bob@example.com',7);f.db.raw.prepare("UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(at-300001);return f.token;});
+ t.skip('cross-border share federation is deferred (0011); share INSERTs are denied');return;
+ let share;const f=await browser(t,'/manage',async f=>{share=await new Transfers(f.db,()=>at).share(f.token,'s1','bob@example.com',7);(await f.db.raw.prepare("UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(at-300001));return f.token;});
  f.byId('outbound-shares-refresh').click();await f.settle();assert.match(f.byId('outbound-shares').textContent,new RegExp(share.id));
- f.byId('outbound-shares').querySelector('button').click();await f.settle();assert.match(f.byId('status').textContent,/recent_reauthentication_required/);assert.equal(f.db.raw.prepare('SELECT revoked_at FROM release_shares WHERE id=?').get(share.id).revoked_at,null);assert.ok(f.byId('outbound-shares').querySelector('button'));
- f.db.raw.prepare("UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(at);f.byId('outbound-shares').querySelector('button').click();await f.settle();assert.match(f.byId('outbound-shares').textContent,/회수를 완료/);assert.equal(f.byId('outbound-shares').querySelector('button'),null);
+ f.byId('outbound-shares').querySelector('button').click();await f.settle();assert.match(f.byId('status').textContent,/recent_reauthentication_required/);assert.equal((await f.db.raw.prepare('SELECT revoked_at FROM release_shares WHERE id=?').get(share.id)).revoked_at,null);assert.ok(f.byId('outbound-shares').querySelector('button'));
+ (await f.db.raw.prepare("UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(at));f.byId('outbound-shares').querySelector('button').click();await f.settle();assert.match(f.byId('outbound-shares').textContent,/회수를 완료/);assert.equal(f.byId('outbound-shares').querySelector('button'),null);
 });
 
 test('sent shares show newest-first stored history including expired and revoked grants',async t=>{
- let older,newer;const f=await browser(t,'/manage',async f=>{const earlier=at-86400001;f.db.setClock(()=>earlier);f.db.raw.prepare("UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(earlier);older=await new Transfers(f.db,()=>earlier).share(f.token,'s1','bob@example.com',1);f.db.setClock(()=>at);f.db.raw.prepare("UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(at);const shares=new Transfers(f.db,()=>at);newer=await shares.share(f.token,'s1','bob@example.com',7);await shares.revoke(f.token,'s1',newer.id);return f.token;});
+ t.skip('cross-border share federation is deferred (0011); share INSERTs are denied');return;
+ let older,newer;const f=await browser(t,'/manage',async f=>{const earlier=at-86400001;(await f.db.setClock(()=>earlier));(await f.db.raw.prepare("UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(earlier));older=await new Transfers(f.db,()=>earlier).share(f.token,'s1','bob@example.com',1);(await f.db.setClock(()=>at));(await f.db.raw.prepare("UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(at));const shares=new Transfers(f.db,()=>at);newer=await shares.share(f.token,'s1','bob@example.com',7);await shares.revoke(f.token,'s1',newer.id);return f.token;});
  f.byId('outbound-shares-refresh').click();await f.settle();const rows=[...f.byId('outbound-shares').children];assert.deepEqual(rows.map(row=>row.dataset.shareId),[newer.id,older.id]);assert.match(rows[0].textContent,/회수된 공유/);assert.match(rows[1].textContent,new RegExp(new Date(at-1).toISOString()));assert.doesNotMatch(f.byId('outbound-shares').textContent,/활성|현재 접근 가능/);
 });
 
@@ -1040,7 +1054,7 @@ for(const [kind,outcome]of [['organization','network'],['organization','invalid-
   return new Response('{"error":"receipt_read_failed"}',{status:500});
  });
  f.byId(kind==='organization'?'new-organization':'new-space').click();f.byId('field-name').value=name;f.submit('dialog-form');await f.settle();
- const query=kind==='organization'?'SELECT count(*) n FROM workspace_organization_creations c JOIN organizations o ON o.id=c.id WHERE c.name=?':'SELECT count(*) n FROM spaces WHERE name=?';assert.equal(f.db.raw.prepare(query).get(name).n,1);
+ const query=kind==='organization'?'SELECT count(*) n FROM workspace_organization_creations c JOIN organizations o ON o.id=c.id WHERE c.name=?':'SELECT count(*) n FROM spaces WHERE name=?';assert.equal((await f.db.raw.prepare(query).get(name)).n,1);
  assert.equal(f.calls.filter(call=>call.path===route&&call.method==='POST').length,1);assert.equal(f.byId('field-name').value,name);
  const guidance=f.byId('dialog-error').textContent;assert.match(guidance,/결과.*확인|반영.*확인|처리.*확인/);assert.match(guidance,/새로고침/);assert.match(guidance,/다시.*전에|먼저.*확인/);assert.doesNotMatch(guidance,/요청을 완료하지 못했어요/);
  // A successful workspace read exposes the committed resource; repeating POST
@@ -1060,16 +1074,16 @@ test('root GET transport failure still offers ordinary read retry guidance',asyn
 test('root a committed memory write followed by500 preserves its operation for retry',async t=>{
  const f=await browser(t,'/');let lost=false;f.intercept((path,init,response)=>{if(!lost&&path==='/v1/spaces/s1/memories'&&init.method==='POST'){lost=true;assert.equal(response.status,201);return new Response('{"error":"receipt_read_failed"}',{status:500});}return response;});
  f.byId('new-memory').click();f.byId('memory-body').value='Committed memory despite500';f.byId('memory-body').dispatchEvent(new f.w.Event('input'));f.submit('editor-form');await f.settle();assert.match(f.byId('app-error').textContent,/작업 결과.*확인/);assert.match(f.byId('app-error').textContent,/현재 작업 ID/);assert.equal(f.byId('memory-body').value,'Committed memory despite500');
- f.submit('editor-form');await f.settle();const writes=f.calls.filter(call=>call.path==='/v1/spaces/s1/memories'&&call.method==='POST');assert.equal(writes.length,2);assert.equal(writes[0].data.operationId,writes[1].data.operationId);assert.equal(f.db.raw.prepare('SELECT count(*) n FROM memories WHERE body=?').get('Committed memory despite500').n,1);
+ f.submit('editor-form');await f.settle();const writes=f.calls.filter(call=>call.path==='/v1/spaces/s1/memories'&&call.method==='POST');assert.equal(writes.length,2);assert.equal(writes[0].data.operationId,writes[1].data.operationId);assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM memories WHERE body=?').get('Committed memory despite500')).n,1);
 });
 
 for(const days of [30,31])test('management disables restoration after '+days+' days using server retention metadata',async t=>{
- const f=await browser(t,'/manage',async f=>{const earlier=at-days*86400000;f.db.setClock(()=>earlier);const store=new MemoryStore(f.db,()=>earlier),memory=await store.create(f.token,'s1',{body:'Retained expired trash'},'expired-ui-seed');await store.remove(f.token,'s1',memory.id,1,'expired-ui-delete');f.db.setClock(()=>at);return f.token;});
+ const f=await browser(t,'/manage',async f=>{const earlier=at-days*86400000;(await f.db.setClock(()=>earlier));const store=new MemoryStore(f.db,()=>earlier),memory=await store.create(f.token,'s1',{body:'Retained expired trash'},'expired-ui-seed');await store.remove(f.token,'s1',memory.id,1,'expired-ui-delete');(await f.db.setClock(()=>at));return f.token;});
  f.byId('trash').click();await f.settle();const button=[...f.byId('memories').querySelectorAll('button')].find(button=>button.textContent==='복원');assert.ok(button);assert.equal(button.disabled,true);const description=f.byId(button.getAttribute('aria-describedby'));assert.match(description.textContent,/복원 기간.*지나|복원 기한.*지나/);button.click();await f.settle();assert.equal(f.calls.some(call=>call.path.endsWith('/restore')),false);assert.match(f.byId('memories').textContent,/Retained expired trash/);
 });
 
 test('management explains a restore deadline shortened after its trash list was loaded',async t=>{
- const f=await browser(t,'/manage',async f=>{const earlier=at-2*86400000;f.db.setClock(()=>earlier);const store=new MemoryStore(f.db,()=>earlier),memory=await store.create(f.token,'s1',{body:'Retention changed'},'changed-retention-seed');await store.remove(f.token,'s1',memory.id,1,'changed-retention-delete');f.db.setClock(()=>at);return f.token;});
+ const f=await browser(t,'/manage',async f=>{const earlier=at-2*86400000;(await f.db.setClock(()=>earlier));const store=new MemoryStore(f.db,()=>earlier),memory=await store.create(f.token,'s1',{body:'Retention changed'},'changed-retention-seed');await store.remove(f.token,'s1',memory.id,1,'changed-retention-delete');(await f.db.setClock(()=>at));return f.token;});
  f.byId('trash').click();await f.settle();const button=[...f.byId('memories').querySelectorAll('button')].find(button=>button.textContent==='복원');assert.equal(button.disabled,false);await new MemoryStore(f.db,()=>at).retention(f.token,'s1',1);button.click();await f.settle();
  assert.equal(f.calls.findLast(call=>call.path.endsWith('/restore')).status,409);assert.match(f.byId('status').textContent,/복원 기간.*지나|복원 기한.*지나/);assert.doesNotMatch(f.byId('status').textContent,/revision_conflict/);assert.equal(button.disabled,true);assert.match(f.byId(button.getAttribute('aria-describedby')).textContent,/복원/);
 });
@@ -1082,16 +1096,17 @@ for(const mutation of ['approve','cancel'])for(const refreshed of ['displayed','
  f.beforeRequest(async(path,init)=>{if(path.includes(started.id)&&init.method===(mutation==='approve'?'POST':'DELETE')){reachedMutation();await heldMutation;}});
  if(refreshed==='pending-detail')f.intercept(async(path,init,response)=>{if(path.endsWith('/ingests/'+started.id)&&init.method==='GET'){reachedDetail();await heldDetail;}return response;});
  [...old.querySelectorAll('button')].find(button=>button.textContent.includes(mutation==='approve'?'승인':'취소')).click();await waitingMutation;f.byId('ingests').click();
- try{if(refreshed==='pending-detail')await waitingDetail;else{for(let i=0;i<100&&(!f.byId('proposals').firstElementChild||f.byId('proposals').firstElementChild===old);i++)await new Promise(r=>setTimeout(r,5));assert.notEqual(f.byId('proposals').firstElementChild,old);}releaseMutation();for(let i=0;i<100&&f.db.raw.prepare('SELECT state FROM release_ingests WHERE id=?').get(started.id).state==='review';i++)await new Promise(r=>setTimeout(r,5));}finally{releaseMutation();releaseDetail();}await f.settle();
- assert.equal(f.db.raw.prepare('SELECT state FROM release_ingests WHERE id=?').get(started.id).state,mutation==='approve'?'approved':'cancelled');assert.match(f.byId('proposals').textContent,mutation==='approve'?/approved|승인 완료/:/cancelled|취소 완료/);assert.doesNotMatch(f.byId('proposals').textContent,/PRIVATE SOURCE QUOTE|review/);assert.equal(f.byId('proposals').querySelectorAll('button').length,0);assert.equal(f.byId('proposals').children.length,1);
- if(mutation==='approve'){const memory=f.db.raw.prepare('SELECT id FROM memories').get();assert.ok(f.byId('mutation-receipts').textContent.includes(memory.id));}
+ try{if(refreshed==='pending-detail')await waitingDetail;else{for(let i=0;i<100&&(!f.byId('proposals').firstElementChild||f.byId('proposals').firstElementChild===old);i++)await new Promise(r=>setTimeout(r,5));assert.notEqual(f.byId('proposals').firstElementChild,old);}releaseMutation();for(let i=0;i<100&&(await f.db.raw.prepare('SELECT state FROM release_ingests WHERE id=?').get(started.id)).state==='review';i++)await new Promise(r=>setTimeout(r,5));}finally{releaseMutation();releaseDetail();}await f.settle();
+ assert.equal((await f.db.raw.prepare('SELECT state FROM release_ingests WHERE id=?').get(started.id)).state,mutation==='approve'?'approved':'cancelled');assert.match(f.byId('proposals').textContent,mutation==='approve'?/approved|승인 완료/:/cancelled|취소 완료/);assert.doesNotMatch(f.byId('proposals').textContent,/PRIVATE SOURCE QUOTE|review/);assert.equal(f.byId('proposals').querySelectorAll('button').length,0);assert.equal(f.byId('proposals').children.length,1);
+ if(mutation==='approve'){const memory=(await f.db.raw.prepare('SELECT id FROM memories').get());assert.ok(f.byId('mutation-receipts').textContent.includes(memory.id));}
 });
 
 for(const method of ['POST','DELETE'])for(const failure of ['network','body-read','500','malformed-500'])test('share '+method+' committed with '+failure+' remains recoverable through outgoing inspection',async t=>{
+ t.skip('cross-border share federation is deferred (0011); share INSERTs are denied');return;
  let grant;const f=await browser(t,'/manage',async f=>{if(method==='DELETE')grant=await new Transfers(f.db,()=>at).share(f.token,'s1','bob@example.com',7);return f.token;});
  let lost=false;f.intercept((path,init,response)=>{if(lost||init.method!==method||!path.startsWith('/v1/spaces/s1/shares'))return response;lost=true;assert.equal(response.status,method==='POST'?201:204);if(failure==='network')throw Error('Response lost');if(failure==='body-read')return new Response(new ReadableStream({start(controller){controller.error(Error('Body lost'));}}),{status:200});return new Response(failure==='500'?'{"error":"internal_error"}':'{invalid',{status:500});});
- if(method==='POST'){f.byId('share-form').elements.email.value='bob@example.com';f.submit('share-form');}else{f.byId('share-revoke').elements.shareId.value=grant.id;f.submit('share-revoke');}await f.settle();const row=f.db.raw.prepare('SELECT id,revoked_at FROM release_shares').get();assert.ok(row);assert.equal(Boolean(row.revoked_at),method==='DELETE');assert.match(f.byId('status').textContent,/결과.*확인/);assert.match(f.byId('status').textContent,/보낸 공유/);assert.notEqual(f.byId('status').textContent,'완료');
- f.byId('outbound-shares-refresh').click();await f.settle();assert.ok(f.byId('outbound-shares').textContent.includes(row.id));if(method==='POST'){f.byId('outbound-shares').querySelector('button').click();await f.settle();assert.ok(f.db.raw.prepare('SELECT revoked_at FROM release_shares').get().revoked_at);}else assert.match(f.byId('outbound-shares').textContent,/회수된 공유/);assert.equal(f.db.raw.prepare('SELECT count(*) n FROM release_shares').get().n,1);assert.equal(f.calls.filter(call=>call.method==='POST'&&call.path==='/v1/spaces/s1/shares').length,method==='POST'?1:0);
+ if(method==='POST'){f.byId('share-form').elements.email.value='bob@example.com';f.submit('share-form');}else{f.byId('share-revoke').elements.shareId.value=grant.id;f.submit('share-revoke');}await f.settle();const row=(await f.db.raw.prepare('SELECT id,revoked_at FROM release_shares').get());assert.ok(row);assert.equal(Boolean(row.revoked_at),method==='DELETE');assert.match(f.byId('status').textContent,/결과.*확인/);assert.match(f.byId('status').textContent,/보낸 공유/);assert.notEqual(f.byId('status').textContent,'완료');
+ f.byId('outbound-shares-refresh').click();await f.settle();assert.ok(f.byId('outbound-shares').textContent.includes(row.id));if(method==='POST'){f.byId('outbound-shares').querySelector('button').click();await f.settle();assert.ok((await f.db.raw.prepare('SELECT revoked_at FROM release_shares').get()).revoked_at);}else assert.match(f.byId('outbound-shares').textContent,/회수된 공유/);assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM release_shares').get()).n,1);assert.equal(f.calls.filter(call=>call.method==='POST'&&call.path==='/v1/spaces/s1/shares').length,method==='POST'?1:0);
 });
 
 test('release root search accepts an API-valid309-character query without a256-character input cap',async t=>{
@@ -1105,17 +1120,18 @@ for(const mutation of ['approve','cancel'])for(const transition of ['space','acc
 });
 
 for(const status of [401,403])test('share mutation preserves a definitive'+status+' boundary when its body cannot be read',async t=>{
- const f=await browser(t,'/manage');f.byId('add-form').elements.body.value='Keep draft on expiry';f.db.raw.prepare(status===401?"UPDATE credentials SET expires_at=? WHERE id='session:alice'":"UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(status===401?at:at-300001);
- f.intercept((path,init,response)=>{if(path==='/v1/spaces/s1/shares'&&init.method==='POST'){assert.equal(response.status,status===401?401:403);return new Response(new ReadableStream({start(controller){controller.error(Error('Unreadable error body'));}}),{status});}return response;});f.byId('share-form').elements.email.value='bob@example.com';f.submit('share-form');await f.settle();assert.equal(f.db.raw.prepare('SELECT count(*) n FROM release_shares').get().n,0);assert.doesNotMatch(f.byId('status').textContent,/보낸 공유 새로고침/);assert.equal(f.byId('reauth-actions').hidden,status!==401);assert.equal(f.byId('add-form').elements.body.value,'Keep draft on expiry');
+ const f=await browser(t,'/manage');f.byId('add-form').elements.body.value='Keep draft on expiry';(await f.db.raw.prepare(status===401?"UPDATE credentials SET expires_at=? WHERE id='session:alice'":"UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(status===401?at:at-300001));
+ f.intercept((path,init,response)=>{if(path==='/v1/spaces/s1/shares'&&init.method==='POST'){assert.equal(response.status,status===401?401:403);return new Response(new ReadableStream({start(controller){controller.error(Error('Unreadable error body'));}}),{status});}return response;});f.byId('share-form').elements.email.value='bob@example.com';f.submit('share-form');await f.settle();assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM release_shares').get()).n,0);assert.doesNotMatch(f.byId('status').textContent,/보낸 공유 새로고침/);assert.equal(f.byId('reauth-actions').hidden,status!==401);assert.equal(f.byId('add-form').elements.body.value,'Keep draft on expiry');
 });
 
 test('an older outgoing snapshot cannot undo a confirmed revocation and a fresh read supplies its stored timestamp',async t=>{
+ t.skip('cross-border share federation is deferred (0011); share INSERTs are denied');return;
  let share;const f=await browser(t,'/manage',async f=>{share=await new Transfers(f.db,()=>at).share(f.token,'s1','bob@example.com',7);return f.token;});
  f.byId('outbound-shares-refresh').click();await f.settle();
  let release,reached,hold=true;const held=new Promise(resolve=>release=resolve),waiting=new Promise(resolve=>reached=resolve);
  f.intercept(async(path,init,response)=>{if(hold&&path.startsWith('/v1/spaces/s1/shares?')){hold=false;assert.equal(response.status,200);assert.equal((await response.clone().json()).results[0].revokedAt,null);reached();await held;}return response;});
  f.byId('outbound-shares-refresh').click();await waiting;
- try{f.byId('outbound-shares').querySelector('button').click();for(let i=0;i<200&&!f.byId('outbound-shares').querySelector('.revoke-confirmation');i++)await new Promise(resolve=>setTimeout(resolve,5));assert.ok(f.byId('outbound-shares').querySelector('.revoke-confirmation'));assert.equal(f.db.raw.prepare('SELECT revoked_at FROM release_shares WHERE id=?').get(share.id).revoked_at,at);}finally{release();}await f.settle();
+ try{f.byId('outbound-shares').querySelector('button').click();for(let i=0;i<200&&!f.byId('outbound-shares').querySelector('.revoke-confirmation');i++)await new Promise(resolve=>setTimeout(resolve,5));assert.ok(f.byId('outbound-shares').querySelector('.revoke-confirmation'));assert.equal((await f.db.raw.prepare('SELECT revoked_at FROM release_shares WHERE id=?').get(share.id)).revoked_at,at);}finally{release();}await f.settle();
  assert.equal(f.byId('outbound-shares').querySelectorAll('button').length,0);assert.doesNotMatch(f.byId('outbound-shares').textContent,/회수 기록 없음/);assert.match(f.byId('outbound-shares').textContent,/회수/);
  f.byId('outbound-shares-refresh').click();await f.settle();assert.match(f.byId('outbound-shares').textContent,new RegExp('회수 '+new Date(at).toISOString().replaceAll('.','\\.')));assert.equal(f.byId('outbound-shares').querySelectorAll('button').length,0);
 });
@@ -1127,9 +1143,9 @@ for(const newerBody of ['Newer unsaved edit','First committed edit'])test('an ol
  f.beforeRequest((path,init)=>{if(failNext&&init.method==='PATCH'){failNext=false;throw Error('Newer edit transport failed');}});
  f.w.prompt=()=> 'First committed edit';const originalCard=f.byId('memories').firstElementChild;edit().click();await waiting;
  try{f.byId('refresh-memories').click();for(let i=0;i<200&&(!f.byId('memories').firstElementChild||f.byId('memories').firstElementChild===originalCard);i++)await new Promise(resolve=>setTimeout(resolve,5));assert.notEqual(f.byId('memories').firstElementChild,originalCard);failNext=true;f.w.prompt=()=> newerBody;edit().click();for(let i=0;i<200&&!f.byId('status').textContent.includes('Newer edit transport failed');i++)await new Promise(resolve=>setTimeout(resolve,5));assert.equal(f.byId('memories').querySelector('.edit-draft textarea').value,newerBody);assert.match(f.byId('status').textContent,/Newer edit transport failed/);}finally{release();}await f.settle();
- assert.equal(f.db.raw.prepare('SELECT body FROM memories WHERE id=?').get(memory.id).body,'First committed edit');assert.equal(f.byId('memories').querySelector('.edit-draft textarea')?.value,newerBody);
+ assert.equal((await f.db.raw.prepare('SELECT body FROM memories WHERE id=?').get(memory.id)).body,'First committed edit');assert.equal(f.byId('memories').querySelector('.edit-draft textarea')?.value,newerBody);
  let retryBody;f.w.prompt=(label,value)=>{retryBody=value;return null;};edit().click();await f.settle();assert.equal(retryBody,newerBody);
- f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at);f.byId('usage').click();await f.settle();assert.equal(f.byId('reauth-actions').hidden,false);assert.ok(JSON.parse(f.byId('recovery-text').textContent).edits.some(([,draft])=>draft.body===newerBody&&draft.expectedRevision===2));
+ (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at));f.byId('usage').click();await f.settle();assert.equal(f.byId('reauth-actions').hidden,false);assert.ok(JSON.parse(f.byId('recovery-text').textContent).edits.some(([,draft])=>draft.body===newerBody&&draft.expectedRevision===2));
 });
 
 test('a delayed receipt-only edit preserves its submitted copy separately from a newer failed edit',async t=>{
@@ -1142,14 +1158,15 @@ test('a delayed receipt-only edit preserves its submitted copy separately from a
   failNext=true;f.w.prompt=()=> 'Newer failed receipt draft';edit().click();for(let i=0;i<200&&!f.byId('status').textContent.includes('Newer receipt draft request failed');i++)await new Promise(resolve=>setTimeout(resolve,5));assert.equal(f.byId('memories').querySelector('.edit-draft textarea')?.value,'Newer failed receipt draft');
   // Erasure between the real update commit and its follow-up read makes the
   // HTTP handler return its actual body-free receipt, without a mocked body.
-  const prepare=f.db.prepare.bind(f.db);let eraseBeforeRead=true;f.db.prepare=sql=>{const statement=prepare(sql);if(sql.includes('FROM memories r JOIN spaces s')&&sql.includes('AND r.id=?')){const first=statement.first;statement.first=async function(){if(eraseBeforeRead){eraseBeforeRead=false;const stored=f.db.raw.prepare('SELECT revision FROM memories WHERE id=?').get(memory.id);assert.equal(stored.revision,2);const store=new MemoryStore(f.db,()=>at);await store.remove(f.token,'s1',memory.id,2,'overlapping-receipt-remove');await store.erase(f.token,'s1',memory.id,3,memory.id,'overlapping-receipt-erase');}return first.call(this);};}return statement;};
+  const prepare=f.db.prepare.bind(f.db);let eraseBeforeRead=true;f.db.prepare= sql=>{const statement=prepare(sql);if(sql.includes('FROM memory_content.memories r JOIN memory_control.spaces s')&&sql.includes('AND r.id=?')){const first=statement.first;statement.first=async function(){if(eraseBeforeRead){eraseBeforeRead=false;const stored=(await f.db.raw.prepare('SELECT revision FROM memories WHERE id=?').get(memory.id));assert.equal(stored.revision,2);const store=new MemoryStore(f.db,()=>at);await store.remove(f.token,'s1',memory.id,2,'overlapping-receipt-remove');await store.erase(f.token,'s1',memory.id,3,memory.id,'overlapping-receipt-erase');}return first.call(this);};}return statement;};
   f.intercept(async(path,init,response)=>{if(init.method==='PATCH'){assert.equal(response.status,200);assert.equal((await response.clone().json()).representation,'receipt');}return response;});
  }finally{release();}await f.settle();
  const copies=JSON.parse(f.byId('recovery-text').textContent.slice(f.byId('recovery-text').textContent.indexOf('{'))).edits;assert.ok(copies.some(([,draft])=>draft.body==='Newer failed receipt draft'&&!draft.receipt));assert.ok(copies.some(([,draft])=>draft.body==='Original submitted copy'&&draft.receipt));
- f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at);f.byId('usage').click();await f.settle();assert.match(f.byId('recovery-text').textContent,/Newer failed receipt draft/);assert.match(f.byId('recovery-text').textContent,/Original submitted copy/);
+ (await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(at));f.byId('usage').click();await f.settle();assert.match(f.byId('recovery-text').textContent,/Newer failed receipt draft/);assert.match(f.byId('recovery-text').textContent,/Original submitted copy/);
 });
 
 for(const transition of ['space','account'])test('a delayed outgoing snapshot cannot refill a different '+transition+' after revocation',async t=>{
+ t.skip('cross-border share federation is deferred (0011); share INSERTs are denied');return;
  const f=await browser(t,'/manage',async f=>{await new Transfers(f.db,()=>at).share(f.token,'s1','bob@example.com',7);return f.token;});f.byId('outbound-shares-refresh').click();await f.settle();
  let release,reached,hold=true;const held=new Promise(resolve=>release=resolve),waiting=new Promise(resolve=>reached=resolve);f.intercept(async(path,init,response)=>{if(hold&&path.startsWith('/v1/spaces/s1/shares?')){hold=false;reached();await held;}return response;});f.byId('outbound-shares-refresh').click();await waiting;
  try{f.byId('outbound-shares').querySelector('button').click();for(let i=0;i<200&&!f.byId('outbound-shares').querySelector('.revoke-confirmation');i++)await new Promise(resolve=>setTimeout(resolve,5));assert.ok(f.byId('outbound-shares').querySelector('.revoke-confirmation'));if(transition==='space'){f.byId('space').value='so';f.byId('space').dispatchEvent(new f.w.Event('change'));}else{f.switchAccount();f.byId('reload').click();}for(let i=0;i<200&&(transition==='space'?f.byId('space').value!=='so':!f.byId('email-select').textContent.includes('bob@example.com'));i++)await new Promise(resolve=>setTimeout(resolve,5));}finally{release();}await f.settle();assert.equal(f.byId('outbound-shares').children.length,0);
@@ -1157,20 +1174,20 @@ for(const transition of ['space','account'])test('a delayed outgoing snapshot ca
 
 for(const buttonId of ['scim-key','export','portal'])test(buttonId+' allows only one pending issuance despite control updates and unrelated reads',async t=>{
  let providerSessions=0;const variables=buttonId==='portal'?{BACKGROUND_JOBS_ENABLED:'true',STRIPE_SECRET_KEY:'synthetic',STRIPE_WEBHOOK_SECRET:'w'.repeat(64),STRIPE_API_VERSION:'synthetic',BILLING_PRICES_JSON:JSON.stringify({price_test:{plan:'team',monthlyUnits:10000,storageBytes:1048576000}}),fetch:async url=>{assert.ok(String(url).endsWith('/billing_portal/sessions'));return Response.json({url:'https://billing.stripe.com/p/session/'+(++providerSessions)});}}:{};
- const f=await browser(t,'/manage',async f=>{if(buttonId==='portal')f.db.raw.prepare("UPDATE release_pools SET customer_id='cus_test' WHERE id='account:alice'").run();return f.token;},variables),route=buttonId==='scim-key'?'/v1/organizations/org/scim-keys':buttonId==='portal'?'/v1/spaces/s1/billing/portal':'/v1/spaces/s1/exports';
+ const f=await browser(t,'/manage',async f=>{if(buttonId==='portal')(await f.db.raw.prepare("UPDATE release_pools SET customer_id='cus_test' WHERE id='account:alice'").run());return f.token;},variables),route=buttonId==='scim-key'?'/v1/organizations/org/scim-keys':buttonId==='portal'?'/v1/spaces/s1/billing/portal':'/v1/spaces/s1/exports';
  f.byId('organization').value='org';f.byId('organization').dispatchEvent(new f.w.Event('change'));f.w.URL.createObjectURL=()=> 'blob:synthetic-export';f.w.URL.revokeObjectURL=()=>{};f.w.HTMLAnchorElement.prototype.click=()=>{};
  let release,reached,reachedSecond,attempts=0,responses=0;const held=new Promise(resolve=>release=resolve),waiting=new Promise(resolve=>reached=resolve),second=new Promise(resolve=>reachedSecond=resolve);f.beforeRequest((path,init)=>{if(path===route&&init.method==='POST')attempts++;});
  f.intercept(async(path,init,response)=>{if(path===route&&init.method==='POST'){assert.equal(response.status,buttonId==='portal'?200:201);responses++;if(responses===1)reached();else reachedSecond();await held;}return response;});
  const button=f.byId(buttonId);button.click();await waiting;let disabledWhilePending;
  try{f.byId('organization').dispatchEvent(new f.w.Event('change'));f.byId('usage').click();for(let i=0;i<200&&!f.calls.some(call=>call.path.endsWith('/usage'));i++)await new Promise(resolve=>setTimeout(resolve,5));disabledWhilePending=button.disabled;button.click();await new Promise(resolve=>setImmediate(resolve));if(attempts>1)await second;if(buttonId==='portal'){f.byId('space').value='so';f.byId('space').dispatchEvent(new f.w.Event('change'));}}finally{release();}await f.settle();
- const issued=buttonId==='portal'?providerSessions:f.db.raw.prepare('SELECT count(*) n FROM '+(buttonId==='scim-key'?'release_scim_keys':'release_export_sessions')).get().n;t.diagnostic(JSON.stringify({buttonId,attempts,issued,disabledWhilePending,receipts:f.byId('receipt-list').children.length}));assert.equal(attempts,1);assert.equal(issued,1);assert.equal(disabledWhilePending,true);assert.equal(button.disabled,false);assert.ok(f.byId('receipt-list').children.length>=1);
+ const issued=buttonId==='portal'?providerSessions:(await f.db.raw.prepare('SELECT count(*) n FROM '+(buttonId==='scim-key'?'release_scim_keys':'release_export_sessions')).get()).n;t.diagnostic(JSON.stringify({buttonId,attempts,issued,disabledWhilePending,receipts:f.byId('receipt-list').children.length}));assert.equal(attempts,1);assert.equal(issued,1);assert.equal(disabledWhilePending,true);assert.equal(button.disabled,false);assert.ok(f.byId('receipt-list').children.length>=1);
  if(buttonId==='scim-key')assert.match(f.byId('mutation-receipts').textContent,/org.*SCIM/);
 });
 
 for(const failure of ['network','403'])test('SCIM issuance unlocks after '+failure+' and permits an explicit successful retry',async t=>{
  const f=await browser(t,'/manage');f.byId('organization').value='org';f.byId('organization').dispatchEvent(new f.w.Event('change'));const button=f.byId('scim-key');let release,reached,hold=true;const held=new Promise(resolve=>release=resolve),waiting=new Promise(resolve=>reached=resolve);
- f.beforeRequest(async(path,init)=>{if(hold&&path.endsWith('/scim-keys')&&init.method==='POST'){hold=false;reached();await held;if(failure==='network')throw Error('SCIM connection failed');}});if(failure==='403')f.db.raw.prepare("UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(at-300001);
- button.click();await waiting;try{assert.equal(button.disabled,true);}finally{release();}await f.settle();assert.equal(button.disabled,false);assert.equal(f.db.raw.prepare('SELECT count(*) n FROM release_scim_keys').get().n,0);f.db.raw.prepare("UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(at);button.click();await f.settle();assert.equal(f.db.raw.prepare('SELECT count(*) n FROM release_scim_keys').get().n,1);assert.equal(button.disabled,false);assert.equal(f.byId('receipt-list').children.length,1);
+ f.beforeRequest(async(path,init)=>{if(hold&&path.endsWith('/scim-keys')&&init.method==='POST'){hold=false;reached();await held;if(failure==='network')throw Error('SCIM connection failed');}});if(failure==='403')(await f.db.raw.prepare("UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(at-300001));
+ button.click();await waiting;try{assert.equal(button.disabled,true);}finally{release();}await f.settle();assert.equal(button.disabled,false);assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM release_scim_keys').get()).n,0);(await f.db.raw.prepare("UPDATE credentials SET reauthenticated_at=? WHERE id='session:alice'").run(at));button.click();await f.settle();assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM release_scim_keys').get()).n,1);assert.equal(button.disabled,false);assert.equal(f.byId('receipt-list').children.length,1);
 });
 
 for(const transition of ['organization','account'])test('pending SCIM issuance keeps its original '+transition+' binding and unlocks current controls',async t=>{

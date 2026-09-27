@@ -8,3 +8,10 @@ User instruction, 2026-09-11:
 - Do not mix backend framework adoption with unverified changes to authorization, retries, data residency, or durable state identity.
 
 These choices supplement the approved Cloudflare-first storage plan, exact Space permissions, independent organization ACL, and separate Seoul PostgreSQL path. They do not authorize advertising a region or backend as operational before live verification.
+
+## Deprecated code visibility
+
+User instruction, 2026-09-24:
+
+- Retired or superseded code must be unmistakable to an agent with little context: unplug it from modules or move it under a clearly named deprecated/legacy directory instead of leaving it live-but-unused.
+- See `DEPRECATED.md` for the current deprecated surfaces (`d1-migrations/`, `d1-shard-migrations/`, `src/deprecated-durable-sql/`, `test/deprecated/`, `release-validation/retired-d1/`). Do not extend them.

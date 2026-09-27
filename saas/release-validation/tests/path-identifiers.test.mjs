@@ -23,7 +23,7 @@ test('percent-encoded PAT IDs emitted by both consoles revoke the actual credent
   assert.ok(issued.id.startsWith('key:'));
   assert.equal((await f.request('/v1/spaces/s1/memories', 'GET', issued.token)).status, 200);
   assert.equal((await f.request('/v1/keys/' + encodeURIComponent(issued.id), 'DELETE')).status, 204);
-  assert.equal(f.db.raw.prepare('SELECT revoked_at FROM credentials WHERE id=?').get(issued.id).revoked_at, at);
+  assert.equal((await f.db.raw.prepare('SELECT revoked_at FROM credentials WHERE id=?').get(issued.id)).revoked_at, at);
   assert.equal((await f.request('/v1/spaces/s1/memories', 'GET', issued.token)).status, 401);
 });
 
@@ -31,9 +31,9 @@ test('percent-encoded revision job IDs can be explicitly retried without resetti
   const f = await setup(t);
   const memory = await new MemoryStore(f.db, () => at).create(f.token, 's1', { body: 'Retry this index' }, 'path-job');
   const jobId = memory.id + ':1';
-  f.db.raw.prepare("UPDATE release_jobs SET state='dead',attempt=5,next_chunk=1 WHERE id=?").run(jobId);
+  (await f.db.raw.prepare("UPDATE release_jobs SET state='dead',attempt=5,next_chunk=1 WHERE id=?").run(jobId));
   assert.equal((await f.request('/v1/spaces/s1/jobs/' + encodeURIComponent(jobId) + '/retry', 'POST')).status, 202);
-  assert.deepEqual({ ...f.db.raw.prepare('SELECT state,attempt,next_chunk FROM release_jobs WHERE id=?').get(jobId) },
+  assert.deepEqual({ ...(await f.db.raw.prepare('SELECT state,attempt,next_chunk FROM release_jobs WHERE id=?').get(jobId)) },
     { state: 'pending', attempt: 0, next_chunk: 1 });
 });
 

@@ -16,6 +16,9 @@ export interface ApplicationOptions {
   clock?: () => number;
   auth?: AuthOptions;
   limit?: (key: string) => Promise<{ success: boolean }>;
+  /** Control-plane handle for enrollment-directory admission checks. Absent
+   * on single-cluster deployments. */
+  control?: import('./release/types.ts').Database;
 }
 function cookieToken(request: Request): string | null {
   const cookies = (request.headers.get('cookie') ?? '').split(';').map(x => x.trim())
@@ -49,7 +52,7 @@ function protect(response: Response, pathname: string): Response {
 
 export function createApplication(db: IdentityDatabase, settings: Settings, options: ApplicationOptions = {}) {
   const clock = options.clock ?? Date.now;
-  const workspace = new WorkspaceService(db, clock, { identityLifecycle: options.release?.identityLifecycle === 2 });
+  const workspace = new WorkspaceService(db, clock, { identityLifecycle: options.release?.identityLifecycle === 2, control: options.control });
   const memory = new MemoryService(db, clock);
   const memoryApi = createMemoryApi(db, clock);
   const auth = createAuthController(db, settings.auth, async (p, token) => {
@@ -66,8 +69,8 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     if (publicResponse) return publicResponse;
     if (['/', '/assets/app.js', '/assets/app.css', '/health', '/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'].includes(url.pathname)) requireMethod(request, 'GET');
     if (request.method === 'GET') {
-      if (url.pathname === '/') return new Response(options.release ? renderPage(settings.brand, true, settings.origin).replace(/<body([^>]*)>/, '<body$1><p><a href="/manage">서비스 관리</a></p>') : renderPage(settings.brand, false, settings.origin), { headers: { 'content-type': 'text/html; charset=utf-8' } });
-      if (url.pathname === '/assets/app.js') return new Response(appScript, { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
+      if (url.pathname === '/') return new Response(options.release ? renderPage(settings.brand, true, settings.origin + settings.publicPath).replace(/<body([^>]*)>/, `<body$1><p><a href="${settings.publicPath}/manage">서비스 관리</a></p>`) : renderPage(settings.brand, false, settings.origin + settings.publicPath), { headers: { 'content-type': 'text/html; charset=utf-8' } });
+      if (url.pathname === '/assets/app.js') return new Response(appScript.replaceAll('__PUBLIC_PATH__', settings.publicPath), { headers: { 'content-type': 'text/javascript; charset=utf-8' } });
       if (url.pathname === '/assets/app.css') return new Response(renderStyles(settings.brand), { headers: { 'content-type': 'text/css; charset=utf-8' } });
       if (url.pathname === '/health') return json({ status: 'ok', version: SERVICE_VERSION, mode: 'managed',
         build: { sourceRevision: BUILD_REVISION, resourceFingerprint: BUILD_FINGERPRINT, payloadFormat: 2 } });
@@ -83,7 +86,7 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
       if (url.pathname === '/auth/logout' && expectedAccount !== null) {
         const token = cookieToken(request);
         const credential = token ? await db.withSession('first-primary').prepare(
-          "SELECT account_id AS accountId FROM credentials WHERE token_digest=? AND kind='session' AND membership_id IS NULL"
+          'SELECT account_id AS "accountId" FROM memory_identity.runtime_credentials WHERE token_digest=? AND kind=\'session\' AND membership_id IS NULL'
         ).bind(await digestToken(token)).first<{ accountId: string }>() : null;
         if (credential && credential.accountId !== expectedAccount) throw new HttpError(409, 'account_mismatch');
       }
@@ -110,7 +113,7 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     try { hash = await digestToken(token); } catch { throw new HttpError(401, 'authentication_required'); }
     const at = clock();
     const credential = await db.withSession('first-primary').prepare(`
-      SELECT account_id AS accountId,kind,min(expires_at,membership_expires_at) AS expiresAt FROM active_credentials
+      SELECT account_id AS "accountId",kind,least(expires_at,membership_expires_at) AS "expiresAt" FROM memory_identity.active_credentials
       WHERE token_digest=? AND expires_at>? AND membership_expires_at>?`)
       .bind(hash, at, at).first<{ accountId: string; kind: string; expiresAt: number }>();
     if (!credential || credential.expiresAt <= clock() || (!bearer && credential.kind !== 'session')) throw new HttpError(401, external ? 'invalid_token' : 'authentication_required');
@@ -122,7 +125,7 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     if (credential.expiresAt <= clock()) throw new HttpError(401, external ? 'invalid_token' : 'authentication_required');
     const releaseResponse = await options.release?.route(request, token);
     if (releaseResponse) return releaseResponse;
-    if (url.pathname === '/mcp') return handleMcp(request, memory, token, settings.brand.name, db, clock);
+    if (url.pathname === '/mcp') return handleMcp(request, memory, token, settings.brand.name, db, clock, settings.origin + settings.publicPath);
     if (url.pathname.startsWith('/v1/spaces')) {
       if (url.pathname === '/v1/spaces') requireMethod(request, 'GET', 'POST');
       if (url.pathname === '/v1/spaces' && request.method === 'GET') return json({ results: await memory.listSpaces(token) });
@@ -173,7 +176,7 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     }
     if (response.status === 401 && !response.headers.get('www-authenticate')?.includes('resource_metadata=')) response.headers.set('www-authenticate', new URL(request.url).pathname.startsWith('/scim/')
       ? 'Bearer realm="scim"'
-      : `Bearer ${invalidToken ? 'error="invalid_token", ' : ''}resource_metadata="${settings.origin}/.well-known/oauth-protected-resource", scope="memory:read"`);
+      : `Bearer ${invalidToken ? 'error="invalid_token", ' : ''}resource_metadata="${settings.origin}${settings.publicPath}/.well-known/oauth-protected-resource", scope="memory:read"`);
     if (response.status === 429) response.headers.set('retry-after', '60');
     return protect(response, new URL(request.url).pathname);
   };

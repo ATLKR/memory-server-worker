@@ -7,7 +7,7 @@ import { unstable_splitSqlQuery } from 'wrangler';
 test('forward migrations avoid the remote D1 bare trigger CASE parser failure', async () => {
   // Remote /query rejects a trigger SELECT CASE ... END; although local SQLite
   // accepts it. Parenthesize the expression, as documented in INTEGRATION.md.
-  for (const directory of ['migrations', 'shard-migrations']) {
+  for (const directory of ['d1-migrations', 'd1-shard-migrations']) {
     const root = new URL(`../${directory}/`, import.meta.url);
     const files = (await readdir(root)).filter(name => name.endsWith('.sql')).sort();
     assert.ok(files.length > 0);
@@ -19,7 +19,7 @@ test('forward migrations avoid the remote D1 bare trigger CASE parser failure', 
 });
 
 test('the installed Wrangler splitter produces executable central and hot migrations', async () => {
-  for (const directory of ['migrations', 'shard-migrations']) {
+  for (const directory of ['d1-migrations', 'd1-shard-migrations']) {
     const db = new DatabaseSync(':memory:');
     try {
       const root = new URL(`../${directory}/`, import.meta.url);

@@ -9,7 +9,7 @@ import { hmac } from '../../src/release/util.ts';
 
 async function setup(t) {
   const f = await fixture(); t.after(() => f.db.close()); const delivered = [], secret = 'synthetic-provider-proof-secret'.repeat(3);
-  f.db.raw.prepare('INSERT INTO provider_identities(issuer,subject,account_id,created_at) VALUES(?,?,?,?)').run(AUTH_ISSUER, 'alice-provider', 'alice', at);
+  (await f.db.raw.prepare('INSERT INTO provider_identities(issuer,subject,account_id,created_at) VALUES(?,?,?,?)').run(AUTH_ISSUER, 'alice-provider', 'alice', at));
   const env = { DB: f.db, IDENTITY_WEBHOOK_SECRET: secret, REQUEST_LIMITER: { limit: async () => ({ success: true }) },
     MAIL_FROM: 'memory@example.com', EMAIL: { send: async message => { delivered.push(message.text.match(/Proof: ([^\n]+)/)[1]); return { messageId: 'synthetic' }; } } };
   const identity = new IdentityService(f.db, () => at), app = createApplication(f.db, readSettings(env), { clock: () => at, release: createRelease(env, { clock: () => at, identity }) });
@@ -26,45 +26,45 @@ test('accepted provider email revocation invalidates a pending proof and verific
   const f = await setup(t), proof = await f.start(); assert.equal((await f.revoke()).status, 200);
   const response = await f.post('/v1/account/emails/verify', proof);
   assert.equal(response.status, 403); assert.deepEqual(await response.json(), { error: 'access_denied' });
-  const stored = f.db.raw.prepare('SELECT used_at,invalidated_at FROM email_challenges WHERE id=?').get(proof.challengeId);
+  const stored = (await f.db.raw.prepare('SELECT used_at,invalidated_at FROM email_challenges WHERE id=?').get(proof.challengeId));
   assert.equal(stored.used_at, null); assert.equal(stored.invalidated_at, at);
-  assert.equal(f.db.raw.prepare("SELECT count(*) n FROM account_emails WHERE address='pending@example.net'").get().n, 0);
+  assert.equal((await f.db.raw.prepare("SELECT count(*) n FROM account_emails WHERE address='pending@example.net'").get()).n, 0);
 });
 
 test('a standing provider tombstone denies consumption without a generic database error', async t => {
   const f = await setup(t), proof = await f.start();
-  f.db.raw.prepare('INSERT INTO release_provider_revocations(issuer,subject,kind,address,created_at) VALUES(?,?,?,?,?)').run(AUTH_ISSUER, 'alice-provider', 'email.revoked', 'pending@example.net', at);
+  (await f.db.raw.prepare('INSERT INTO release_provider_revocations(issuer,subject,kind,address,created_at_ms) VALUES(?,?,?,?,?)').run(AUTH_ISSUER, 'alice-provider', 'email.revoked', 'pending@example.net', at));
   assert.equal((await f.post('/v1/account/emails/verify', proof)).status, 403);
-  assert.equal(f.db.raw.prepare('SELECT used_at FROM email_challenges WHERE id=?').get(proof.challengeId).used_at, null);
+  assert.equal((await f.db.raw.prepare('SELECT used_at FROM email_challenges WHERE id=?').get(proof.challengeId)).used_at, null);
 });
 
 test('provider revocation leaves another account pending proof usable', async t => {
   const f = await setup(t), alice = await f.start(), bob = await f.start(f.other); assert.equal((await f.revoke()).status, 200);
   assert.equal((await f.post('/v1/account/emails/verify', alice)).status, 403);
   assert.equal((await f.post('/v1/account/emails/verify', bob, f.other)).status, 200);
-  assert.equal(f.db.raw.prepare("SELECT account_id FROM account_emails WHERE address='pending@example.net'").get().account_id, 'bob');
+  assert.equal((await f.db.raw.prepare("SELECT account_id FROM account_emails WHERE address='pending@example.net'").get()).account_id, 'bob');
 });
 
 test('unrelated claim storage failure stays500 and rolls back proof consumption', async t => {
   const f = await setup(t), proof = await f.start();
-  f.db.raw.exec("CREATE TRIGGER injected_claim_failure BEFORE INSERT ON account_emails BEGIN SELECT RAISE(ABORT,'synthetic unrelated failure'); END;");
+  (await f.db.raw.exec("CREATE FUNCTION injected_claim_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic unrelated failure'; END $$; CREATE TRIGGER injected_claim_failure BEFORE INSERT ON account_emails FOR EACH ROW EXECUTE FUNCTION injected_claim_failure();"));
   assert.equal((await f.post('/v1/account/emails/verify', proof)).status, 500);
-  assert.equal(f.db.raw.prepare('SELECT used_at FROM email_challenges WHERE id=?').get(proof.challengeId).used_at, null);
+  assert.equal((await f.db.raw.prepare('SELECT used_at FROM email_challenges WHERE id=?').get(proof.challengeId)).used_at, null);
 });
 
 test('a fresh link request cannot create or send a proof for an exact standing revocation', async t => {
   const f = await setup(t); assert.equal((await f.revoke()).status, 200);
   assert.equal((await f.post('/v1/account/emails', { email: 'pending@example.net' })).status, 403);
-  assert.equal(f.db.raw.prepare('SELECT count(*) n FROM email_challenges').get().n, 0);
+  assert.equal((await f.db.raw.prepare('SELECT count(*) n FROM email_challenges').get()).n, 0);
   assert.equal(f.delivered.length, 0);
 });
 
 test('pending-proof invalidation failure rolls back the accepted webhook and preserves a usable proof', async t => {
   const f = await setup(t), proof = await f.start();
-  f.db.raw.exec("CREATE TRIGGER injected_proof_failure BEFORE UPDATE OF invalidated_at ON email_challenges BEGIN SELECT RAISE(ABORT,'synthetic unrelated proof failure'); END;");
+  (await f.db.raw.exec("CREATE FUNCTION injected_proof_failure() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'synthetic unrelated proof failure'; END $$; CREATE TRIGGER injected_proof_failure BEFORE UPDATE OF invalidated_at ON email_challenges FOR EACH ROW EXECUTE FUNCTION injected_proof_failure();"));
   assert.equal((await f.revoke()).status, 500);
-  for (const table of ['release_webhook_events', 'release_provider_revocations', 'release_external_email_blocks']) assert.equal(f.db.raw.prepare(`SELECT count(*) n FROM ${table}`).get().n, 0);
-  assert.equal(f.db.raw.prepare('SELECT invalidated_at FROM email_challenges WHERE id=?').get(proof.challengeId).invalidated_at, null);
-  f.db.raw.exec('DROP TRIGGER injected_proof_failure');
+  for (const table of ['release_webhook_events', 'release_provider_revocations', 'release_external_email_blocks']) assert.equal((await f.db.raw.prepare(`SELECT count(*) n FROM ${table}`).get()).n, 0);
+  assert.equal((await f.db.raw.prepare('SELECT invalidated_at FROM email_challenges WHERE id=?').get(proof.challengeId)).invalidated_at, null);
+  (await f.db.raw.exec('DROP TRIGGER injected_proof_failure ON email_challenges'));
   assert.equal((await f.post('/v1/account/emails/verify', proof)).status, 200);
 });

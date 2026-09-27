@@ -7,7 +7,7 @@ import {createRelease} from '../../src/release/extension.ts';
 const day=86400000;
 async function setup(t,space='s1'){
  const f=await fixture();t.after(()=>f.db.close());let now=at;
- f.db.raw.prepare('UPDATE credentials SET expires_at=?').run(at+4000*day);
+ (await f.db.raw.prepare('UPDATE credentials SET expires_at=?').run(at+4000*day));
  const clock=()=>now,store=new MemoryStore(f.db,clock),release=createRelease({DB:f.db,PUBLIC_ORIGIN:'https://memory.example.test',AUTO_ERASURE_ENABLED:'false'},{clock});
  const memory=await store.create(f.token,space,{body:'Retained private memory'},'create');await store.remove(f.token,space,memory.id,1,'delete');
  const request=(path,method='GET',data)=>release.route(new Request('https://memory.example.test'+path,{method,headers:{...(data?{'content-type':'application/json'}:{})},...(data?{body:JSON.stringify(data)}:{})}),f.token);
@@ -20,14 +20,14 @@ test('expired retained trash reports its restore cutoff and controlled HTTP rest
  assert.equal(page.results[0].restoreUntil,at+30*day);assert.equal(page.results[0].restoreExpired,true);
  const response=await f.request('/v1/spaces/s1/memories/'+f.memory.id+'/restore','POST',{expectedRevision:2,operationId:'restore'});
  assert.equal(response.status,409);assert.deepEqual(await response.json(),{error:'restore_expired'});
- assert.equal(f.db.raw.prepare('SELECT revision FROM memories WHERE id=?').get(f.memory.id).revision,2);
- assert.equal(f.db.raw.prepare("SELECT count(*) n FROM release_operations WHERE client_key='restore'").get().n,0);
+ assert.equal((await f.db.raw.prepare('SELECT revision FROM memories WHERE id=?').get(f.memory.id)).revision,2);
+ assert.equal((await f.db.raw.prepare("SELECT count(*) n FROM release_operations WHERE client_key='restore'").get()).n,0);
 });
 
 for(const days of [1,60])test('trash metadata reads the current changed '+days+'-day policy in its final snapshot',async t=>{
  const f=await setup(t);f.advance(at+31*day);let touched=false;const prepare=f.db.prepare.bind(f.db);
- f.db.prepare=sql=>{const statement=prepare(sql);if(sql.includes('/* rest-memory-disclosure */')){const first=statement.first.bind(statement);statement.first=async()=>{
-  touched=true;f.db.raw.prepare('INSERT INTO release_space_policies VALUES(?,?) ON CONFLICT(space_id) DO UPDATE SET retention_days=excluded.retention_days').run('s1',days);return first();
+ f.db.prepare= sql=>{const statement=prepare(sql);if(sql.includes('/* rest-memory-disclosure */')){const first=statement.first.bind(statement);statement.first=async()=>{
+  touched=true;(await f.db.raw.prepare('INSERT INTO release_space_policies VALUES(?,?) ON CONFLICT(space_id) DO UPDATE SET retention_days=excluded.retention_days').run('s1',days));return first();
  };}return statement;};
  const row=(await f.store.list(f.token,'s1',{deleted:true})).results[0];assert.equal(touched,true);assert.equal(row.restoreUntil,at+days*day);assert.equal(row.restoreExpired,days===1);
  if(days===60)assert.equal((await f.store.restore(f.token,'s1',f.memory.id,2,'restore')).revision,3);
@@ -36,16 +36,16 @@ for(const days of [1,60])test('trash metadata reads the current changed '+days+'
 
 test('trash metadata compares its retention deadline after the final awaited read',async t=>{
  const f=await setup(t);f.advance(at+30*day-1);let touched=false;const prepare=f.db.prepare.bind(f.db);
- f.db.prepare=sql=>{const statement=prepare(sql);if(sql.includes('/* rest-memory-disclosure */')){const first=statement.first.bind(statement);statement.first=async()=>{const row=await first();touched=true;f.advance(at+30*day);return row;};}return statement;};
+ f.db.prepare= sql=>{const statement=prepare(sql);if(sql.includes('/* rest-memory-disclosure */')){const first=statement.first.bind(statement);statement.first=async()=>{const row=await first();touched=true;f.advance(at+30*day);return row;};}return statement;};
  const row=await f.store.get(f.token,'s1',f.memory.id,true);assert.equal(touched,true);assert.equal(row.restoreUntil,at+30*day);assert.equal(row.restoreExpired,true);
 });
 
 test('a policy shortened after the trash page is still enforced by the atomic restore trigger',async t=>{
  const f=await setup(t);f.advance(at+2*day);assert.equal((await f.store.list(f.token,'s1',{deleted:true})).results[0].restoreExpired,false);
- let touched=false;const batch=f.db.batch.bind(f.db);f.db.batch=async statements=>{touched=true;f.db.raw.exec("INSERT INTO release_space_policies VALUES('s1',1)");return batch(statements);};
+ let touched=false;const batch=f.db.batch.bind(f.db);f.db.batch=async statements=>{touched=true;(await f.db.raw.exec("INSERT INTO release_space_policies VALUES('s1',1)"));return batch(statements);};
  await assert.rejects(()=>f.store.restore(f.token,'s1',f.memory.id,2,'restore'),e=>e.code==='restore_expired');assert.equal(touched,true);
- assert.equal(f.db.raw.prepare('SELECT revision FROM memories WHERE id=?').get(f.memory.id).revision,2);
- assert.equal(f.db.raw.prepare("SELECT count(*) n FROM release_operations WHERE client_key='restore'").get().n,0);
+ assert.equal((await f.db.raw.prepare('SELECT revision FROM memories WHERE id=?').get(f.memory.id)).revision,2);
+ assert.equal((await f.db.raw.prepare("SELECT count(*) n FROM release_operations WHERE client_key='restore'").get()).n,0);
 });
 
 for(const state of ['wrong-revision','live','erased','other-Space'])test('expired restore classification preserves '+state+' conflicts',async t=>{
@@ -60,24 +60,27 @@ for(const state of ['wrong-revision','live','erased','other-Space'])test('expire
 test('restoration replay retains its original write receipt after a later deletion expires',async t=>{
  const f=await setup(t);await f.store.restore(f.token,'s1',f.memory.id,2,'restore');await f.store.remove(f.token,'s1',f.memory.id,3,'delete-again');f.advance(at+31*day);
  const replay=await f.store.restore(f.token,'s1',f.memory.id,2,'restore');assert.equal(replay.replayed,true);assert.equal(replay.representation,'receipt');assert.equal(replay.committedRevision,3);
- assert.equal(f.db.raw.prepare('SELECT revision FROM memories WHERE id=?').get(f.memory.id).revision,4);
+ assert.equal((await f.db.raw.prepare('SELECT revision FROM memories WHERE id=?').get(f.memory.id)).revision,4);
 });
 
 test('retention metadata grants no write capability and expired diagnostics require update authority',async t=>{
  const f=await setup(t);f.advance(at+31*day);
- f.db.raw.exec("UPDATE release_credential_policies SET capabilities='[\"read\"]' WHERE credential_id='key:alice'");
+ // credential_policies is append-only to runtime roles; fixture mutations go
+ // through the replica role which bypasses the immutability triggers.
+ const setPolicy=async caps=>{await f.db.raw.exec(`SET session_replication_role='replica'`);(await f.db.raw.exec(`UPDATE release_credential_policies SET capabilities='${caps}' WHERE credential_id='key:alice'`));await f.db.raw.exec(`SET session_replication_role='origin'`);};
+ await setPolicy('["read"]');
  assert.equal((await f.store.list(f.key,'s1',{deleted:true})).results[0].restoreExpired,true);
  await assert.rejects(()=>f.store.restore(f.key,'s1',f.memory.id,2,'restore'),e=>e.code==='access_denied');
- f.db.raw.exec("UPDATE release_credential_policies SET capabilities='[\"update\"]' WHERE credential_id='key:alice'");
+ await setPolicy('["update"]');
  await assert.rejects(()=>f.store.restore(f.key,'s1',f.memory.id,2,'restore'),e=>e.code==='restore_expired');
 });
 
 for(const change of ['credential-revocation','credential-expiry','membership-expiry'])test('restore denial validates '+change+' at its final snapshot',async t=>{
  const f=await setup(t,'so');f.advance(at+31*day);let touched=false;const prepare=f.db.prepare.bind(f.db);
- if(change==='credential-expiry')f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(f.clock()+1);
- if(change==='membership-expiry')f.db.raw.prepare("UPDATE memberships SET expires_at=? WHERE id='m1'").run(f.clock()+1);
- f.db.prepare=sql=>{const statement=prepare(sql);if(sql.includes('/* restore-denial */')){const first=statement.first.bind(statement);statement.first=async()=>{
-  touched=true;if(change==='credential-revocation')f.db.raw.prepare("UPDATE credentials SET revoked_at=? WHERE id='session:alice'").run(f.clock());const result=await first();if(change!=='credential-revocation')f.advance(f.clock()+2);return result;
+ if(change==='credential-expiry')(await f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:alice'").run(f.clock()+1));
+ if(change==='membership-expiry')(await f.db.raw.prepare("UPDATE memberships SET expires_at=? WHERE id='m1'").run(f.clock()+1));
+ f.db.prepare= sql=>{const statement=prepare(sql);if(sql.includes('/* restore-denial */')){const first=statement.first.bind(statement);statement.first=async()=>{
+  touched=true;if(change==='credential-revocation')(await f.db.raw.prepare("UPDATE credentials SET revoked_at=? WHERE id='session:alice'").run(f.clock()));const result=await first();if(change!=='credential-revocation')f.advance(f.clock()+2);return result;
  };}return statement;};
  await assert.rejects(()=>f.store.restore(f.token,'so',f.memory.id,2,'restore'),e=>e.code==='access_denied');assert.equal(touched,true);
 });
@@ -92,11 +95,11 @@ for(const failure of ['transaction','classification'])test('restore '+failure+' 
 
 test('restore denial resolves its exact tombstone and retention policy through indexes',async t=>{
  const f=await setup(t);f.advance(at+31*day);const prepare=f.db.prepare.bind(f.db),plans=[];
- f.db.prepare=sql=>{const statement=prepare(sql),bind=statement.bind.bind(statement);let values=[];statement.bind=(...args)=>{values=args;bind(...args);return statement;};
-  if(sql.includes('/* restore-denial */')){const first=statement.first.bind(statement);statement.first=async()=>{plans.push(f.db.raw.prepare('EXPLAIN QUERY PLAN '+sql).all(...values).map(row=>row.detail).join('\n'));return first();};}return statement;};
+ f.db.prepare= sql=>{const statement=prepare(sql),bind=statement.bind.bind(statement);let values=[];statement.bind=(...args)=>{values=args;bind(...args);return statement;};
+  if(sql.includes('/* restore-denial */')){const first=statement.first.bind(statement);statement.first=async()=>{plans.push((await f.db.raw.prepare('EXPLAIN (COSTS OFF) '+sql).all(...values)).map(row=>row['QUERY PLAN']).join('\n'));return first();};}return statement;};
  await assert.rejects(()=>f.store.restore(f.token,'s1',f.memory.id,2,'restore'),e=>e.code==='restore_expired');assert.equal(plans.length,1);
- assert.match(plans[0],/SEARCH r USING INDEX sqlite_autoindex_memories_1 \(id=\?\)/,plans[0]);
- assert.match(plans[0],/SEARCH release_space_policies USING INDEX sqlite_autoindex_release_space_policies_1 \(space_id=\?\)/,plans[0]);
+ assert.match(plans[0],/Index Scan using \S+ on memories r\s+Index Cond: \([^\n]*\(id\)::text = /,plans[0]);
+ assert.match(plans[0],/Index Scan using space_policies_pkey on space_policies\s+Index Cond: \(space_id = s\.id\)/,plans[0]);
 });
 
 for(const offset of [-1,0])test('restore uses the exact retention cutoff offset '+offset,async t=>{
