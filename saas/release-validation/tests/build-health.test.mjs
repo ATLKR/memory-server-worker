@@ -16,6 +16,7 @@ test('an unstamped health response cannot claim a deployable source', async () =
 test('health identifies actual compiled source and configuration independently of runtime variables', async () => {
   const sourceRevision='a'.repeat(40),resourceFingerprint='b'.repeat(64);
   const output=await build({entryPoints:[fileURLToPath(new URL('../../src/app.ts',import.meta.url))],bundle:true,write:false,platform:'node',format:'esm',logLevel:'silent',
+    alias:{pg:fileURLToPath(new URL('../../test/deprecated/durable-sql/pg-stub.mjs',import.meta.url))},
     define:{BUILD_SOURCE_REVISION:JSON.stringify(sourceRevision),BUILD_RESOURCE_FINGERPRINT:JSON.stringify(resourceFingerprint)}});
   const module=await import('data:text/javascript;base64,'+Buffer.from(output.outputFiles[0].text).toString('base64'));
   const app=module.createApplication(unavailableDatabase,readSettings({SSO_CLIENT_ID:'local',SOURCE_REVISION:'forged-runtime',PAYLOAD_KEY:'never-public'}));
