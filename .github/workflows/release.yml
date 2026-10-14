@@ -31,7 +31,7 @@ jobs:
           git -c "gpg.ssh.allowedSignersFile=$GITHUB_WORKSPACE/.github/allowed_signers" \
             verify-tag "$GITHUB_REF_NAME"
           test "$(git rev-list -n 1 "$GITHUB_REF_NAME")" = "$(git rev-parse HEAD)"
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
         with:
           node-version-file: .nvmrc
           cache: npm
