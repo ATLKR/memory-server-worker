@@ -94,6 +94,7 @@ async function jwtFixture(
   authApiUrl: string,
   audience: string,
   issuedAt: number,
+  lifetimeSeconds = audience === authApiUrl ? 8 * 60 * 60 : 15 * 60,
 ): Promise<{ token: string; jwks: { keys: Array<Record<string, unknown>> } }> {
   const { privateKey, publicKey } = await generateKeyPair("RS256");
   const publicJwk = await exportJWK(publicKey);
@@ -114,7 +115,7 @@ async function jwtFixture(
     .setIssuer(authApiUrl)
     .setAudience(audience)
     .setIssuedAt(issuedAt)
-    .setExpirationTime(issuedAt + (audience === authApiUrl ? 8 * 60 * 60 : 15 * 60))
+    .setExpirationTime(issuedAt + lifetimeSeconds)
     .setJti(crypto.randomUUID())
     .sign(privateKey);
   return {
@@ -140,6 +141,27 @@ describe("resource-bound JWT authentication", () => {
       }))?.sub,
       "user-1",
     );
+  });
+
+  it("accepts seven-day resource tokens and rejects them after expiry", async (t) => {
+    const authApiUrl = `https://auth-${crypto.randomUUID()}.example.test`;
+    const resource = "https://memory.allenlim.net";
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const expiresAt = issuedAt + 7 * 24 * 60 * 60;
+    const fixture = await jwtFixture(authApiUrl, resource, issuedAt, expiresAt - issuedAt);
+    t.mock.method(globalThis, "fetch", async () => Response.json(fixture.jwks));
+
+    assert.equal(
+      (await verifyJwt(authApiUrl, fixture.token, undefined, {
+        resourceAudience: resource,
+        now: new Date((expiresAt - 1) * 1000),
+      }))?.sub,
+      "user-1",
+    );
+    assert.equal(await verifyJwt(authApiUrl, fixture.token, undefined, {
+      resourceAudience: resource,
+      now: new Date((expiresAt + 61) * 1000),
+    }), null);
   });
 
   it("automatically sunsets the legacy auth-api audience", async (t) => {
@@ -193,7 +215,7 @@ describe("resource-bound JWT authentication", () => {
     );
   });
 
-  it("rejects resource tokens missing access-token claims or exceeding 15 minutes", async (t) => {
+  it("rejects resource tokens missing access-token claims or exceeding seven days", async (t) => {
     const authApiUrl = `https://auth-${crypto.randomUUID()}.example.test`;
     const resource = "https://memory.allenlim.net";
     const issuedAt = Math.floor(Date.now() / 1000);
@@ -222,7 +244,7 @@ describe("resource-bound JWT authentication", () => {
       .setIssuer(authApiUrl)
       .setAudience(resource)
       .setIssuedAt(issuedAt)
-      .setExpirationTime(issuedAt + 16 * 60)
+      .setExpirationTime(issuedAt + 7 * 24 * 60 * 60 + 1)
       .setJti(crypto.randomUUID())
       .sign(privateKey);
 

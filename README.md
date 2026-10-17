@@ -28,7 +28,7 @@ Plus integration packages:
 Current release: **3.2.1**. This release aligns Memory MCP tool metadata,
 canonical skill sources, and renewable OAuth clients. It retains the OpenClaw
 memory provider and identity-bound application partitions introduced in 3.2.0.
-Successful refreshes renew the 30-day inactivity window.
+OAuth refresh tokens have a 30-day absolute family lifetime.
 
 ## Architecture
 
@@ -50,13 +50,16 @@ memory.allenlim.net (UI Worker — TanStack Start)
 ```
 
 Auth supports Allen Labs SSO, operator-provisioned API keys, and personal
-access tokens (PATs). CLI/MCP clients send a short-lived, resource-bound RS256
+access tokens (PATs). CLI/MCP clients send a resource-bound RS256
 JWT or a `memory_pat_...` PAT as `Authorization: Bearer <credential>`, or a
-high-entropy API key as `x-memory-api-key`. Browser SSO keeps the 15-minute
-access token and rotating refresh token in separate Secure, HttpOnly,
-host-bound cookies. The UI refreshes proactively and after an eligible 401.
-Each successful refresh renews the session for another 30 days, so active
-clients stay connected; 30 days without a refresh ends the session. Browser
+high-entropy API key as `x-memory-api-key`. The worker accepts access tokens
+with lifetimes up to 7 days. The central auth issuer controls the actual
+lifetime. Browser SSO keeps the access token and rotating refresh token in
+separate Secure, HttpOnly, host-bound cookies. Access cookies and SSO expiry
+responses never exceed the JWT's remaining lifetime. The UI refreshes
+proactively and after an eligible 401.
+Refresh tokens rotate on each use and expire 30 days after the original
+authorization, including while the client remains active. Browser
 cookies are accepted only on same-origin `/api/*` requests and never on `/mcp`.
 
 API-key and PAT plaintext credentials belong in a secret manager such as
@@ -177,9 +180,9 @@ npm link --workspace allenlim-memory-server
 ```
 
 Interactive login uses OAuth with an ephemeral loopback callback, state, and
-PKCE S256. Access tokens last 15 minutes and refresh automatically. Every
-successful refresh renews the session for another 30 days; reconnect only
-after 30 days without a refresh. Credentials and every rotated refresh token
+PKCE S256. Access tokens refresh automatically before their JWT expiry.
+Refresh tokens rotate within the original 30-day family lifetime; reconnect
+when that lifetime ends. Credentials and every rotated refresh token
 are written atomically to `~/.memory/credentials.json` with owner-only
 permissions.
 

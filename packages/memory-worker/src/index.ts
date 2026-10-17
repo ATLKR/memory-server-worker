@@ -411,10 +411,11 @@ function permissionsFromSession(
     Number.isFinite(cutoffMs) &&
     Number.isFinite(issuedAtMs) &&
     issuedAtMs < cutoffMs &&
-    Date.now() <= cutoffMs + (ACCESS_TOKEN_MAX_AGE + 5 * 60) * 1000
+    Date.now() <= cutoffMs + 20 * 60 * 1000
   ) {
     // Resource-bound tokens minted immediately before the scope deployment
-    // retain historical full access only through their 15-minute lifetime.
+    // retain historical full access through the original 15-minute window
+    // plus 5 minutes of migration grace.
     return API_KEY_PERMISSIONS;
   }
   if (audience === (env.AUTH_API_URL ?? "").replace(/\/$/, "")) {
@@ -1051,7 +1052,7 @@ function createServer(
 //   5. The worker validates the state cookie (CSRF protection), exchanges
 //      the code at {AUTH_API_URL}/sso/exchange with the canonical resource.
 //      CLI callers receive the access/refresh pair. UI sessions store the
-//      15-minute access token and rotating 30-day refresh token in separate
+//      access token for up to 7 days and rotating 30-day refresh token in separate
 //      HttpOnly, host-bound cookies.
 //
 // The state cookie proves the callback originated from a legitimate
@@ -1073,7 +1074,7 @@ const LEGACY_SSO_UI_FLOW_COOKIE = "memory_sso_ui";
 const LEGACY_SESSION_COOKIE = "memory_session";
 const LEGACY_UI_TOKEN_COOKIE = "memory_token";
 const SSO_STATE_MAX_AGE = 600; // 10 minutes
-const ACCESS_TOKEN_MAX_AGE = 15 * 60;
+const ACCESS_TOKEN_MAX_AGE = 7 * 24 * 60 * 60;
 const LEGACY_SESSION_MAX_AGE = 8 * 60 * 60;
 const REFRESH_TOKEN_MAX_AGE = 30 * 24 * 60 * 60;
 const MAX_AUTH_RESPONSE_BYTES = 64 * 1024;
