@@ -175,9 +175,16 @@ describe("browser SSO session", () => {
     );
   });
 
-  it("stores access and rotating refresh tokens only in HttpOnly cookies", async (t) => {
+  it("stores seven-day access and rotating refresh tokens only in HttpOnly cookies", async (t) => {
     const authApiUrl = `https://auth-${crypto.randomUUID()}.example.test`;
-    const { token, jwks } = await sessionJwt(authApiUrl);
+    const now = Math.floor(Date.now() / 1000);
+    const { token, jwks } = await sessionJwt(
+      authApiUrl,
+      ORIGIN,
+      now - 60,
+      undefined,
+      now + 7 * 24 * 60 * 60 - 60,
+    );
     t.mock.method(globalThis, "fetch", async (input, init) => {
       if (String(input).endsWith("/.well-known/jwks.json")) {
         return Response.json(jwks);
@@ -192,9 +199,9 @@ describe("browser SSO session", () => {
       });
       return Response.json({
         token,
-        expires_in: 900,
+        expires_in: 604_800,
         refresh_token: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQ",
-        refresh_token_expires_in: 2_592_000,
+        refresh_token_expires_in: 2_592_001,
         client_id: ORIGIN,
         resource: ORIGIN,
         scope:
@@ -228,7 +235,8 @@ describe("browser SSO session", () => {
     );
     assert.ok(sessionCookie);
     assertHostCookie(sessionCookie);
-    assert.match(sessionCookie, /Max-Age=(?:89[0-9]|900)/);
+    const maxAge = Number(/Max-Age=(\d+)/.exec(sessionCookie)?.[1]);
+    assert.ok(maxAge >= 604_735 && maxAge <= 604_740, `unexpected access Max-Age ${maxAge}`);
     const refreshCookie = setCookies.find((cookie) =>
       cookie.startsWith("__Host-memory_refresh=abcdefghijklmnopqrstuvwxyz")
     );
@@ -357,13 +365,13 @@ describe("browser SSO session", () => {
     assert.match(cookies, /__Host-memory_refresh_client=.*Max-Age=2500000/);
   });
 
-  it("limits the refreshed access cookie to the JWT's actual remaining lifetime", async (t) => {
+  it("limits the refreshed seven-day access cookie to the JWT's actual remaining lifetime", async (t) => {
     const authApiUrl = `https://auth-${crypto.randomUUID()}.example.test`;
     const now = Math.floor(Date.now() / 1000);
     const { token, jwks } = await sessionJwt(
       authApiUrl,
       ORIGIN,
-      now - 850,
+      now - 7 * 24 * 60 * 60 + 50,
       "memory:read memory:write memory:delete",
       now + 50,
     );
@@ -372,7 +380,7 @@ describe("browser SSO session", () => {
       return Response.json({
         access_token: token,
         token_type: "Bearer",
-        expires_in: 900,
+        expires_in: 604_800,
         refresh_token: "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG",
         refresh_token_expires_in: 2_500_000,
         scope: "memory:read memory:write memory:delete",
