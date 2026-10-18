@@ -4,8 +4,11 @@
   "compatibility_date": "2026-09-01",
   "workers_dev": false,
   "preview_urls": false,
-  "services": [{ "binding": "MEMORY_API", "service": "memory-backend-example" }],
-  "vars": { "PUBLIC_ORIGIN": "https://memory.example.test" },
+  "services": [
+    { "binding": "MEMORY_API", "service": "memory-backend-example" },
+    { "binding": "REGIONAL_API", "service": "regional-backend-example" }
+  ],
+  "vars": { "PUBLIC_ORIGIN": "https://memory.example.test", "REGION_PREFIX": "/region-one" },
   "routes": [
     { "pattern": "memory.example.test/manage*", "zone_name": "example.test" },
     { "pattern": "memory.example.test/region-one/manage*", "zone_name": "example.test" }
