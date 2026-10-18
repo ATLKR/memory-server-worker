@@ -19,7 +19,7 @@ const until=async(predicate,message)=>{for(let i=0;i<200;i++){if(predicate())ret
 test('management response forbids native form navigation before any script runs, including billing return URLs',async t=>{
  const f=await application(t);
  for(const path of ['/manage','/manage?billing=success','/manage?billing=cancel']){
-  const response=await f.app(new Request(PUBLIC_ORIGIN+path));assert.equal(response.status,200);
+  const response=await f.app(new Request(PUBLIC_ORIGIN+path,{headers:{cookie:`${SESSION_COOKIE}=${f.token}`}}));assert.equal(response.status,200);
   const dom=new JSDOM(await response.text(),{url:PUBLIC_ORIGIN+path,runScripts:'outside-only'});t.after(()=>dom.window.close());
   const memory=dom.window.document.querySelector('#add-form'),proof=dom.window.document.querySelector('#reauth-complete');
   // These GET defaults would put memory/proof in the URL if the response CSP
@@ -34,7 +34,7 @@ test('management response forbids native form navigation before any script runs,
 });
 
 test('management script still submits memory and proof through same-origin JSON fetch without form navigation',async t=>{
- const f=await application(t),response=await f.app(new Request(PUBLIC_ORIGIN+'/manage'));
+ const f=await application(t),response=await f.app(new Request(PUBLIC_ORIGIN+'/manage',{headers:{cookie:`${SESSION_COOKIE}=${f.token}`}}));
  const dom=new JSDOM(await response.text(),{url:PUBLIC_ORIGIN+'/manage',runScripts:'outside-only',virtualConsole:new VirtualConsole()});t.after(()=>dom.window.close());
  const w=dom.window,calls=[];w.TextEncoder=TextEncoder;
  w.fetch=async(path,options={})=>{
@@ -57,4 +57,33 @@ test('management script still submits memory and proof through same-origin JSON 
  const verification=calls.find(call=>call.path==='/v1/account/reauth/complete');assert.ok(verification);assert.equal(verification.method,'POST');assert.equal(JSON.parse(verification.body).proof,'SYNTHETIC_PRIVATE_PROOF');
  assert.ok(calls.every(call=>!call.path.includes('SYNTHETIC_PRIVATE')));assert.equal(w.location.href,PUBLIC_ORIGIN+'/manage');
  assert.deepEqual(directives(response)['connect-src'],["'self'"]);
+});
+
+test('management redirects absent or invalid browser sessions without changing public routes',async t=>{
+ const f=await application(t),cookie=`${SESSION_COOKIE}=${f.token}`;
+ for(const headers of [{},{cookie:`${SESSION_COOKIE}=short`},{cookie:`${cookie}; ${cookie}`},
+  {cookie:`${SESSION_COOKIE}=${'z'.repeat(64)}`},{cookie:`${SESSION_COOKIE}=${f.key}`},{authorization:`Bearer ${f.token}`}]){
+  const response=await f.app(new Request(PUBLIC_ORIGIN+'/manage?billing=success',{headers}));
+  assert.equal(response.status,302);assert.equal(response.headers.get('location'),'/auth/login');
+  assert.equal(response.headers.get('cache-control'),'no-store');
+ }
+ assert.equal((await f.app(new Request(PUBLIC_ORIGIN+'/manage',{headers:{cookie}}))).status,200);
+ assert.equal((await f.app(new Request('https://wrong.example/manage'))).status,421);
+ assert.equal((await f.app(new Request(PUBLIC_ORIGIN+'/manage',{headers:{origin:'https://wrong.example'}}))).status,403);
+ assert.equal((await f.app(new Request(PUBLIC_ORIGIN+'/manage',{method:'POST'}))).status,405);
+ for(const path of ['/','/assets/release.js','/.well-known/oauth-protected-resource','/.well-known/oauth-protected-resource/mcp'])
+  assert.equal((await f.app(new Request(PUBLIC_ORIGIN+path))).status,200);
+ const mcp=await f.app(new Request(PUBLIC_ORIGIN+'/mcp',{method:'POST'}));
+ assert.equal(mcp.status,401);assert.match(mcp.headers.get('www-authenticate'),/resource_metadata=/);
+ f.db.raw.prepare("UPDATE credentials SET revoked_at=? WHERE id='session:alice'").run(at);
+ assert.equal((await f.app(new Request(PUBLIC_ORIGIN+'/manage',{headers:{cookie}}))).status,302);
+ f.db.raw.prepare("UPDATE credentials SET expires_at=? WHERE id='session:bob'").run(at-1);
+ assert.equal((await f.app(new Request(PUBLIC_ORIGIN+'/manage',{headers:{cookie:`${SESSION_COOKIE}=${f.other}`}}))).status,302);
+});
+
+test('management session lookup failures remain server errors',async t=>{
+ const f=await application(t),prepare=f.db.prepare.bind(f.db);
+ f.db.prepare=sql=>{if(sql.includes('LEFT JOIN account_emails'))throw new Error('Synthetic database failure');return prepare(sql);};
+ const response=await f.app(new Request(PUBLIC_ORIGIN+'/manage',{headers:{cookie:`${SESSION_COOKIE}=${f.token}`}}));
+ assert.equal(response.status,500);assert.equal(response.headers.get('location'),null);
 });

@@ -10,6 +10,7 @@ import { Jobs } from '../src/release/jobs.ts';
 import { Billing } from '../src/release/billing.ts';
 import { createRelease } from '../src/release/extension.ts';
 import { digest } from '../src/release/util.ts';
+import { SESSION_COOKIE } from '../src/auth.ts';
 import { applySql } from './apply-sql.mjs';
 
 const config = parse(readFileSync(new URL('../wrangler.jsonc', import.meta.url), 'utf8'));
@@ -315,7 +316,15 @@ try {
   assert.equal(removed.status, 204);
   const restored = await request(`${base}/${first.id}/restore`, { method: 'POST', data: { expectedRevision: 2, operationId: 'native-restore-1' } });
   assert.equal(restored.status, 200); assert.equal((await restored.json()).revision, 3);
-  assert.equal((await request('/manage')).status, 200);
+  for (const headers of [{}, { authorization: `Bearer ${key.token}` }, { cookie: `${SESSION_COOKIE}=${key.token}` }]) {
+    const denied = await mf.dispatchFetch(origin + '/manage', { redirect: 'manual', headers });
+    assert.equal(denied.status, 302);
+    assert.equal(denied.headers.get('location'), '/auth/login');
+  }
+  const management = await mf.dispatchFetch(origin + '/manage', {
+    redirect: 'manual', headers: { cookie: `${SESSION_COOKIE}=${owner.token}` },
+  });
+  assert.equal(management.status, 200);
   const readiness = await request('/ready'); assert.equal(readiness.status, 503); assert.equal((await readiness.json()).checks.schema, true);
   const mcp = await request('/mcp', { method: 'POST', data: { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }, headers: { accept: 'application/json, text/event-stream', 'mcp-protocol-version': '2025-11-25' } });
   assert.equal(mcp.status, 200); assert.match(await mcp.text(), /memory_search/);

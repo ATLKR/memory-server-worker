@@ -1,5 +1,5 @@
 import type { IdentityDatabase } from './identity.ts';
-import { digestToken, IdentityDenied, IdentityInvalid } from './identity.ts';
+import { digestToken, IdentityDenied, IdentityInvalid, IdentityService } from './identity.ts';
 import { createMemoryApi, body, json, HttpError, textField, optionalText, pathIdentifier, requireMethod } from './api.ts';
 import { MemoryService, MemoryInvalid, MemoryDenied, MemoryConflict } from './memory.ts';
 import { WorkspaceService, WorkspaceError } from './workspace.ts';
@@ -62,6 +62,15 @@ export function createApplication(db: IdentityDatabase, settings: Settings, opti
     const url = new URL(request.url);
     if (url.origin !== settings.origin) throw new HttpError(421, 'invalid_host');
     if (request.headers.has('origin') && request.headers.get('origin') !== settings.origin) throw new HttpError(403, 'origin_denied');
+    if (url.pathname === '/manage' && request.method === 'GET') {
+      const token = cookieToken(request);
+      if (!token) return new Response(null, { status: 302, headers: { Location: '/auth/login' } });
+      try { await new IdentityService(db, clock).getAccount(token); }
+      catch (error) {
+        if (!(error instanceof IdentityDenied)) throw error;
+        return new Response(null, { status: 302, headers: { Location: '/auth/login' } });
+      }
+    }
     const publicResponse = await options.release?.publicRoute(request);
     if (publicResponse) return publicResponse;
     if (['/', '/assets/app.js', '/assets/app.css', '/health', '/.well-known/oauth-protected-resource', '/.well-known/oauth-protected-resource/mcp'].includes(url.pathname)) requireMethod(request, 'GET');
