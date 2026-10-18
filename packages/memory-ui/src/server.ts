@@ -12,6 +12,7 @@ export interface UiEnv {
   CF_VERSION_METADATA: WorkerVersionMetadata;
   AUTH_WEB_URL: string;
   AUTH_API_URL: string;
+  MEMORY_RESOURCE_URL?: string;
 }
 
 const PROXY_PREFIXES = [
@@ -133,8 +134,44 @@ export default {
     const url = new URL(request.url);
     const currentRequestId = requestId(request);
     const version = env.CF_VERSION_METADATA?.tag || env.CF_VERSION_METADATA?.id;
+    const proxy = shouldProxy(url.pathname);
+    const uiSsoStart = request.method === "GET"
+      && url.pathname === "/auth/sso" && url.searchParams.get("ui") === "1";
+    let canonicalResponse: Response | undefined;
 
-    if (shouldProxy(url.pathname)) {
+    if (request.method === "GET" && (!proxy || uiSsoStart)
+      && env.MEMORY_RESOURCE_URL !== undefined) {
+      try {
+        const canonical = new URL(env.MEMORY_RESOURCE_URL);
+        if (canonical.protocol !== "https:"
+          || (env.MEMORY_RESOURCE_URL !== canonical.origin
+            && env.MEMORY_RESOURCE_URL !== `${canonical.origin}/`)) {
+          throw new Error("Invalid canonical origin");
+        }
+        if (url.origin !== canonical.origin) {
+          canonical.pathname = url.pathname;
+          canonical.search = url.search;
+          canonicalResponse = new Response(null, {
+            status: 302,
+            headers: { location: canonical.href },
+          });
+        }
+      } catch {
+        canonicalResponse = Response.json(
+          { error: "Service temporarily unavailable" }, { status: 503 },
+        );
+      }
+      if (canonicalResponse) {
+        canonicalResponse = withHeaders(canonicalResponse, {
+          "cache-control": "no-store",
+          "x-request-id": currentRequestId,
+          ...(version ? { "x-worker-version": version } : {}),
+        });
+      }
+    }
+
+    if (proxy) {
+      if (uiSsoStart && canonicalResponse) return canonicalResponse;
       if (!env.MEMORY_API) {
         console.error(JSON.stringify({
           level: "error",
@@ -167,6 +204,19 @@ export default {
     const contentType = rendered.headers.get("content-type") ?? "";
     const isHtml = contentType.toLowerCase().includes("text/html");
     const isFingerprintAsset = url.pathname.startsWith("/assets/");
+
+    if (isHtml && canonicalResponse) {
+      void rendered.body?.cancel().catch(() => {});
+      const headers = new Headers(rendered.headers);
+      headers.delete("content-length");
+      headers.delete("content-encoding");
+      headers.delete("content-type");
+      for (const [name, value] of canonicalResponse.headers) headers.set(name, value);
+      return new Response(canonicalResponse.body, {
+        status: canonicalResponse.status,
+        headers,
+      });
+    }
 
     const secured = withHeaders(rendered, {
       "x-request-id": currentRequestId,
