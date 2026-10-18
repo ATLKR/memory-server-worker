@@ -5,6 +5,7 @@ import { fixture, at } from './db.mjs';
 import { createApplication } from '../../src/app.ts';
 import { createRelease } from '../../src/release/extension.ts';
 import { readSettings } from '../../src/config.ts';
+import { SESSION_COOKIE } from '../../src/auth.ts';
 import { appScript } from '../../src/ui.ts';
 import { managementScript } from '../../src/release/console.ts';
 import * as managementUi from '../../src/release/console.ts';
@@ -23,7 +24,9 @@ async function browser(t, path, setup, variables = {}) {
   f.db.raw.exec("UPDATE memberships SET role='admin' WHERE id='m2'");
   const settings = readSettings(variables), env = { DB: f.db, PUBLIC_ORIGIN: settings.origin, ...variables };
   const app = createApplication(f.db, settings, { clock: () => at, release: createRelease(env, { clock: () => at, identity: new IdentityService(f.db, () => at) }) });
-  const html = await (await app(new Request(settings.origin + path))).text();
+  const response = await app(new Request(settings.origin + path, { headers: { cookie: `${SESSION_COOKIE}=${f.token}` } }));
+  assert.equal(response.status, 200);
+  const html = await response.text();
   const dom = new JSDOM(html, { url: settings.origin + path, runScripts: 'outside-only' });
   const w = dom.window, active = new Set(), calls = [];
   let token = f.token, responseInterceptor, requestInterceptor;
@@ -33,7 +36,7 @@ async function browser(t, path, setup, variables = {}) {
   w.HTMLDialogElement.prototype.close = function () { this.open = false; this.dispatchEvent(new w.Event('close')); };
   w.fetch = (url, init = {}) => {
     const headers = new Headers(init.headers);
-    headers.set('cookie', '__Host-memory_session=' + token);
+    headers.set('cookie', `${SESSION_COOKIE}=${token}`);
     if (!['GET', 'HEAD'].includes(init.method ?? 'GET')) headers.set('origin', settings.origin);
     const request = new Request(settings.origin + url, { ...init, headers });
     const operation = (requestInterceptor ? Promise.resolve().then(() => requestInterceptor(url, init)).then(() => app(request)) : app(request)).then(response => {
@@ -992,7 +995,8 @@ test('a lost share response is recovered after page reload and its original gran
  f.byId('share-form').elements.email.value='bob@example.com';f.submit('share-form');await f.settle();
  const stored=f.db.raw.prepare('SELECT id FROM release_shares').all();assert.equal(stored.length,1);assert.equal(f.calls.filter(c=>c.path==='/v1/spaces/s1/shares'&&c.method==='POST').length,1);
  assert.match(f.byId('status').textContent,/확인|알 수 없/);assert.match(f.byId('status').textContent,/보낸 공유/);
- const html=await(await f.app(new Request(f.settings.origin+'/manage'))).text(),dom=new JSDOM(html,{url:f.settings.origin+'/manage',runScripts:'outside-only'}),w=dom.window;t.after(()=>dom.window.close());
+ const response=await f.app(new Request(f.settings.origin+'/manage',{headers:{cookie:`${SESSION_COOKIE}=${f.token}`}}));assert.equal(response.status,200);
+ const html=await response.text(),dom=new JSDOM(html,{url:f.settings.origin+'/manage',runScripts:'outside-only'}),w=dom.window;t.after(()=>dom.window.close());
  w.fetch=f.w.fetch;w.TextEncoder=TextEncoder;w.confirm=()=>true;w.eval(managementScript);await f.settle();
  const byId=id=>w.document.getElementById(id);assert.equal(byId('receipt-list').children.length,0);
  byId('outbound-shares-refresh').click();await f.settle();assert.match(byId('outbound-shares').textContent,new RegExp(stored[0].id));

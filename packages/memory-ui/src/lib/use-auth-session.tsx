@@ -36,6 +36,7 @@ interface AuthSessionProviderProps {
   initialSession: AuthSession;
   sessionLoader?: typeof refreshSession;
   logoutAction?: typeof logout;
+  signInAction?: () => void;
 }
 
 const AuthSessionContext = createContext<AuthSessionState | null>(null);
@@ -43,6 +44,10 @@ const SESSION_REFRESH_SKEW_MS = 2 * 60 * 1000;
 const LEGACY_SESSION_REFRESH_INTERVAL_MS = 12 * 60 * 1000;
 const MAX_BROWSER_TIMEOUT_MS = 2_147_000_000;
 const TRANSIENT_REFRESH_RETRY_MS = 30 * 1000;
+
+function signIn(): void {
+  window.location.replace("/auth/sso?ui=1");
+}
 
 export function sessionRefreshDelay(
   session: AuthSession,
@@ -64,6 +69,7 @@ export function AuthSessionProvider({
   initialSession,
   sessionLoader = refreshSession,
   logoutAction = logout,
+  signInAction = signIn,
 }: AuthSessionProviderProps) {
   const [session, setSession] = useState(initialSession);
   const [refreshing, setRefreshing] = useState(false);
@@ -101,6 +107,10 @@ export function AuthSessionProvider({
       const nextSession = await pending;
       if (mounted.current && generation === refreshGeneration.current) {
         setSession(nextSession);
+        if (!nextSession.authenticated && !invalidatedRef.current && !signingOutRef.current) {
+          invalidatedRef.current = true;
+          signInAction();
+        }
       }
     } catch (cause) {
       if (!controller.signal.aborted && mounted.current) {
@@ -117,7 +127,7 @@ export function AuthSessionProvider({
         if (mounted.current) setRefreshing(false);
       }
     }
-  }, [sessionLoader]);
+  }, [sessionLoader, signInAction]);
 
   const signOut = useCallback(async () => {
     if (signingOutRef.current) return false;
@@ -156,6 +166,7 @@ export function AuthSessionProvider({
     mounted.current = true;
     clearLegacyClientCredentials();
     const invalidate = () => {
+      const shouldSignIn = !invalidatedRef.current && !signingOutRef.current;
       invalidatedRef.current = true;
       if (retryTimer.current !== null) {
         window.clearTimeout(retryTimer.current);
@@ -169,6 +180,7 @@ export function AuthSessionProvider({
       setSession(ANONYMOUS_SESSION);
       setRefreshing(false);
       setSigningOut(false);
+      if (shouldSignIn) signInAction();
     };
     const revalidateRestoredPage = (event: PageTransitionEvent) => {
       if (event.persisted) void refresh();
@@ -191,7 +203,7 @@ export function AuthSessionProvider({
       window.removeEventListener("focus", refreshActivePage);
       document.removeEventListener("visibilitychange", refreshActivePage);
     };
-  }, [refresh]);
+  }, [refresh, signInAction]);
 
   useEffect(() => {
     if (!session.authenticated) {

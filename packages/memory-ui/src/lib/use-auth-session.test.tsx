@@ -1,7 +1,7 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
-import { AUTH_INVALIDATED_EVENT, type AuthSession } from "./api";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { ANONYMOUS_SESSION, AUTH_INVALIDATED_EVENT, type AuthSession } from "./api";
 import {
   AuthSessionProvider,
   sessionRefreshDelay,
@@ -31,6 +31,86 @@ function SessionHarness() {
 }
 
 describe("AuthSessionProvider", () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it("starts SSO once after the real initial refresh confirms an invalid session", async () => {
+    const signInAction = vi.fn();
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 401 }));
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <AuthSessionProvider initialSession={ANONYMOUS_SESSION} signInAction={signInAction}>
+        <SessionHarness />
+      </AuthSessionProvider>,
+    );
+
+    await waitFor(() => expect(signInAction).toHaveBeenCalledOnce());
+    expect(fetchMock).toHaveBeenCalledWith("/auth/refresh", expect.objectContaining({ method: "POST" }));
+    act(() => window.dispatchEvent(new Event(AUTH_INVALIDATED_EVENT)));
+    expect(signInAction).toHaveBeenCalledOnce();
+  });
+
+  it("recovers an expired access session before deciding whether to start SSO", async () => {
+    const signInAction = vi.fn();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json(SESSION)));
+    render(
+      <AuthSessionProvider initialSession={ANONYMOUS_SESSION} signInAction={signInAction}>
+        <SessionHarness />
+      </AuthSessionProvider>,
+    );
+
+    expect(await screen.findByText("Memory User")).toBeInTheDocument();
+    expect(signInAction).not.toHaveBeenCalled();
+  });
+
+  it("keeps a transient refresh failure retryable without starting SSO", async () => {
+    const signInAction = vi.fn();
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(Response.json({ error: "temporarily unavailable" }, { status: 503 })));
+    render(
+      <AuthSessionProvider initialSession={ANONYMOUS_SESSION} signInAction={signInAction}>
+        <SessionHarness />
+      </AuthSessionProvider>,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("temporarily unavailable");
+    expect(signInAction).not.toHaveBeenCalled();
+  });
+
+  it("ignores a refresh invalidation after the provider unmounts", async () => {
+    let resolveResponse!: (response: Response) => void;
+    const signInAction = vi.fn();
+    vi.stubGlobal("fetch", vi.fn(() => new Promise<Response>(resolve => { resolveResponse = resolve; })));
+    const view = render(
+      <AuthSessionProvider initialSession={ANONYMOUS_SESSION} signInAction={signInAction}>
+        <SessionHarness />
+      </AuthSessionProvider>,
+    );
+
+    view.unmount();
+    await act(async () => resolveResponse(new Response(null, { status: 401 })));
+    expect(signInAction).not.toHaveBeenCalled();
+  });
+
+  it("does not restart SSO when a pending real refresh fails during explicit logout", async () => {
+    let resolveResponse!: (response: Response) => void;
+    const signInAction = vi.fn();
+    const logoutAction = vi.fn().mockResolvedValue(undefined);
+    const fetchMock = vi.fn(() => new Promise<Response>(resolve => { resolveResponse = resolve; }));
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+    render(
+      <AuthSessionProvider initialSession={SESSION} signInAction={signInAction} logoutAction={logoutAction}>
+        <SessionHarness />
+      </AuthSessionProvider>,
+    );
+
+    act(() => window.dispatchEvent(new PageTransitionEvent("pageshow", { persisted: true })));
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledOnce());
+    await user.click(screen.getByRole("button", { name: "Sign out" }));
+    await act(async () => resolveResponse(new Response(null, { status: 401 })));
+    await waitFor(() => expect(logoutAction).toHaveBeenCalledOnce());
+    expect(signInAction).not.toHaveBeenCalled();
+  });
+
   it("schedules refresh two minutes before access-token expiry", () => {
     expect(sessionRefreshDelay(
       { ...SESSION, expiresAt: "2026-08-13T01:45:00.000Z" },
@@ -74,14 +154,16 @@ describe("AuthSessionProvider", () => {
   });
 
   it("becomes anonymous when any API call reports an invalid session", async () => {
+    const signInAction = vi.fn();
     render(
-      <AuthSessionProvider initialSession={SESSION}>
+      <AuthSessionProvider initialSession={SESSION} signInAction={signInAction}>
         <SessionHarness />
       </AuthSessionProvider>,
     );
 
     window.dispatchEvent(new Event(AUTH_INVALIDATED_EVENT));
     await waitFor(() => expect(screen.getByText("Signed out")).toBeInTheDocument());
+    expect(signInAction).toHaveBeenCalledOnce();
   });
 
   it("deduplicates overlapping refresh triggers without rotating twice", async () => {
