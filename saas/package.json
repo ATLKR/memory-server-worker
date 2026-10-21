@@ -44,7 +44,7 @@
     "wrangler": "4.129.1"
   },
   "dependencies": {
-    "@modelcontextprotocol/server": "2.0.0",
+    "@modelcontextprotocol/server": "2.3.0",
     "hono": "4.13.7",
     "jose": "6.2.12",
     "pg": "8.23.0",
