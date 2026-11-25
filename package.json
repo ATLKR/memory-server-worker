@@ -25,7 +25,7 @@
     "types": "npm -w memory-worker run types"
   },
   "devDependencies": {
-    "tsx": "^4.23.13"
+    "tsx": "^4.23.15"
   },
   "overrides": {
     "hono": "4.13.7",
